@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.arlint.quaked</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/austinarlint/Applications/Quaked.app/Contents/MacOS/quaked</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart after a crash, but not after a clean exit (e.g. another copy already running). -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>StandardOutPath</key>
+  <string>/Users/austinarlint/Library/Logs/quaked.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/austinarlint/Library/Logs/quaked.log</string>
+</dict>
+</plist>

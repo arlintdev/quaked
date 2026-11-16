@@ -1,0 +1,23 @@
+[package]
+name = "quaked"
+version = "0.1.0"
+edition = "2021"
+description = "Drives the DECOKEE Quake desk screen directly: a Claude Code status board, touch, knob and buzzer."
+publish = false
+
+[dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+tiny-skia = "0.11"
+fontdue = "0.9"
+hidapi = { version = "2.6", default-features = false, features = ["macos-shared-device"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSGeometry"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
