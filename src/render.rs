@@ -66,6 +66,38 @@ pub enum Hit {
     Setting(usize, Option<f32>),
     /// A dashboard tile: go to that page.
     Pane(Page),
+    /// A card in Claude's question (options, then Done for multi-select, then "Answer in Claude").
+    AskCard(usize),
+}
+
+/// Claude's current question on the board.
+pub struct AskView<'a> {
+    pub session: &'a str,
+    pub machine: &'a str,
+    pub header: &'a str,
+    pub question: &'a str,
+    /// (label, description)
+    pub options: &'a [(String, String)],
+    pub picked: &'a [bool],
+    pub multi: bool,
+    pub sel: usize,
+    /// Which question of how many (Claude can ask up to four at once).
+    pub index: usize,
+    pub count: usize,
+    pub secs_left: u64,
+    /// More questions waiting after this one (from other sessions).
+    pub queued: usize,
+}
+
+/// Cards on screen: the options, Done (multi-select), then "Answer in Claude".
+pub fn ask_cards(options: usize, multi: bool) -> usize {
+    options + usize::from(multi) + 1
+}
+
+fn ask_card_rect(i: usize, n: usize) -> R {
+    let top = 188.0;
+    let w = (W - 2.0 * M - (n as f32 - 1.0) * G) / n as f32;
+    (M + i as f32 * (w + G), top, w, H - top - 40.0)
 }
 
 /// What the SETTINGS page shows.
@@ -107,6 +139,8 @@ pub struct View<'a> {
     pub ring: &'a crate::config::Ring,
     /// Recent samples for the dashboard's graphs.
     pub history: &'a History,
+    /// A question from Claude, shown over everything.
+    pub ask: Option<AskView<'a>>,
     pub level: &'a Level,
     pub sessions: &'a [Session],
     pub sel: usize,
@@ -895,6 +929,10 @@ fn volume_hit() -> R {
 
 pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
     let (x, y) = (x as f32, y as f32);
+    if let Some(a) = &v.ask {
+        let n = ask_cards(a.options.len(), a.multi);
+        return (0..n).find(|&i| inside(ask_card_rect(i, n), x, y)).map(Hit::AskCard);
+    }
     for p in v.pages {
         if inside(tab_rect(v.pages, *p), x, y) {
             return Some(Hit::Tab(*p));
@@ -1021,6 +1059,10 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
             pr_rect(panel, (i - offset).checked_sub(first)?)
         }
         Hit::Setting(i, _) => setting_rect(i),
+        Hit::AskCard(i) => {
+            let a = v.ask.as_ref()?;
+            ask_card_rect(i, ask_cards(a.options.len(), a.multi))
+        }
         Hit::Pane(p) => {
             let tiles = dash_pages(v.pages);
             dash_rect(tiles.iter().position(|t| *t == p)?, tiles.len())
@@ -1042,6 +1084,13 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
 
 pub fn draw(c: &mut Canvas, v: &View) {
     c.pixmap.fill(rgb(BG));
+    if let Some(a) = &v.ask {
+        ask_overlay(c, v, a);
+        if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
+            c.rrect(r, 16.0, 0xFFFFFF, 0.22);
+        }
+        return;
+    }
     top_bar(c, v);
     match (v.page, v.level) {
         (Page::Ai, Level::Detail(id)) => match v.sessions.iter().find(|s| &s.id == id) {
@@ -1277,13 +1326,19 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
     }
 
     let mut cy = y + 98.0;
-    if !s.prompt.is_empty() {
+    let prompt = crate::status::typed_prompt(&s.prompt);
+    if !prompt.is_empty() {
         c.text(F::Bold, "›", 18.0, ix, cy, FAINT, Align::Left);
-        cy += c.paragraph(F::Regular, &s.prompt, 17.0, ix + 14.0, cy, iw - 14.0, 2, 22.0, TEXT_2);
+        cy += c.paragraph(F::Regular, &prompt, 17.0, ix + 14.0, cy, iw - 14.0, 2, 22.0, TEXT_2);
     }
     if waiting && !s.notice.is_empty() {
         cy += 6.0;
         cy += c.paragraph(F::Bold, &s.notice, 17.0, ix, cy, iw, 2, 22.0, AMBER);
+    } else if s.state == State::Working && !s.comment.is_empty() {
+        // What Claude is saying as it works.
+        cy += 6.0;
+        c.symbol("sparkle", 13.0, ix + 6.0, cy - 6.0, ORANGE);
+        cy += c.paragraph(F::Medium, &s.comment, 16.0, ix + 18.0, cy, iw - 18.0, 3, 21.0, 0xF0C9B2);
     } else if matches!(s.state, State::Done | State::Idle) && !s.last_message.is_empty() {
         cy += 6.0;
         cy += c.paragraph(F::Regular, &s.last_message, 16.0, ix, cy, iw, 3, 21.0, 0x9FD9B5);
@@ -1323,11 +1378,14 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
     let mut cy = y + 144.0;
     c.text(F::Bold, "PROMPT", 12.0, ix, cy, FAINT, Align::Left);
     cy += 22.0;
-    let prompt = if s.prompt.is_empty() { "—" } else { s.prompt.as_str() };
+    let typed = crate::status::typed_prompt(&s.prompt);
+    let prompt = if typed.is_empty() { "—" } else { typed.as_str() };
     cy += c.paragraph(F::Regular, prompt, 18.0, ix, cy, iw, 4, 23.0, TEXT_2);
     cy += 12.0;
     let (label, body, col) = if waiting && !s.notice.is_empty() {
         ("NEEDS YOU", s.notice.as_str(), AMBER)
+    } else if s.state == State::Working && !s.comment.is_empty() {
+        ("CLAUDE IS SAYING", s.comment.as_str(), 0xF0C9B2)
     } else if !s.last_message.is_empty() {
         let label = if s.state == State::Working { "LAST REPLY" } else { "CLAUDE" };
         (label, s.last_message.as_str(), if s.state == State::Working { TEXT_2 } else { 0x9FD9B5 })
@@ -2432,6 +2490,11 @@ fn dash_ai(c: &mut Canvas, v: &View, r: R, b: &Brief) {
         cx += chip(c, cx, y + 37.0, st.accent, &label, bg, if s.state == State::Idle { MUTED } else { TEXT }, 180.0) + 6.0;
         shown += 1;
     }
+    // The newest thing a working session said.
+    if let Some(s) = v.sessions.iter().filter(|s| s.state == State::Working && !s.comment.is_empty()).max_by_key(|s| s.updated_at) {
+        c.symbol("sparkle", 12.0, x + 6.0, y + 78.0, ORANGE);
+        c.clip(F::Medium, &s.comment, 14.0, w - 20.0, x + 18.0, y + 83.0, 0xF0C9B2);
+    }
     // Activity: steps per 30 s over the last 20 minutes.
     let gr = (x, y + h - 46.0, w, 40.0);
     let steps: Vec<f32> = v.history.ai_steps.iter().copied().collect();
@@ -2722,6 +2785,82 @@ fn dash_code(c: &mut Canvas, v: &View, r: R, accent: u32, b: &Brief) {
         (format!("{} approved", g.mine.iter().filter(|p| p.review == "APPROVED").count()), MUTED)
     };
     c.clip(F::Medium, &foot.0, 14.0, w, x, y + h - 6.0, foot.1);
+}
+
+// ---------------------------------------------------------------- Claude's questions
+
+fn ask_overlay(c: &mut Canvas, v: &View, a: &AskView) {
+    // Who's asking, and how long you have.
+    c.symbol("sparkles", 22.0, M + 16.0, 30.0, ORANGE);
+    let mut x = M + 36.0;
+    x += c.text(F::Bold, "Claude asks", 20.0, x, 37.0, AMBER, Align::Left) + 16.0;
+    x += c.fit(F::Bold, a.session, 20.0, 420.0, x, 37.0, TEXT, Align::Left) + 14.0;
+    if !a.machine.is_empty() {
+        c.symbol("laptopcomputer", 16.0, x + 9.0, 31.0, 0x8AB4F8);
+        c.fit(F::Medium, a.machine, 17.0, 260.0, x + 24.0, 37.0, 0x8AB4F8, Align::Left);
+    }
+    let mut rx = W - M;
+    rx -= c.text(F::Mono, &mmss(a.secs_left as f64), 20.0, rx, 37.0, if a.secs_left <= 15 { RED } else { MUTED }, Align::Right) + 18.0;
+    if a.count > 1 {
+        rx -= c.text(F::Medium, &format!("question {} of {}", a.index + 1, a.count), 17.0, rx, 37.0, TEXT_2, Align::Right) + 18.0;
+    }
+    if a.queued > 0 {
+        c.text(F::Medium, &format!("+{} waiting", a.queued), 17.0, rx, 37.0, AMBER, Align::Right);
+    }
+    // The question.
+    let mut qy = 92.0;
+    if !a.header.is_empty() {
+        let pw = c.pill(M, 60.0, &a.header.to_uppercase(), 13.0, 0x3A2C08, AMBER);
+        let _ = pw;
+        qy = 110.0;
+    }
+    c.paragraph(F::Bold, a.question, 32.0, M, qy, W - 2.0 * M, 2, 38.0, TEXT);
+    if a.multi {
+        c.text(F::Medium, "pick any, then Done", 15.0, W - M, 76.0, MUTED, Align::Right);
+    }
+    // The cards.
+    let n = ask_cards(a.options.len(), a.multi);
+    let done = if a.multi { Some(a.options.len()) } else { None };
+    for i in 0..n {
+        let r = ask_card_rect(i, n);
+        let (x, y, w, _) = r;
+        let sel = i == a.sel;
+        c.rrect(r, 16.0, if sel { 0x2B2412 } else { PANEL }, 1.0);
+        if sel {
+            c.outline(r, 16.0, AMBER, 4.0);
+        }
+        let ix = x + 22.0;
+        let iw = w - 44.0;
+        if i < a.options.len() {
+            let (label, desc) = &a.options[i];
+            c.circle(ix + 14.0, y + 32.0, 14.0, if sel { AMBER } else { 0x2A2A31 }, 1.0);
+            c.text(F::Bold, &(i + 1).to_string(), 15.0, ix + 14.0, y + 38.0, if sel { 0x1C1500 } else { MUTED }, Align::Center);
+            if a.multi {
+                let on = a.picked.get(i).copied().unwrap_or(false);
+                let bx = (x + w - 50.0, y + 16.0, 30.0, 30.0);
+                if on {
+                    c.rrect(bx, 8.0, GREEN, 1.0);
+                    c.symbol("checkmark", 16.0, bx.0 + 15.0, bx.1 + 15.0, 0xFFFFFF);
+                } else {
+                    c.outline(bx, 8.0, FAINT, 2.0);
+                }
+            }
+            let ly = y + 98.0;
+            let used = c.paragraph(F::Bold, label, 34.0, ix, ly, iw, 2, 40.0, if sel { TEXT } else { TEXT_2 });
+            c.paragraph(F::Medium, desc, 18.0, ix, ly + used + 10.0, iw, 4, 24.0, MUTED);
+        } else if Some(i) == done {
+            let picked = a.picked.iter().filter(|p| **p).count();
+            c.symbol("checkmark.circle.fill", 40.0, x + w / 2.0, y + 80.0, if picked > 0 { GREEN } else { FAINT });
+            c.text(F::Bold, "Done", 26.0, x + w / 2.0, y + 150.0, if picked > 0 { TEXT } else { MUTED }, Align::Center);
+            c.text(F::Medium, &format!("send {picked} picked"), 16.0, x + w / 2.0, y + 176.0, MUTED, Align::Center);
+        } else {
+            c.symbol("macwindow", 36.0, x + w / 2.0, y + 80.0, if sel { TEXT_2 } else { FAINT });
+            c.text(F::Bold, "Answer in Claude", 22.0, x + w / 2.0, y + 150.0, if sel { TEXT } else { MUTED }, Align::Center);
+            c.text(F::Medium, "ask me on the Mac", 15.0, x + w / 2.0, y + 176.0, FAINT, Align::Center);
+        }
+    }
+    let _ = v;
+    c.text(F::Medium, "turn  choose     ·     press  answer     ·     double-click  answer in Claude", 15.0, W / 2.0, H - 14.0, FAINT, Align::Center);
 }
 
 // ---------------------------------------------------------------- SETTINGS

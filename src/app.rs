@@ -77,8 +77,24 @@ pub enum Event {
     PeerConfig(String, String),
     /// A Mac asks to pair; answer true to give it the key.
     PairRequest(String, Sender<bool>),
+    /// Chosen from the menu bar icon's menu.
+    Menu(crate::menubar::Action),
     /// A control-socket request and where to send the reply.
     Ctl(String, Sender<Vec<u8>>),
+}
+
+/// A multiple-choice question from Claude, shown over everything until you answer.
+struct Ask {
+    session: String,
+    machine: String,
+    /// (question, header, options as (label, description), multi-select)
+    questions: Vec<(String, String, Vec<(String, String)>, bool)>,
+    at: usize,
+    sel: usize,
+    picked: Vec<bool>,
+    answers: serde_json::Map<String, serde_json::Value>,
+    reply: Sender<Vec<u8>>,
+    until: Instant,
 }
 
 /// A Mac waiting for you to allow pairing (on the board or the settings page).
@@ -135,6 +151,9 @@ struct App {
     history: render::History,
     ai_total: Option<u64>,
     next_ai_sample: Instant,
+    menubar: Option<crate::menubar::MenuBar>,
+    proxy: winit::event_loop::EventLoopProxy<Event>,
+    asks: std::collections::VecDeque<Ask>,
     // AI
     sessions: Vec<Session>,
     states: HashMap<String, State>,
@@ -322,6 +341,23 @@ impl App {
             },
             ring: &self.cfg.ring,
             history: &self.history,
+            ask: self.asks.front().and_then(|a| {
+                let (question, header, options, multi) = a.questions.get(a.at)?;
+                Some(render::AskView {
+                    session: &a.session,
+                    machine: &a.machine,
+                    header,
+                    question,
+                    options,
+                    picked: &a.picked,
+                    multi: *multi,
+                    sel: a.sel,
+                    index: a.at,
+                    count: a.questions.len(),
+                    secs_left: a.until.saturating_duration_since(Instant::now()).as_secs(),
+                    queued: self.asks.len() - 1,
+                })
+            }),
             level: &self.level,
             sessions: &self.sessions,
             sel: self.sel,
@@ -369,6 +405,7 @@ impl App {
     fn animating(&self) -> bool {
         match (self.page, &self.level) {
             (PageId::Music, _) => self.track.as_ref().is_some_and(|t| t.playing),
+            _ if !self.asks.is_empty() => true, // the countdown
             (PageId::Dash, _) => self.track.as_ref().is_some_and(|t| t.playing) || self.sessions.iter().any(|s| s.state == State::Working),
             (PageId::Ai, Level::Detail(_)) => true,
             (PageId::Ai, _) => self.sessions.iter().any(|s| s.steps.last().is_some_and(|st| st.status == status::StepStatus::Running)),
@@ -461,6 +498,9 @@ impl App {
         } else if self.league.phase == "ReadyCheck" {
             let (hue, sat) = config::hue_sat(config::hex(&r.league, 0xC89B3C));
             Command::Ring { effect: proto::EFFECT_BREATHING, hue, sat, brightness: r.brightness.max(180), speed: 220 }
+        } else if !self.asks.is_empty() {
+            let (hue, sat) = config::hue_sat(config::hex(&r.alert_color, 0xF2B705));
+            Command::Ring { effect: proto::EFFECT_BREATHING, hue, sat, brightness: r.brightness.max(180), speed: 220 }
         } else if let Some(a) = self.attention.as_ref().filter(|_| self.cfg.alerts.blink) {
             let (hue, sat) = config::hue_sat(config::hex(r.color_for(a.page), 0xF2B705));
             let brightness = if self.blink_on { r.brightness.max(160) } else { 0 };
@@ -490,6 +530,12 @@ impl App {
             }));
         }
         sessions.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)));
+        // Sessions done or idle for a while drop off (never ones working or waiting on you).
+        if self.cfg.session_idle_minutes > 0 {
+            let limit = self.cfg.session_idle_minutes * 60_000;
+            let now = status::now_ms();
+            sessions.retain(|s| !matches!(s.state, State::Done | State::Idle) || now.saturating_sub(s.since) <= limit);
+        }
         let states: HashMap<String, State> = sessions.iter().map(|s| (s.id.clone(), s.state)).collect();
         let chirp = self.loaded_once
             && states.iter().any(|(id, st)| *st == State::Waiting && self.states.get(id) != Some(&State::Waiting));
@@ -577,6 +623,233 @@ impl App {
             0 => None,
             1 => news.pop(),
             _ => Some(format!("{}  (+{} more)", news[0], n - 1)),
+        }
+    }
+
+    // ------------------------------------------------------------ menu bar
+
+    /// Shows, hides and refreshes the menu bar icon (it only redraws when something changed).
+    fn refresh_menubar(&mut self) {
+        if !self.cfg.menu_bar {
+            self.menubar = None;
+            return;
+        }
+        if self.menubar.is_none() {
+            let proxy = Mutex::new(self.proxy.clone());
+            self.menubar = crate::menubar::MenuBar::new(move |a| {
+                let _ = proxy.lock().unwrap().send_event(Event::Menu(a));
+            });
+        }
+        let model = self.menu_model();
+        if let Some(m) = &mut self.menubar {
+            m.update(&model);
+        }
+    }
+
+    fn menu_model(&self) -> crate::menubar::Model {
+        let count = |st: State| self.sessions.iter().filter(|s| s.state == st).count();
+        let (waiting, working) = (count(State::Waiting), count(State::Working));
+        let remote = self.peers.peers.iter().find(|p| p.ok && p.board);
+        let mut lines = vec![match (self.connected, remote) {
+            (true, _) => "Quake connected to this Mac".to_string(),
+            (false, Some(p)) => format!("Quake connected to {}", p.name),
+            (false, None) => "Quake not connected".to_string(),
+        }];
+        lines.push(if self.sessions.is_empty() {
+            "No Claude sessions".to_string()
+        } else if waiting > 0 {
+            format!("Claude: {waiting} need{} you · {working} working", if waiting == 1 { "s" } else { "" })
+        } else {
+            format!("Claude: {working} working · {} sessions", self.sessions.len())
+        });
+        if let Some(s) = self.sessions.iter().filter(|s| s.state == State::Working && !s.comment.is_empty()).max_by_key(|s| s.updated_at) {
+            let said: String = s.comment.chars().take(80).collect();
+            lines.push(format!("{}: {}{}", s.name, said, if s.comment.chars().count() > 80 { "…" } else { "" }));
+        }
+        if let Some(t) = self.track.as_ref().filter(|t| t.playing) {
+            lines.push(format!("Playing: {} — {}", t.title, t.artist));
+        }
+        let paired: Vec<&str> = self.peers.peers.iter().filter(|p| p.ok).map(|p| p.name.as_str()).collect();
+        if !paired.is_empty() {
+            lines.push(format!("Paired with {}", paired.join(", ")));
+        }
+        crate::menubar::Model {
+            board: self.connected || remote.is_some(),
+            waiting,
+            lines,
+            pair: self.pair_ask.as_ref().map(|a| a.name.clone()),
+            pages: if self.connected { self.cfg.pages.iter().map(|p| (p.title().to_string(), *p == self.page)).collect() } else { Vec::new() },
+        }
+    }
+
+    fn on_menu(&mut self, action: crate::menubar::Action) {
+        use crate::menubar::Action;
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        let service = format!("gui/{}/dev.arlint.quaked", unsafe { getuid() });
+        match action {
+            Action::Settings => open_target(&crate::web::url()),
+            Action::Restart => {
+                device::log("menu: restart");
+                let mut c = std::process::Command::new("/bin/launchctl");
+                c.args(["kickstart", "-k", &service]);
+                spawn_detached(c);
+            }
+            Action::Quit => {
+                // Stops it until the next login (launchd would restart a plain exit... only
+                // on failure, but bootout also keeps it from coming back right away).
+                device::log("menu: quit");
+                let mut c = std::process::Command::new("/bin/launchctl");
+                c.args(["bootout", &service]);
+                spawn_detached(c);
+            }
+            Action::Pair(allow) => self.answer_pair(allow),
+            Action::Page(i) => {
+                if let Some(p) = self.cfg.pages.get(i).copied() {
+                    self.last_input = Instant::now();
+                    self.set_page(p);
+                    self.redraw();
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ Claude's questions
+
+    /// A question from `quaked ask` (or another Mac): show it here, or pass it to the Mac
+    /// that has the Quake. Answered later through `reply`.
+    fn start_ask(&mut self, json: &str, reply: Sender<Vec<u8>>) {
+        const SKIP: &[u8] = b"{\"skip\":true}\n";
+        if !self.cfg.ask.enabled {
+            let _ = reply.send(SKIP.to_vec());
+            return;
+        }
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(json) else {
+            let _ = reply.send(SKIP.to_vec());
+            return;
+        };
+        if !self.connected {
+            match self.peers.peers.iter().find(|p| p.ok && p.board) {
+                Some(p) => {
+                    if v.get("machine").and_then(|m| m.as_str()).is_none_or(str::is_empty) {
+                        v["machine"] = serde_json::Value::String(self.peers.name.clone());
+                    }
+                    let (host, port, key, line) = (p.host.clone(), p.port, self.cfg.sync.key.clone(), format!("ctl ask {v}"));
+                    device::log(format!("ask: on {}'s Quake", p.name));
+                    std::thread::spawn(move || {
+                        let out = sync::request_long(&host, port, &key, &line, Duration::from_secs(590)).unwrap_or_else(|_| SKIP.to_vec());
+                        let _ = reply.send(out);
+                    });
+                }
+                None => {
+                    let _ = reply.send(SKIP.to_vec());
+                }
+            }
+            return;
+        }
+        let text = |q: &serde_json::Value, k: &str| q.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let questions: Vec<(String, String, Vec<(String, String)>, bool)> = v["questions"]
+            .as_array()
+            .map(|qs| {
+                qs.iter()
+                    .map(|q| {
+                        let options = q["options"]
+                            .as_array()
+                            .map(|os| os.iter().map(|o| match o.as_str() {
+                                Some(label) => (label.to_string(), String::new()),
+                                None => (text(o, "label"), text(o, "description")),
+                            }).filter(|(l, _)| !l.is_empty()).take(5).collect())
+                            .unwrap_or_default();
+                        (text(q, "question"), text(q, "header"), options, q["multiSelect"].as_bool().unwrap_or(false))
+                    })
+                    .filter(|q: &(String, String, Vec<(String, String)>, bool)| !q.0.is_empty() && !q.2.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if questions.is_empty() {
+            let _ = reply.send(SKIP.to_vec());
+            return;
+        }
+        let picked = vec![false; questions[0].2.len()];
+        let ask = Ask {
+            session: text(&v, "session"),
+            machine: text(&v, "machine"),
+            questions,
+            at: 0,
+            sel: 0,
+            picked,
+            answers: serde_json::Map::new(),
+            reply,
+            until: Instant::now() + Duration::from_secs(self.cfg.ask.timeout_seconds.clamp(15, 580)),
+        };
+        device::log(format!("ask: {} asks \"{}\"", ask.session, ask.questions[0].0));
+        self.asks.push_back(ask);
+        if self.asks.len() == 1 {
+            self.show_ask();
+        }
+    }
+
+    fn show_ask(&mut self) {
+        if self.cfg.buzzer {
+            let _ = self.commands.send(Command::Tone(NEEDS_YOU_TONE.to_vec()));
+        }
+        // A fresh question gets the full timeout from when it shows.
+        if let Some(a) = self.asks.front_mut() {
+            a.until = Instant::now() + Duration::from_secs(self.cfg.ask.timeout_seconds.clamp(15, 580));
+        }
+        self.update_ring();
+        self.redraw();
+    }
+
+    /// Card `i` pressed or tapped.
+    fn ask_choose(&mut self, i: usize) {
+        let Some(a) = self.asks.front_mut() else { return };
+        let Some((question, _, options, multi)) = a.questions.get(a.at).cloned() else { return };
+        let skip = render::ask_cards(options.len(), multi) - 1;
+        if i == skip {
+            return self.finish_ask(false);
+        }
+        let answer = if multi {
+            if i < options.len() {
+                a.picked[i] = !a.picked[i];
+                self.redraw();
+                return;
+            }
+            let labels: Vec<&str> = options.iter().zip(&a.picked).filter(|(_, p)| **p).map(|(o, _)| o.0.as_str()).collect();
+            if labels.is_empty() {
+                return; // Done with nothing picked: keep asking
+            }
+            labels.join(", ")
+        } else {
+            match options.get(i) {
+                Some(o) => o.0.clone(),
+                None => return,
+            }
+        };
+        a.answers.insert(question, serde_json::Value::String(answer));
+        a.at += 1;
+        a.sel = 0;
+        if let Some(next) = a.questions.get(a.at) {
+            a.picked = vec![false; next.2.len()];
+            self.redraw();
+        } else {
+            self.finish_ask(true);
+        }
+    }
+
+    /// Sends the answers back (or hands the question back to Claude) and shows the next one.
+    fn finish_ask(&mut self, answered: bool) {
+        let Some(a) = self.asks.pop_front() else { return };
+        let out = if answered { serde_json::json!({"answers": a.answers}) } else { serde_json::json!({"skip": true}) };
+        device::log(format!("ask: {} {}", a.session, if answered { format!("answered {out}") } else { "handed back to Claude".into() }));
+        let _ = a.reply.send((out.to_string() + "\n").into_bytes());
+        self.last_input = Instant::now();
+        if self.asks.is_empty() {
+            self.update_ring();
+            self.redraw();
+        } else {
+            self.show_ask();
         }
     }
 
@@ -847,6 +1120,11 @@ impl App {
 
     fn knob_turn(&mut self, d: i8) {
         let d = d as i32;
+        if let Some(a) = self.asks.front_mut() {
+            let n = a.questions.get(a.at).map(|q| render::ask_cards(q.2.len(), q.3)).unwrap_or(1) as i32;
+            a.sel = (a.sel as i32 + d).clamp(0, n - 1) as usize;
+            return;
+        }
         match (self.page, &self.level) {
             (_, Level::Top) => {
                 let pages = &self.cfg.pages;
@@ -891,6 +1169,18 @@ impl App {
     }
 
     fn knob_press(&mut self, code: u8) {
+        // A question from Claude: press answers, double-click or hold hands it back.
+        if !self.asks.is_empty() {
+            match code {
+                KNOB_PRESS => {
+                    let sel = self.asks.front().map(|a| a.sel).unwrap_or(0);
+                    self.ask_choose(sel);
+                }
+                KNOB_DOUBLE | KNOB_HOLD => self.finish_ask(false),
+                _ => {}
+            }
+            return;
+        }
         // A Mac waiting to pair: press allows, double-click refuses.
         if self.pair_ask.is_some() && (code == KNOB_PRESS || code == KNOB_DOUBLE) {
             return self.answer_pair(code == KNOB_PRESS);
@@ -1119,6 +1409,12 @@ impl App {
                 self.open_pr(i);
             }
             Hit::Pane(p) => self.set_page(p),
+            Hit::AskCard(i) => {
+                if let Some(a) = self.asks.front_mut() {
+                    a.sel = i;
+                }
+                self.ask_choose(i);
+            }
             Hit::Setting(i, frac) => {
                 self.tile = i;
                 if i < render::SETTING_SLIDERS {
@@ -1345,6 +1641,7 @@ impl App {
 impl ApplicationHandler<Event> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         self.ensure_window(el);
+        self.refresh_menubar();
     }
 
     fn user_event(&mut self, _el: &ActiveEventLoop, event: Event) {
@@ -1449,6 +1746,8 @@ impl ApplicationHandler<Event> for App {
                     self.show_pair_ask();
                 }
             }
+            Event::Menu(action) => self.on_menu(action),
+            Event::Ctl(line, reply) if line.starts_with("ask ") => self.start_ask(&line[4..], reply),
             Event::Ctl(line, reply) => {
                 let out = self.on_ctl(&line);
                 let _ = reply.send(out);
@@ -1490,7 +1789,7 @@ impl ApplicationHandler<Event> for App {
             self.next_logs = now + LOG_REFRESH;
         }
         let idle_for = Duration::from_secs(self.cfg.idle_seconds.max(5));
-        if self.last_input.elapsed() > idle_for && self.page_since.elapsed() > idle_for {
+        if self.asks.is_empty() && self.last_input.elapsed() > idle_for && self.page_since.elapsed() > idle_for {
             // Stay on League while a match is being accepted or picked.
             let league_busy = self.page == PageId::League && matches!(self.league.phase.as_str(), "ReadyCheck" | "ChampSelect");
             if self.cfg.idle_home && self.page != PageId::Dash && self.cfg.pages.contains(&PageId::Dash) && !league_busy {
@@ -1509,6 +1808,10 @@ impl ApplicationHandler<Event> for App {
         let mut wake = self.next_poll.min(self.next_display);
         if self.page == PageId::Docker && matches!(self.level, Level::Detail(_)) {
             wake = wake.min(self.next_logs);
+        }
+        if self.asks.front().is_some_and(|a| now >= a.until) {
+            device::log("ask: no answer in time; back to Claude");
+            self.finish_ask(false);
         }
         if let Some(a) = &self.pair_ask {
             if now >= a.until {
@@ -1537,6 +1840,7 @@ impl ApplicationHandler<Event> for App {
                 wake = wake.min(at + FLASH);
             }
         }
+        self.refresh_menubar();
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
@@ -1644,7 +1948,8 @@ fn ctl_caller(proxy: winit::event_loop::EventLoopProxy<Event>, audio: Sender<aud
         if proxy.lock().unwrap().send_event(Event::Ctl(line.to_string(), tx)).is_err() {
             return b"error: quaked is stopping\n".to_vec();
         }
-        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| b"error: timeout\n".to_vec())
+        let wait = if line.starts_with("ask ") { Duration::from_secs(600) } else { Duration::from_secs(5) };
+        rx.recv_timeout(wait).unwrap_or_else(|_| b"error: timeout\n".to_vec())
     })
 }
 
@@ -1772,6 +2077,9 @@ pub fn run() {
         history: render::History::default(),
         ai_total: None,
         next_ai_sample: Instant::now(),
+        menubar: None,
+        proxy: proxy.clone(),
+        asks: std::collections::VecDeque::new(),
         sessions: Vec::new(),
         states: HashMap::new(),
         loaded_once: false,

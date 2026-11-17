@@ -54,6 +54,21 @@ or a container stops, the ring blinks in that page's color, the top bar says wha
 happened, and the board jumps to the page (unless you used it in the last 15 seconds).
 Touching the board stops the blinking. `quaked ctl alert code "test"` tries it.
 
+## Claude's questions on the Quake
+
+When Claude asks you to choose (its multiple-choice questions: merge or hold, which
+approach...), the question fills the Quake with an option card each: turn to choose,
+press to answer, and the answer goes straight back to Claude. Multi-select questions take
+presses to tick options, then Done. The last card, a double-click or a hold hands it back
+to Claude's own prompt, as does not answering within the timeout (2 minutes; settings
+page → General). A question from a session on your other Mac shows on whichever Mac has
+the Quake. It works through a `PreToolUse` hook on AskUserQuestion (`quaked ask`), which
+`./install.sh` adds.
+
+AI cards also show what Claude is saying as it works (its narration between tool calls,
+read from the session transcript), and sessions that have been done or idle for 5 minutes
+drop off the board (settings page → General) until you prompt them again.
+
 ## Two Macs
 
 Every quaked advertises `_quaked._tcp` with Bonjour. Paired Macs share two things:
@@ -96,6 +111,15 @@ them.
 Touch: tap a tab to switch pages, a session to open it, Back / Open in Claude in the
 detail view, and the music buttons or volume bar. 45 seconds without input returns to the
 top level. The top bar always shows where you are and what the knob does there.
+
+## Menu bar
+
+quaked runs in the background (a LaunchAgent starts it at login), so its menu bar icon
+is where you find it: a dial, filled when the Quake is attached to either Mac, with a
+count when Claude sessions are waiting on you. The menu shows the Quake, Claude and music
+status, pairing requests (Allow / Refuse), Open Settings…, a page switcher for the Quake,
+Restart quaked and Quit quaked (stops it until your next login). Turn the icon off on the
+settings page (General → Show quaked in the menu bar).
 
 ## Settings
 

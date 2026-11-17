@@ -476,6 +476,8 @@ function viewGeneral(main) {
     toggle("Buzzer", "buzzer", "Chirps when a Claude session waits on you or something new comes in"),
     choice("Idle after", "idleSeconds", idle.map((s) => [s, secs(s)]), "Time without input before the board backs out", true),
     toggle("Go back to the dashboard when idle", "idleHome", "Stays on League during a ready check or champ select"),
+    choice("Drop finished Claude sessions after", "sessionIdleMinutes", [[0, "Never"], [2, "2 min"], [5, "5 min"], [10, "10 min"], [30, "30 min"], [60, "1 hour"]], "Done or idle that long; working and waiting ones always stay", true),
+    toggle("Show quaked in the menu bar", "menuBar", "Status, Open Settings, the Quake's pages, Restart and Quit"),
     toggle("The Quake's own microphone", "device.mic", "Off also turns off its bright indicator light"),
     toggle("Flip touch left / right", "touch.flipX"),
     toggle("Flip touch top / bottom", "touch.flipY", "On by default: the panel reports y from the bottom")));
@@ -484,6 +486,9 @@ function viewGeneral(main) {
     choice("Stop blinking after", "alerts.seconds", [[60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [1800, "30 min"]], null, true),
     toggle("Claude sessions waiting on you", "alerts.ai"), toggle("Review requests, failing CI, approvals, conflicts", "alerts.code"),
     toggle("Hosts going down, sites failing", "alerts.ops"), toggle("Containers stopping", "alerts.docker")));
+  main.append(card("Claude's questions", "When Claude asks you to choose (merge or hold, which approach...), the question fills the Quake: turn to an option, press to answer. Double-click, or the last card, hands it back to Claude's own prompt.",
+    toggle("Answer Claude's questions on the Quake", "ask.enabled"),
+    choice("Hand back to Claude after", "ask.timeoutSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"], [580, "10 min"]], "If you don't answer on the Quake", true)));
   main.append(card("League of Legends", "Uses the League client's local API while it runs (live or PBE).",
     toggle("Accept the match automatically", "league.autoAccept"),
     slider("Wait before accepting", "league.acceptDelayMs", 0, 8000, 250, (v) => `${(v / 1000).toFixed(2)} s`),

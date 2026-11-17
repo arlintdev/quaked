@@ -76,6 +76,9 @@ pub struct Session {
     pub steps: Vec<Step>,
     #[serde(default)]
     pub transcript: String,
+    /// What Claude last said during this turn (its narration between tool calls).
+    #[serde(default)]
+    pub comment: String,
     /// Which Mac it runs on, for sessions synced from another one ("" = this Mac).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub machine: String,
@@ -159,6 +162,25 @@ fn project_name(cwd: &str) -> String {
 }
 
 /// Collapses whitespace and cuts to `max` characters.
+/// A prompt without the `<system-reminder>…</system-reminder>` blocks apps inject into it
+/// (cut-off ones included), so the board shows what you typed.
+pub fn typed_prompt(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("<system-reminder>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</system-reminder>") {
+            Some(end) => rest = &rest[start + end + "</system-reminder>".len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 pub fn squash(s: &str, max: usize) -> String {
     let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if joined.chars().count() > max {
@@ -295,6 +317,50 @@ struct HookInput {
     last_assistant_message: String,
 }
 
+/// What Claude has said most recently in the current turn ("Now let me check…"): the
+/// newest assistant text after your latest prompt, from the end of the transcript.
+fn turn_comment(path: &str) -> String {
+    let Ok(mut f) = fs::File::open(path) else { return String::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if f.seek(SeekFrom::Start(len.saturating_sub(192 * 1024))).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let content = v.pointer("/message/content");
+        match v.get("type").and_then(Value::as_str) {
+            // A prompt you typed (not a tool result) starts the turn: nothing said since.
+            Some("user") => {
+                let typed = match content {
+                    Some(Value::String(_)) => true,
+                    Some(Value::Array(a)) => a.iter().any(|c| c.get("type").and_then(Value::as_str) == Some("text")),
+                    _ => false,
+                };
+                if typed {
+                    return String::new();
+                }
+            }
+            Some("assistant") => {
+                let said: Vec<&str> = content
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter(|c| c.get("type").and_then(Value::as_str) == Some("text")).filter_map(|c| c.get("text").and_then(Value::as_str)).collect())
+                    .unwrap_or_default();
+                let said = said.join(" ");
+                if !said.trim().is_empty() {
+                    return squash(&said, 300);
+                }
+            }
+            _ => {}
+        }
+    }
+    String::new()
+}
+
 /// Claude's most recent text reply, read from the end of the session transcript.
 fn last_assistant_text(path: &str) -> String {
     let Ok(mut f) = fs::File::open(path) else { return String::new() };
@@ -361,6 +427,7 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
         step_count: 0,
         steps: Vec::new(),
         transcript: String::new(),
+        comment: String::new(),
         machine: String::new(),
     });
     s.cwd = cwd.clone();
@@ -376,12 +443,17 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
         }
         "UserPromptSubmit" => {
             new_state = State::Working;
-            s.prompt = squash(&input.prompt, 600);
+            s.prompt = squash(&typed_prompt(&input.prompt), 600);
             s.notice.clear();
-            push_step(&mut s, Step { ts: now, tag: "you".into(), text: squash(&input.prompt, 240), status: StepStatus::Info, tool_id: String::new() });
+            s.comment.clear();
+            push_step(&mut s, Step { ts: now, tag: "you".into(), text: squash(&typed_prompt(&input.prompt), 240), status: StepStatus::Info, tool_id: String::new() });
         }
         "PreToolUse" => {
             new_state = State::Working;
+            let said = turn_comment(&s.transcript);
+            if !said.is_empty() {
+                s.comment = said;
+            }
             let (tag, text) = summarize(&input.tool_name, &input.tool_input, &cwd);
             s.step_count += 1;
             push_step(&mut s, Step { ts: now, tag, text, status: StepStatus::Running, tool_id: input.tool_use_id.clone() });
@@ -415,6 +487,7 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
         "Stop" => {
             new_state = State::Done;
             s.notice.clear();
+            s.comment.clear(); // the final reply shows instead
             let msg = if input.last_assistant_message.is_empty() { last_assistant_text(&s.transcript) } else { squash(&input.last_assistant_message, 600) };
             if !msg.is_empty() {
                 s.last_message = msg;
@@ -432,6 +505,48 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
     s.state = new_state;
     s.updated_at = now;
     Some(s)
+}
+
+/// `quaked ask`: a PreToolUse hook for AskUserQuestion. Shows the question on the Quake
+/// (on whichever Mac has it) and waits for you to spin to an option and press. Prints the
+/// answer for Claude Code; prints nothing (so Claude asks as usual) if you choose "Answer
+/// in Claude", don't answer in time, or no Quake is around.
+pub fn ask_hook() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let Ok(input) = serde_json::from_str::<Value>(&raw) else { return };
+    if input.get("tool_name").and_then(Value::as_str) != Some("AskUserQuestion") {
+        return;
+    }
+    let tool_input = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    if tool_input.get("questions").and_then(Value::as_array).is_none_or(|q| q.is_empty()) {
+        return;
+    }
+    let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let payload = serde_json::json!({"session": project_name(cwd), "questions": tool_input["questions"]});
+    let Ok(mut sock) = std::os::unix::net::UnixStream::connect(crate::app::ctl_socket_path()) else { return };
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(595)));
+    if writeln!(sock, "ask {payload}").is_err() {
+        return;
+    }
+    let _ = sock.shutdown(std::net::Shutdown::Write);
+    let mut reply = String::new();
+    let _ = BufReader::new(&sock).read_line(&mut reply);
+    let Ok(answer) = serde_json::from_str::<Value>(reply.trim()) else { return };
+    let Some(answers) = answer.get("answers").filter(|a| a.as_object().is_some_and(|o| !o.is_empty())) else { return };
+    // updatedInput replaces the tool's input: the questions as they were, plus the answers.
+    let mut updated = tool_input.clone();
+    updated["answers"] = answers.clone();
+    let out = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "Answered on the Quake",
+            "updatedInput": updated,
+        }
+    });
+    println!("{out}");
 }
 
 /// `quaked hook`: called by Claude Code with the hook payload on stdin. Prints nothing
@@ -471,37 +586,46 @@ pub fn hook() {
 }
 
 /// The Claude Code events quaked listens to, and whether the entry takes a tool matcher.
-const HOOK_EVENTS: [(&str, bool); 8] = [
-    ("SessionStart", false),
-    ("UserPromptSubmit", false),
-    ("PreToolUse", true),
-    ("PostToolUse", true),
-    ("PostToolUseFailure", true),
-    ("Notification", false),
-    ("Stop", false),
-    ("SessionEnd", false),
+/// The hooks quaked installs: (event, tool matcher, `quaked` subcommand, timeout seconds).
+/// `quaked ask` answers Claude's multiple-choice questions from the Quake, so it may wait.
+const HOOK_EVENTS: [(&str, Option<&str>, &str, u32); 9] = [
+    ("SessionStart", None, "hook", 5),
+    ("UserPromptSubmit", None, "hook", 5),
+    ("PreToolUse", Some("*"), "hook", 5),
+    ("PreToolUse", Some("AskUserQuestion"), "ask", 600),
+    ("PostToolUse", Some("*"), "hook", 5),
+    ("PostToolUseFailure", Some("*"), "hook", 5),
+    ("Notification", None, "hook", 5),
+    ("Stop", None, "hook", 5),
+    ("SessionEnd", None, "hook", 5),
 ];
 
-/// Adds `quaked hook` to each event in `settings` that doesn't run it yet. Returns the
-/// events it added. Everything else in the file is left as it is.
-fn merge_hooks(settings: &mut serde_json::Value, command: &str) -> Result<Vec<&'static str>, String> {
+/// Adds quaked's hooks to `settings` where they aren't yet (`binary` is the path to the
+/// quaked binary). Returns what it added. Everything else in the file is left as it is.
+fn merge_hooks(settings: &mut serde_json::Value, binary: &str) -> Result<Vec<String>, String> {
     use serde_json::{json, Value};
     let root = settings.as_object_mut().ok_or("settings.json isn't a JSON object")?;
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or("\"hooks\" in settings.json isn't an object")?;
     let mut added = Vec::new();
-    for (event, matcher) in HOOK_EVENTS {
+    for (event, matcher, sub, timeout) in HOOK_EVENTS {
         let groups = hooks.entry(event).or_insert_with(|| json!([]));
         let groups = groups.as_array_mut().ok_or(format!("hooks.{event} isn't a list"))?;
+        let wanted = format!("quaked {sub}");
         let present = groups.iter().any(|g| {
-            g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.contains("quaked hook"))))
+            g.get("hooks").and_then(Value::as_array).is_some_and(|hs| {
+                hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.ends_with(&wanted) || c.contains(&format!("{wanted} "))))
+            })
         });
         if present {
             continue;
         }
-        let entry = json!({"type": "command", "command": command, "timeout": 5});
-        groups.push(if matcher { json!({"matcher": "*", "hooks": [entry]}) } else { json!({"hooks": [entry]}) });
-        added.push(event);
+        let entry = json!({"type": "command", "command": format!("{binary} {sub}"), "timeout": timeout});
+        groups.push(match matcher {
+            Some(m) => json!({"matcher": m, "hooks": [entry]}),
+            None => json!({"hooks": [entry]}),
+        });
+        added.push(if sub == "hook" { event.to_string() } else { format!("{event} ({sub})") });
     }
     Ok(added)
 }
@@ -517,8 +641,8 @@ pub fn install_hooks() -> Result<String, String> {
     };
     // Never rewrite a file we can't parse.
     let mut settings: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{} isn't valid JSON ({e}); left it alone", path.display()))?;
-    let command = format!("{home}/.local/bin/quaked hook");
-    let added = merge_hooks(&mut settings, &command)?;
+    let binary = format!("{home}/.local/bin/quaked");
+    let added = merge_hooks(&mut settings, &binary)?;
     if added.is_empty() {
         return Ok(format!("Claude Code hooks already in {}", path.display()));
     }
@@ -540,14 +664,44 @@ pub fn install_hooks() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn prompts_lose_injected_reminders() {
+        use super::*;
+        assert_eq!(typed_prompt("<system-reminder>linked sessions</system-reminder> fix the build"), "fix the build");
+        assert_eq!(typed_prompt("deploy it <system-reminder>cut off"), "deploy it");
+        assert_eq!(typed_prompt("plain"), "plain");
+    }
+
+    #[test]
+    fn narration_is_the_newest_text_in_this_turn() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("quaked-narration-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let lines = [
+            r#"{"type":"user","message":{"role":"user","content":"fix the build"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Let me look at the error first."},{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"error: x"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        assert_eq!(turn_comment(path.to_str().unwrap()), "Let me look at the error first.");
+        let next = format!("{}\n{}", lines.join("\n"), r#"{"type":"user","message":{"content":[{"type":"text","text":"now deploy"}]}}"#);
+        fs::write(&path, next).unwrap();
+        assert_eq!(turn_comment(path.to_str().unwrap()), "", "a new prompt starts a new turn");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn merging_hooks_keeps_everything_else_and_is_idempotent() {
         let mut v: serde_json::Value = serde_json::from_str(r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#).unwrap();
-        let added = merge_hooks(&mut v, "/h/.local/bin/quaked hook").unwrap();
-        assert_eq!(added.len(), 8);
+        let added = merge_hooks(&mut v, "/h/.local/bin/quaked").unwrap();
+        assert_eq!(added.len(), 9);
+        assert_eq!(v["hooks"]["PreToolUse"][1]["matcher"], "AskUserQuestion");
+        assert_eq!(v["hooks"]["PreToolUse"][1]["hooks"][0]["command"], "/h/.local/bin/quaked ask");
         assert_eq!(v["model"], "opus");
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2, "kept the existing Stop hook");
         assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "*");
-        assert!(merge_hooks(&mut v, "/h/.local/bin/quaked hook").unwrap().is_empty());
+        assert!(merge_hooks(&mut v, "/h/.local/bin/quaked").unwrap().is_empty());
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["model", "hooks"], "key order preserved");
     }

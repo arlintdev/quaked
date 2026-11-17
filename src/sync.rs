@@ -300,7 +300,12 @@ fn exchange(host: &str, port: u16, line: &str, timeout: Duration) -> Result<Vec<
 
 /// A request to a paired peer ("summary", "config", "ctl status", ...).
 pub fn request(host: &str, port: u16, key: &str, what: &str) -> Result<Vec<u8>, String> {
-    let reply = exchange(host, port, &format!("{key} {what}"), Duration::from_secs(8))?;
+    request_long(host, port, key, what, Duration::from_secs(8))
+}
+
+/// Like `request`, for ones that wait on you (a question on the other Mac's Quake).
+pub fn request_long(host: &str, port: u16, key: &str, what: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+    let reply = exchange(host, port, &format!("{key} {what}"), timeout)?;
     match reply.as_slice() {
         b"denied\n" => Err("key doesn't match".into()),
         b"disabled\n" => Err("sync is off there".into()),

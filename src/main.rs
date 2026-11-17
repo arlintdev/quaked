@@ -3,6 +3,7 @@
 //!   quaked [run]                 the board (what the LaunchAgent runs); settings live in
 //!                                ~/Library/Application Support/Quaked/config.json
 //!   quaked hook                  Claude Code hook: records session state from stdin
+//!   quaked ask                   Claude Code hook: shows Claude's questions on the Quake to answer
 //!   quaked hooks                 adds those hooks to ~/.claude/settings.json (install.sh runs it)
 //!   quaked settings              opens the settings page (http://127.0.0.1:47380)
 //!   quaked ctl <cmd>             drive the running board: turn 1|-1, press, double, hold, tap X Y;
@@ -21,6 +22,7 @@ mod github;
 mod http;
 mod keys;
 mod league;
+mod menubar;
 mod music;
 mod ops;
 mod proto;
@@ -61,6 +63,7 @@ fn sample_sessions(now: u64) -> Vec<status::Session> {
         step_count: 0,
         steps: Vec::new(),
         transcript: String::new(),
+        comment: String::new(),
         machine: String::new(),
     };
     let mut a = base("a", "digin", State::Working, 4 * m);
@@ -217,7 +220,12 @@ fn preview(dir: &str) {
             render::History::push(history.site_ms.entry(url.into()).or_default(), base + ((i * 53) % 13) as f32 * 9.0);
         }
     }
-    let shots: [(&str, Page, Level, usize, usize, usize); 16] = [
+    let ask_options = vec![
+        ("Merge".to_string(), "Squash-merge into main and delete the branch".to_string()),
+        ("Hold".to_string(), "Leave it open; I'll ping you after the demo".to_string()),
+        ("Merge as draft release".to_string(), "Merge, but tag it as a pre-release".to_string()),
+    ];
+    let shots: [(&str, Page, Level, usize, usize, usize); 17] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -233,6 +241,7 @@ fn preview(dir: &str) {
         ("14-code", Page::Code, Level::Focus, 0, 0, 1),
         ("15-settings", Page::Settings, Level::Focus, 0, 0, 6),
         ("0-dash", Page::Dash, Level::Top, 0, 0, 0),
+        ("17-ask", Page::Ai, Level::Top, 0, 0, 0),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
@@ -254,6 +263,20 @@ fn preview(dir: &str) {
             settings,
             ring: &cfg.ring,
             history: &history,
+            ask: (name == "17-ask").then(|| render::AskView {
+                session: "quaked",
+                machine: "AustinM5Max",
+                header: "Release",
+                question: "PR #4 is green and approved. Merge it now, or hold it until after the demo?",
+                options: &ask_options,
+                picked: &[],
+                multi: false,
+                sel: 0,
+                index: 0,
+                count: 1,
+                secs_left: 104,
+                queued: 0,
+            }),
             level: &level,
             sessions: &sessions,
             sel,
@@ -316,6 +339,7 @@ fn main() {
     let sub = args.first().map(String::as_str).unwrap_or("run");
     match sub {
         "hook" => status::hook(),
+        "ask" => status::ask_hook(),
         "settings" | "ui" => {
             let _ = std::process::Command::new("/usr/bin/open").arg(web::url()).status();
         }

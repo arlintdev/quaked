@@ -41,6 +41,22 @@ pub enum PageId {
 }
 
 impl PageId {
+    /// The name in menus and lists ("Dashboard", "Sounds").
+    pub fn title(self) -> &'static str {
+        match self {
+            PageId::Dash => "Dashboard",
+            PageId::Ai => "AI",
+            PageId::Music => "Music",
+            PageId::Shortcuts => "Shortcuts",
+            PageId::Soundboard => "Sounds",
+            PageId::League => "League",
+            PageId::Docker => "Docker",
+            PageId::Ops => "Ops",
+            PageId::Code => "Code",
+            PageId::Settings => "Settings",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             PageId::Dash => "HOME",
@@ -72,6 +88,11 @@ pub struct Config {
     pub idle_home: bool,
     /// Pages in knob order. Leave one out to hide it.
     pub pages: Vec<PageId>,
+    /// Show quaked's icon in the menu bar.
+    pub menu_bar: bool,
+    /// Drop a Claude session from the board once it has been done / idle this long
+    /// (0 = keep it). It comes back as soon as you send it a prompt.
+    pub session_idle_minutes: u64,
     pub ring: Ring,
     pub touch: Touch,
     pub shortcuts: Vec<Shortcut>,
@@ -81,6 +102,7 @@ pub struct Config {
     pub ops: Ops,
     pub code: Code,
     pub alerts: Alerts,
+    pub ask: AskSettings,
     pub sync: SyncSettings,
     pub device: DeviceSettings,
 }
@@ -121,6 +143,21 @@ pub struct Code {
 impl Default for Code {
     fn default() -> Self {
         Code { refresh_seconds: 60, gitlab: true, gitlab_hosts: Vec::new() }
+    }
+}
+
+/// Claude's multiple-choice questions on the Quake: spin to an option, press to answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AskSettings {
+    pub enabled: bool,
+    /// Unanswered this long, the question goes back to Claude's own prompt.
+    pub timeout_seconds: u64,
+}
+
+impl Default for AskSettings {
+    fn default() -> Self {
+        AskSettings { enabled: true, timeout_seconds: 120 }
     }
 }
 
@@ -327,6 +364,8 @@ impl Default for Config {
             buzzer: true,
             idle_seconds: 45,
             idle_home: true,
+            menu_bar: true,
+            session_idle_minutes: 5,
             pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
             ring: Ring::default(),
             touch: Touch::default(),
@@ -346,6 +385,7 @@ impl Default for Config {
             ops: Ops::default(),
             code: Code::default(),
             alerts: Alerts::default(),
+            ask: AskSettings::default(),
             sync: SyncSettings::default(),
             device: DeviceSettings::default(),
         }
