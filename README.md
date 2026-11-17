@@ -1,6 +1,6 @@
 # quaked
 
-Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Seventeen pages (turn them
+Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Eighteen pages (turn them
 on and off and reorder them on the settings page's Panes tab), each with its own color on the
 knob's light ring:
 
@@ -91,6 +91,12 @@ knob's light ring:
 - **Clipboard** (clipboard icon): your last 20 copies, kept in memory only; pick one and
   the app in front pastes it. Copies from password managers, copies made in front of
   password apps and strings that look like keys are skipped.
+- **Stocks** (chart icon): your symbols (stocks, ETFs, indexes like `^GSPC`, crypto like
+  `BTC-USD`) with price, today's change and today's chart against yesterday's close; press
+  one for 1D / 5D / 1M / 1Y charts (turn to switch, press again for its Yahoo Finance page).
+  Prices come from Yahoo Finance with no account (only your symbols are sent), every
+  minute while the page is up. Pick symbols on the settings page (Extras › Stocks): search
+  by company name, reorder, remove.
 - **Windows** (windows icon): your apps front to back with their window counts; press
   one to bring it forward. It only looks while the page is on screen.
 - **Settings** (the gear): screen brightness, ring brightness, idle timeout, and switches
