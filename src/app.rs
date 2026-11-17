@@ -1430,6 +1430,9 @@ impl App {
     }
 
     fn back(&mut self) {
+        if self.page == PageId::Stocks && self.stocks_back() {
+            return;
+        }
         self.level = match self.level {
             Level::Detail(_) => Level::Focus,
             _ => Level::Top,

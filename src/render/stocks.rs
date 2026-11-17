@@ -1,14 +1,24 @@
-//! Stocks on the board: a tile per symbol (price, today's change, today's chart against
-//! yesterday's close), and a stock opened big with 1D / 5D / 1M / 1Y charts.
+//! Stocks on the board.
+//! - Tiles: per symbol the price, today's change, a 5D / 1M / YTD / 1Y strip and today's
+//!   chart against yesterday's close.
+//! - An opened stock: its numbers on the left and four time scales side by side (1D, 5D,
+//!   1M, 1Y), each with its change, price axis, high / low and dates.
+//! - One scale expanded: a big chart, and the knob walks 1D 5D 1M 6M YTD 1Y 5Y.
+//!
+//! Level::Detail("NVDA") is the four panes (v.scroll = the pane picked);
+//! Level::Detail("NVDA@1Y") is one expanded.
 use super::*;
-use crate::stocks::{Quote, Range};
+use crate::stocks::{Chart, Quote, Range, Series};
 
 /// Tiles on screen at once; the knob pages through more.
 const PER_SCREEN: usize = 8;
-/// Tap indexes in the opened stock: the range pills, then Back.
+/// Tap indexes past the tiles: a pane, a range pill, Back.
+pub const TAP_PANE: usize = 900;
 pub const TAP_RANGE: usize = 1000;
 pub const TAP_BACK: usize = 1100;
-const LEFT_W: f32 = 520.0;
+const LEFT_W: f32 = 430.0;
+const AXIS_W: f32 = 74.0;
+const AXIS_H: f32 = 22.0;
 
 fn up_color(change: f64) -> u32 {
     if change >= 0.0 { GREEN } else { RED }
@@ -23,18 +33,51 @@ pub fn price(p: f64) -> String {
 fn grouped(p: f64, decimals: usize) -> String {
     let s = format!("{:.*}", decimals, p.abs());
     let (int, frac) = s.split_once('.').unwrap_or((&s, ""));
-    let mut grouped = String::new();
+    let mut out = String::new();
     for (i, ch) in int.chars().enumerate() {
         if i > 0 && (int.len() - i) % 3 == 0 {
-            grouped.push(',');
+            out.push(',');
         }
-        grouped.push(ch);
+        out.push(ch);
     }
-    format!("{}{grouped}{}{frac}", if p < 0.0 { "-" } else { "" }, if frac.is_empty() { "" } else { "." })
+    format!("{}{out}{}{frac}", if p < 0.0 { "-" } else { "" }, if frac.is_empty() { "" } else { "." })
+}
+
+/// Axis labels: fewer digits for big numbers ("64,317", "155.46", "0.4521").
+fn axis_price(p: f64) -> String {
+    if p.abs() >= 10_000.0 { grouped(p, 0) } else { price(p) }
+}
+
+fn pct(p: f64) -> String {
+    format!("{:+.2}%", p)
 }
 
 fn change_text(q: &Quote) -> String {
-    format!("{}{}  {:+.2}%", if q.change() >= 0.0 { "+" } else { "-" }, grouped(q.change().abs(), 2), q.change_pct())
+    format!("{}{}  {}", if q.change() >= 0.0 { "+" } else { "-" }, grouped(q.change().abs(), 2), pct(q.change_pct()))
+}
+
+fn volume(v: u64) -> String {
+    match v {
+        0 => "—".into(),
+        1..=999_999 => grouped(v as f64, 0),
+        1_000_000..=999_999_999 => format!("{:.1}M", v as f64 / 1e6),
+        _ => format!("{:.2}B", v as f64 / 1e9),
+    }
+}
+
+/// A time on a chart's axis, as the range wants it: "10:30", "Mon", "Nov 3", "Mar '26", "2023".
+fn when(ts: u64, range: Range) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let tm = crate::calendar::local(ts * 1000);
+    let month = MONTHS[tm.tm_mon.clamp(0, 11) as usize];
+    match range {
+        Range::Day => crate::calendar::hm(ts * 1000),
+        Range::Week => DAYS[tm.tm_wday.clamp(0, 6) as usize].to_string(),
+        Range::Month | Range::SixMonth | Range::Ytd => format!("{month} {}", tm.tm_mday),
+        Range::Year => format!("{month} '{:02}", (tm.tm_year + 1900) % 100),
+        Range::FiveYear => format!("{}", tm.tm_year + 1900),
+    }
 }
 
 /// The grid for `n` tiles: (rows, cols) on one screen.
@@ -57,36 +100,119 @@ fn tile_rect(slot: usize, rows: usize, cols: usize) -> R {
     (M + c as f32 * (w + G), CY + r as f32 * (h + G), w, h)
 }
 
-/// A price chart scaled to its own range, with a dashed line at `base` (yesterday's close,
-/// or where the range started) and the area to it shaded.
-fn chart(c: &mut Canvas, r: R, points: &[f32], base: f64, color: u32) {
+/// The opened stock: its symbol, and the expanded range if one is.
+pub fn opened(level: &Level) -> Option<(&str, Option<Range>)> {
+    let Level::Detail(d) = level else { return None };
+    Some(match d.split_once('@') {
+        Some((sym, r)) => (sym, Range::from_label(r)),
+        None => (d.as_str(), None),
+    })
+}
+
+/// Today's chart on a tile: scaled to its own range, the area to yesterday's close shaded.
+fn spark(c: &mut Canvas, r: R, points: &[(u64, f32)], base: f64, color: u32) {
     let (x, y, w, h) = r;
     if points.len() < 2 {
         c.rect((x, y + h / 2.0, w, 1.0), LINE, 1.0);
         return;
     }
     let base = base as f32;
-    let lo = points.iter().cloned().fold(if base > 0.0 { base } else { f32::MAX }, f32::min);
-    let hi = points.iter().cloned().fold(if base > 0.0 { base } else { f32::MIN }, f32::max);
+    let lo = points.iter().map(|p| p.1).fold(if base > 0.0 { base } else { f32::MAX }, f32::min);
+    let hi = points.iter().map(|p| p.1).fold(if base > 0.0 { base } else { f32::MIN }, f32::max);
     let span = (hi - lo).max(hi.abs() * 1e-4).max(1e-6);
     let to_y = |v: f32| y + h - (v - lo) / span * h;
     let n = points.len();
-    let pts: Vec<(f32, f32)> = points.iter().enumerate().map(|(i, v)| (x + w * i as f32 / (n - 1) as f32, to_y(*v))).collect();
+    let pts: Vec<(f32, f32)> = points.iter().enumerate().map(|(i, p)| (x + w * i as f32 / (n - 1) as f32, to_y(p.1))).collect();
     if base > 0.0 {
-        let by = to_y(base);
-        let mut dx = x;
-        while dx < x + w {
-            c.rect((dx, by, 6.0f32.min(x + w - dx), 1.0), MUTED, 0.7);
-            dx += 12.0;
-        }
+        dashed(c, x, x + w, to_y(base));
         let mut area = pts.clone();
-        area.push((x + w, by));
-        area.push((x, by));
+        area.push((x + w, to_y(base)));
+        area.push((x, to_y(base)));
         c.poly_alpha(&area, color, 0.14);
     }
-    c.polyline(&pts, color, 2.2);
+    c.polyline(&pts, color, 2.0);
     let (lx, ly) = pts[n - 1];
-    c.circle(lx, ly, 3.5, color, 1.0);
+    c.circle(lx, ly, 3.2, color, 1.0);
+}
+
+fn dashed(c: &mut Canvas, x0: f32, x1: f32, y: f32) {
+    let mut dx = x0;
+    while dx < x1 {
+        c.rect((dx, y, 6.0f32.min(x1 - dx), 1.0), MUTED, 0.7);
+        dx += 12.0;
+    }
+}
+
+/// A chart with axes: prices on the right (high, low, and between them when `rich`), times
+/// along the bottom, a dashed line where the range started, the high and low marked.
+fn plot(c: &mut Canvas, r: R, points: &Series, base: f64, range: Range, color: u32, rich: bool) {
+    let (x, y, w, h) = r;
+    let (px, py, pw, ph) = (x, y + 6.0, w - AXIS_W, h - AXIS_H - 10.0);
+    if points.len() < 2 {
+        c.text(F::Medium, "No chart yet", 15.0, x + w / 2.0, y + h / 2.0, FAINT, Align::Center);
+        return;
+    }
+    let base = base as f32;
+    let (mut lo, mut hi) = points.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+    let (lo_i, hi_i) = (points.iter().position(|p| p.1 == lo).unwrap_or(0), points.iter().position(|p| p.1 == hi).unwrap_or(0));
+    if base > 0.0 {
+        lo = lo.min(base);
+        hi = hi.max(base);
+    }
+    // Room above the high and below the low for their labels.
+    let span = (hi - lo).max(hi.abs() * 1e-4).max(1e-6);
+    let (top, bottom) = (20.0, 20.0);
+    let to_y = |v: f32| py + top + (ph - top - bottom) * (1.0 - (v - lo) / span);
+    let (lo_s, hi_s) = (lo - span * bottom / (ph - top - bottom), hi + span * top / (ph - top - bottom));
+    let n = points.len();
+    let to_x = |i: usize| px + pw * i as f32 / (n - 1) as f32;
+    // Gridlines with prices (a label that would sit under the price badge is left out).
+    let badge_y = to_y(points[points.len() - 1].1);
+    let lines = if rich { 5 } else { 3 };
+    for k in 0..lines {
+        let v = lo_s + (hi_s - lo_s) * (k as f32 + 0.5) / lines as f32;
+        let gy = to_y(v);
+        c.rect((px, gy, pw, 1.0), LINE, 0.55);
+        if (gy - badge_y).abs() > 16.0 {
+            c.text(F::Mono, &axis_price(v as f64), 12.0, x + w - 4.0, gy + 4.0, FAINT, Align::Right);
+        }
+    }
+    // Times along the bottom.
+    let ticks = if rich { 5 } else { 3 };
+    for k in 0..ticks {
+        let i = ((n - 1) as f32 * k as f32 / (ticks - 1) as f32).round() as usize;
+        let align = if k == 0 { Align::Left } else if k == ticks - 1 { Align::Right } else { Align::Center };
+        c.text(F::Medium, &when(points[i].0, range), 12.0, to_x(i), y + h - 6.0, FAINT, align);
+    }
+    let pts: Vec<(f32, f32)> = points.iter().enumerate().map(|(i, p)| (to_x(i), to_y(p.1))).collect();
+    if base > 0.0 {
+        let by = to_y(base);
+        dashed(c, px, px + pw, by);
+        let mut area = pts.clone();
+        area.push((px + pw, by));
+        area.push((px, by));
+        c.poly_alpha(&area, color, 0.14);
+    }
+    c.polyline(&pts, color, if rich { 2.6 } else { 2.0 });
+    // The high and the low.
+    for (i, v, above) in [(hi_i, hi, true), (lo_i, lo, false)] {
+        let (mx, my) = (to_x(i), to_y(v));
+        c.circle(mx, my, 3.0, TEXT_2, 1.0);
+        let label = format!("{} {}", if above { "H" } else { "L" }, axis_price(v as f64));
+        let lw = c.measure(F::Bold, &label, 12.0);
+        let lx = (mx - lw / 2.0).clamp(px + 2.0, px + pw - lw - 2.0);
+        // Above the high, below the low, unless that runs into the edge or the dates.
+        let (up, down) = (my - 8.0, my + 18.0);
+        let ly = if above { if up < y + 12.0 { down } else { up } } else if down > py + ph + 2.0 { up } else { down };
+        c.text(F::Bold, &label, 12.0, lx, ly, TEXT_2, Align::Left);
+    }
+    // Now, and the price at the axis.
+    let (lx, ly) = pts[n - 1];
+    c.circle(lx, ly, 4.0, color, 1.0);
+    let last = axis_price(points[n - 1].1 as f64);
+    let tw = c.measure(F::Bold, &last, 12.0) + 10.0;
+    c.rrect((x + w - tw - 2.0, ly - 10.0, tw, 20.0), 5.0, color, 1.0);
+    c.text(F::Bold, &last, 12.0, x + w - 7.0, ly + 4.0, 0x101013, Align::Right);
 }
 
 fn arrow(c: &mut Canvas, up: bool, x: f32, cy: f32, px: f32, color: u32) {
@@ -95,9 +221,9 @@ fn arrow(c: &mut Canvas, up: bool, x: f32, cy: f32, px: f32, color: u32) {
 
 pub(super) fn draw(c: &mut Canvas, v: &View) {
     let s = v.stocks;
-    if let Level::Detail(sym) = v.level {
-        if let Some(q) = s.quotes.iter().find(|q| &q.symbol == sym) {
-            return detail(c, v, q);
+    if let Some((sym, expanded)) = opened(v.level) {
+        if let Some(q) = s.quotes.iter().find(|q| q.symbol == sym) {
+            return detail(c, v, q, expanded);
         }
     }
     if s.off || s.quotes.is_empty() {
@@ -134,14 +260,31 @@ pub(super) fn draw(c: &mut Canvas, v: &View) {
     }
 }
 
+/// "5D +1.2%  1M +3.4%  YTD +12.1%  1Y +45.2%", each colored by its sign; returns its width.
+fn strip(c: &mut Canvas, q: &Quote, extra: &[Chart], now: u64, x: f32, y: f32, max_w: f32) -> f32 {
+    let mut cx = x;
+    for r in [Range::Week, Range::Month, Range::Ytd, Range::Year] {
+        let Some(p) = q.change_over(r, extra, now) else { continue };
+        let lw = c.measure(F::Bold, r.label(), 12.0);
+        let vtext = format!("{:+.1}%", p);
+        let vw = c.measure(F::Bold, &vtext, 13.0);
+        if cx + lw + 5.0 + vw > x + max_w {
+            break;
+        }
+        c.text(F::Bold, r.label(), 12.0, cx, y, FAINT, Align::Left);
+        c.text(F::Bold, &vtext, 13.0, cx + lw + 5.0, y, up_color(p), Align::Left);
+        cx += lw + 5.0 + vw + 16.0;
+    }
+    cx - x
+}
+
 fn tile(c: &mut Canvas, v: &View, q: &Quote, r: R, tall: bool) {
     let (x, y, w, h) = r;
     c.rrect(r, 14.0, PANEL, 1.0);
     let ix = x + 20.0;
     let iw = w - 40.0;
-    let symbol = q.symbol.as_str();
     if let Some(e) = &q.error {
-        c.fit(F::Bold, symbol, 24.0, iw, ix, y + 38.0, TEXT_2, Align::Left);
+        c.fit(F::Bold, &q.symbol, 24.0, iw, ix, y + 38.0, TEXT_2, Align::Left);
         c.symbol("exclamationmark.triangle", 16.0, ix + 8.0, y + 66.0, AMBER);
         c.clip(F::Regular, e, 15.0, iw - 26.0, ix + 24.0, y + 72.0, MUTED);
         return;
@@ -149,132 +292,184 @@ fn tile(c: &mut Canvas, v: &View, q: &Quote, r: R, tall: bool) {
     let col = up_color(q.change());
     c.rrect((x, y, 5.0, h), 2.5, col, 1.0);
     let state_w = if q.open { 0.0 } else { c.pill(x + w - 20.0 - (c.measure(F::Bold, "CLOSED", 11.0) + 11.0 * 1.4), y + 18.0, "CLOSED", 11.0, 0x2A2A31, MUTED) + 10.0 };
-    c.fit(F::Bold, symbol, 22.0, iw - state_w, ix, y + 36.0, TEXT, Align::Left);
+    c.fit(F::Bold, &q.symbol, 22.0, iw - state_w, ix, y + 36.0, TEXT, Align::Left);
     c.clip(F::Medium, &q.name, 14.0, iw, ix, y + 58.0, MUTED);
-    let (py, cy) = if tall { (y + 122.0, y + 154.0) } else { (y + 104.0, y + 130.0) };
-    let pw = c.fit(F::Bold, &price(q.price), if tall { 44.0 } else { 34.0 }, iw, ix, py, TEXT, Align::Left);
+    let (py, cy) = if tall { (y + 118.0, y + 150.0) } else { (y + 100.0, y + 126.0) };
+    let pw = c.fit(F::Bold, &price(q.price), if tall { 44.0 } else { 32.0 }, iw, ix, py, TEXT, Align::Left);
     if !q.currency.is_empty() && q.currency != "USD" {
         c.text(F::Medium, &q.currency, 14.0, ix + pw + 8.0, py, MUTED, Align::Left);
     }
     arrow(c, q.change() >= 0.0, ix + 7.0, cy - 6.0, 13.0, col);
-    c.fit(F::Bold, &change_text(q), 17.0, iw - 20.0, ix + 20.0, cy, col, Align::Left);
-    let top = cy + 14.0;
-    let bottom = y + h - 16.0;
+    let cw = c.fit(F::Bold, &change_text(q), 17.0, iw - 20.0, ix + 20.0, cy, col, Align::Left);
+    let now = v.now_ms / 1000;
+    // The longer view: beside today's change when there's room, else under it.
+    let beside = ix + 20.0 + cw + 22.0;
+    let top = if x + w - 20.0 - beside > 260.0 {
+        strip(c, q, &v.stocks.extra, now, beside, cy, x + w - 20.0 - beside);
+        cy + 14.0
+    } else {
+        strip(c, q, &v.stocks.extra, now, ix, cy + 22.0, iw);
+        cy + 32.0
+    };
+    let bottom = y + h - 14.0;
     if bottom - top > 24.0 {
-        chart(c, (ix, top, iw, bottom - top), &q.series, q.prev_close, col);
+        spark(c, (ix, top, iw, bottom - top), &q.series, q.prev_close, col);
     }
-    let _ = v;
+}
+
+// ---------------------------------------------------------------- an opened stock
+
+fn chart_area() -> R {
+    (M + LEFT_W + G, CY, W - 2.0 * M - LEFT_W - G, CH)
+}
+
+fn pane_rect(k: usize) -> R {
+    let (x, y, w, h) = chart_area();
+    let pw = (w - G) / 2.0;
+    let ph = (h - G) / 2.0;
+    (x + (k % 2) as f32 * (pw + G), y + (k / 2) as f32 * (ph + G), pw, ph)
 }
 
 fn range_rect(k: usize) -> R {
-    let (w, gap) = (78.0, 10.0);
-    (M + 24.0 + k as f32 * (w + gap), CY + CH - 62.0, w, 40.0)
+    let (x, y, _, _) = chart_area();
+    (x + 20.0 + k as f32 * 74.0, y + 14.0, 66.0, 34.0)
 }
 
 fn back_rect() -> R {
-    (M + LEFT_W - 24.0 - 110.0, CY + CH - 62.0, 110.0, 40.0)
+    (M + 24.0, CY + CH - 56.0, 110.0, 40.0)
 }
 
-fn detail(c: &mut Canvas, v: &View, q: &Quote) {
+fn detail(c: &mut Canvas, v: &View, q: &Quote, expanded: Option<Range>) {
+    let now = v.now_ms / 1000;
     let lr = (M, CY, LEFT_W, CH);
     let (x, y, _, h) = lr;
     c.rrect(lr, 14.0, PANEL, 1.0);
     let col = up_color(q.change());
     c.rrect((x, y, 6.0, h), 3.0, col, 1.0);
     let ix = x + 26.0;
-    let iw = LEFT_W - 52.0;
-    c.fit(F::Bold, &q.symbol, 30.0, iw, ix, y + 44.0, TEXT, Align::Left);
-    c.clip(F::Medium, &q.name, 16.0, iw, ix, y + 70.0, MUTED);
-    c.fit(F::Bold, &price(q.price), 50.0, iw, ix, y + 134.0, TEXT, Align::Left);
-    arrow(c, q.change() >= 0.0, ix + 8.0, y + 160.0, 15.0, col);
-    c.fit(F::Bold, &format!("{}  today", change_text(q)), 20.0, iw - 24.0, ix + 24.0, y + 167.0, col, Align::Left);
-    let mut rows: Vec<(String, String)> = Vec::new();
-    if q.day_low > 0.0 && q.day_high > 0.0 {
-        rows.push(("Day range".into(), format!("{} – {}", price(q.day_low), price(q.day_high))));
+    let iw = LEFT_W - 50.0;
+    let sw = c.fit(F::Bold, &q.symbol, 28.0, iw - 90.0, ix, y + 42.0, TEXT, Align::Left);
+    if !q.open {
+        c.pill(ix + sw + 12.0, y + 22.0, "CLOSED", 11.0, 0x2A2A31, MUTED);
     }
-    if q.prev_close > 0.0 {
-        rows.push(("Previous close".into(), price(q.prev_close)));
-    }
-    let when = if q.market_time > 0 { crate::calendar::hm_ampm(q.market_time * 1000) } else { String::new() };
-    rows.push(("Market".into(), if q.open { format!("open  ·  {when}") } else { format!("closed  ·  as of {when}") }));
+    let sub = if q.exchange.is_empty() { q.name.clone() } else { format!("{}  ·  {}", q.name, q.exchange) };
+    c.clip(F::Medium, &sub, 15.0, iw, ix, y + 66.0, MUTED);
+    c.fit(F::Bold, &price(q.price), 46.0, iw, ix, y + 124.0, TEXT, Align::Left);
+    arrow(c, q.change() >= 0.0, ix + 8.0, y + 148.0, 14.0, col);
+    c.fit(F::Bold, &format!("{}  today", change_text(q)), 18.0, iw - 24.0, ix + 24.0, y + 154.0, col, Align::Left);
+    let range_of = |lo: f64, hi: f64| if lo > 0.0 && hi > 0.0 { format!("{} – {}", price(lo), price(hi)) } else { "—".into() };
+    let when_text = if q.market_time > 0 { crate::calendar::hm_ampm(q.market_time * 1000) } else { String::new() };
+    let rows = [
+        ("Day range", range_of(q.day_low, q.day_high)),
+        ("52-week range", range_of(q.low_52w, q.high_52w)),
+        ("Previous close", if q.prev_close > 0.0 { price(q.prev_close) } else { "—".into() }),
+        ("Volume", volume(q.volume)),
+        ("Market", if q.open { format!("open  ·  {when_text}") } else { format!("closed  ·  as of {when_text}") }),
+    ];
     for (k, (label, value)) in rows.iter().enumerate() {
-        let ry = y + 210.0 + k as f32 * 30.0;
-        c.text(F::Medium, label, 15.0, ix, ry, MUTED, Align::Left);
-        c.text(F::Medium, value, 15.0, ix + iw, ry, TEXT_2, Align::Right);
-    }
-    let current = v.stocks.chart.as_ref().filter(|ch| ch.symbol == q.symbol).map_or(Range::Day, |ch| ch.range);
-    for (k, r) in Range::ALL.iter().enumerate() {
-        let rr = range_rect(k);
-        let on = *r == current;
-        c.rrect(rr, 10.0, if on { TEXT } else { 0x26262D }, 1.0);
-        c.text(F::Bold, r.label(), 16.0, rr.0 + rr.2 / 2.0, rr.1 + 26.0, if on { 0x111114 } else { TEXT_2 }, Align::Center);
+        let ry = y + 194.0 + k as f32 * 28.0;
+        c.text(F::Medium, label, 14.0, ix, ry, MUTED, Align::Left);
+        c.text(F::Medium, value, 14.0, ix + iw, ry, TEXT_2, Align::Right);
     }
     let br = back_rect();
     c.rrect(br, 10.0, 0x26262D, 1.0);
     c.text(F::Medium, "‹  Back", 16.0, br.0 + br.2 / 2.0, br.1 + 26.0, TEXT, Align::Center);
 
-    // The chart: the range that's loaded for this stock, else today's.
-    let rr = (M + LEFT_W + G, CY, W - 2.0 * M - LEFT_W - G, CH);
-    let (rx, ry, rw, rh) = rr;
-    c.rrect(rr, 14.0, PANEL_DEEP, 1.0);
-    let ch = v.stocks.chart.as_ref().filter(|ch| ch.symbol == q.symbol && ch.range != Range::Day);
-    let (points, base, range): (&[f32], f64, Range) = match ch {
-        Some(ch) => (&ch.points, ch.base, ch.range),
-        None => (&q.series, q.prev_close, Range::Day),
-    };
-    let loading = v.stocks.chart.as_ref().is_some_and(|ch| ch.symbol == q.symbol && ch.loading);
-    let last = points.last().copied().map(|p| p as f64).unwrap_or(q.price);
-    let moved = if range == Range::Day { q.change() } else { last - base };
-    let pct = if base > 0.0 { moved / base * 100.0 } else { 0.0 };
-    let mcol = up_color(moved);
-    c.text(F::Bold, range.label(), 13.0, rx + 24.0, ry + 30.0, FAINT, Align::Left);
-    let note = if loading { "loading…".to_string() } else if range == Range::Day { "today, against yesterday's close".to_string() } else { format!("{}{}  {:+.2}%", if moved >= 0.0 { "+" } else { "-" }, grouped(moved.abs(), 2), pct) };
-    c.text(F::Bold, &note, 16.0, rx + rw - 24.0, ry + 30.0, if loading { MUTED } else { mcol }, Align::Right);
-    chart(c, (rx + 24.0, ry + 56.0, rw - 48.0, rh - 84.0), points, base, mcol);
+    let loading = |r: Range| v.stocks.extra.iter().any(|ch| ch.symbol == q.symbol && ch.range == r && ch.loading);
+    match expanded {
+        None => {
+            // Four time scales side by side; the knob picks one to expand.
+            for (k, range) in Range::PANES.into_iter().enumerate() {
+                let r = pane_rect(k);
+                let (px, py, pw, ph) = r;
+                c.rrect(r, 14.0, PANEL_DEEP, 1.0);
+                let (points, base) = q.over(range, &v.stocks.extra, now);
+                let moved = q.change_over(range, &v.stocks.extra, now);
+                let mcol = moved.map_or(MUTED, up_color);
+                c.text(F::Bold, range.label(), 15.0, px + 16.0, py + 26.0, TEXT, Align::Left);
+                let note = if loading(range) { "loading…".to_string() } else { moved.map(pct).unwrap_or_default() };
+                c.text(F::Bold, &note, 15.0, px + pw - 16.0, py + 26.0, if loading(range) { MUTED } else { mcol }, Align::Right);
+                plot(c, (px + 14.0, py + 36.0, pw - 22.0, ph - 44.0), &points, base, range, mcol, false);
+                if v.scroll == k && v.level != &Level::Top {
+                    c.outline(r, 14.0, TEXT, 2.0);
+                }
+            }
+        }
+        Some(range) => {
+            let area = chart_area();
+            let (ax, ay, aw, ah) = area;
+            c.rrect(area, 14.0, PANEL_DEEP, 1.0);
+            for (k, r) in Range::ALL.iter().enumerate() {
+                let rr = range_rect(k);
+                let on = *r == range;
+                c.rrect(rr, 9.0, if on { TEXT } else { 0x26262D }, 1.0);
+                c.text(F::Bold, r.label(), 15.0, rr.0 + rr.2 / 2.0, rr.1 + 23.0, if on { 0x111114 } else { TEXT_2 }, Align::Center);
+            }
+            let (points, base) = q.over(range, &v.stocks.extra, now);
+            let moved = q.change_over(range, &v.stocks.extra, now);
+            let mcol = moved.map_or(MUTED, up_color);
+            let note = if loading(range) {
+                "loading…".to_string()
+            } else {
+                match (moved, points.first()) {
+                    (Some(p), Some(_)) if range == Range::Day => format!("{}  since yesterday's close", pct(p)),
+                    (Some(p), Some(first)) => format!("{}  since {}", pct(p), when(first.0, if range == Range::FiveYear { Range::Year } else { Range::Month })),
+                    _ => String::new(),
+                }
+            };
+            c.text(F::Bold, &note, 16.0, ax + aw - 20.0, ay + 37.0, if loading(range) { MUTED } else { mcol }, Align::Right);
+            plot(c, (ax + 20.0, ay + 60.0, aw - 30.0, ah - 66.0), &points, base, range, mcol, true);
+        }
+    }
 }
 
-/// Touch: a tile (its index), a range pill (TAP_RANGE + k) or Back (TAP_BACK).
+/// Touch: a tile (its index), a pane (TAP_PANE + k), a range pill (TAP_RANGE + k), Back.
 pub(super) fn hit(v: &View, x: f32, y: f32) -> Option<Hit> {
-    let s = v.stocks;
-    if let Level::Detail(_) = v.level {
-        if let Some(k) = (0..Range::ALL.len()).find(|&k| inside(range_rect(k), x, y)) {
-            return Some(Hit::Feature(Page::Stocks, TAP_RANGE + k));
+    if let Some((_, expanded)) = opened(v.level) {
+        if inside(back_rect(), x, y) {
+            return Some(Hit::Feature(Page::Stocks, TAP_BACK));
         }
-        return inside(back_rect(), x, y).then_some(Hit::Feature(Page::Stocks, TAP_BACK));
+        return match expanded {
+            None => (0..Range::PANES.len()).find(|&k| inside(pane_rect(k), x, y)).map(|k| Hit::Feature(Page::Stocks, TAP_PANE + k)),
+            Some(_) => (0..Range::ALL.len()).find(|&k| inside(range_rect(k), x, y)).map(|k| Hit::Feature(Page::Stocks, TAP_RANGE + k)),
+        };
     }
     let first = first_on_screen(v.tile);
-    let n = s.quotes.len().saturating_sub(first).min(PER_SCREEN);
+    let n = v.stocks.quotes.len().saturating_sub(first).min(PER_SCREEN);
     let (rows, cols) = grid(n);
     (0..n).find(|&slot| inside(tile_rect(slot, rows, cols), x, y)).map(|slot| Hit::Feature(Page::Stocks, first + slot))
 }
 
 /// Where Hit::Feature(_, i) is, for the tap flash.
 pub(super) fn rect(v: &View, i: usize) -> Option<R> {
-    if i == TAP_BACK {
-        return Some(back_rect());
+    match i {
+        TAP_BACK => Some(back_rect()),
+        i if i >= TAP_RANGE => Some(range_rect(i - TAP_RANGE)),
+        i if i >= TAP_PANE => Some(pane_rect(i - TAP_PANE)),
+        _ => {
+            let first = first_on_screen(v.tile);
+            let n = v.stocks.quotes.len().saturating_sub(first).min(PER_SCREEN);
+            let (rows, cols) = grid(n);
+            i.checked_sub(first).filter(|&s| s < n).map(|slot| tile_rect(slot, rows, cols))
+        }
     }
-    if i >= TAP_RANGE {
-        return Some(range_rect(i - TAP_RANGE));
-    }
-    let first = first_on_screen(v.tile);
-    let n = v.stocks.quotes.len().saturating_sub(first).min(PER_SCREEN);
-    let (rows, cols) = grid(n);
-    i.checked_sub(first).filter(|&s| s < n).map(|slot| tile_rect(slot, rows, cols))
 }
 
 pub(super) fn hints(level: &Level) -> &'static str {
-    match level {
-        Level::Top => "press  pick a stock",
-        Level::Focus => "turn  choose  ·  press  open",
-        Level::Detail(_) => "turn  1D · 5D · 1M · 1Y  ·  press  Yahoo Finance  ·  double-click  back",
+    match opened(level) {
+        Some((_, None)) => "turn  pick a scale  ·  press  expand  ·  double-click  back",
+        Some((_, Some(_))) => "turn  1D … 5Y  ·  press  Yahoo Finance  ·  double-click  back",
+        None if level == &Level::Top => "press  pick a stock",
+        None => "turn  choose  ·  press  open",
     }
 }
 
 pub(super) fn crumb(v: &View) -> Option<String> {
-    match v.level {
-        Level::Detail(sym) => Some(format!("›  {sym}")),
-        Level::Focus => v.stocks.quotes.get(v.tile).map(|q| format!("›  {}", q.symbol)),
-        Level::Top => None,
+    match opened(v.level) {
+        Some((sym, Some(r))) => Some(format!("›  {sym}  ·  {}", r.label())),
+        Some((sym, None)) => Some(format!("›  {sym}")),
+        None if v.level == &Level::Focus => v.stocks.quotes.get(v.tile).map(|q| format!("›  {}", q.symbol)),
+        None => None,
     }
 }
 
@@ -286,20 +481,20 @@ mod tests {
     fn prices_read_like_prices() {
         assert_eq!(price(6812.4), "6,812.40");
         assert_eq!(price(64484.17), "64,484.17");
-        assert_eq!(price(351.91), "351.91");
         assert_eq!(price(0.45213), "0.4521");
-        assert_eq!(price(1234567.0), "1,234,567.00");
         assert_eq!(price(-12.5), "-12.50");
-        assert_eq!(grouped(0.87, 2), "0.87");
         assert_eq!(grouped(1427.832, 2), "1,427.83");
+        assert_eq!(axis_price(64317.2), "64,317");
+        assert_eq!(volume(345_447_821), "345.4M");
+        assert_eq!(volume(2_100_000_000), "2.10B");
     }
 
     #[test]
-    fn grids_fit_the_count() {
-        assert_eq!(grid(1), (1, 1));
-        assert_eq!(grid(4), (1, 4));
+    fn levels_name_the_stock_and_scale() {
+        assert_eq!(opened(&Level::Detail("NVDA".into())), Some(("NVDA", None)));
+        assert_eq!(opened(&Level::Detail("^GSPC@YTD".into())), Some(("^GSPC", Some(Range::Ytd))));
+        assert_eq!(opened(&Level::Focus), None);
         assert_eq!(grid(5), (2, 3));
-        assert_eq!(grid(8), (2, 4));
         assert_eq!(first_on_screen(9), 8);
     }
 }

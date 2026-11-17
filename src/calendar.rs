@@ -99,7 +99,7 @@ pub fn featured(up: &[&Event], now: u64) -> Option<usize> {
 
 // ---------------------------------------------------------------- time
 
-fn local(ms: u64) -> libc::tm {
+pub(crate) fn local(ms: u64) -> libc::tm {
     let t = (ms / 1000) as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&t, &mut tm) };
