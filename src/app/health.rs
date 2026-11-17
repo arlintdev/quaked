@@ -16,7 +16,14 @@ impl App {
                     self.tile = self.tile.min(st.macs.len().saturating_sub(1));
                 }
                 let changed = st != self.health;
+                // Running low: say so once (again only after it recovers).
+                let found = problems(&st.macs);
+                let news: Vec<String> = found.iter().filter(|(k, _)| !self.health_flags.contains(k)).map(|(_, t)| t.clone()).collect();
+                self.health_flags = found.into_iter().map(|(k, _)| k).collect();
                 self.health = st;
+                if let Some(r) = Self::summarize(news) {
+                    self.alert(PageId::Health, r, true);
+                }
                 if changed && self.page == PageId::Health {
                     self.redraw();
                 }
@@ -112,5 +119,47 @@ impl App {
     pub(super) fn health_peers_changed(&mut self) {
         let peers = self.peers.peers.iter().filter(|p| p.ok).map(|p| (p.name.clone(), p.host.clone(), p.port)).collect();
         let _ = self.health_cmd.send(HealthCmd::Peers(peers, self.cfg.sync.key.clone()));
+    }
+}
+
+/// What's running low on these Macs: (a key that stays the same while it lasts, the line
+/// to show). Disks under 5% or 10 GB free, memory pressure critical.
+pub(super) fn problems(macs: &[crate::health::Mac]) -> Vec<(String, String)> {
+    const GB: u64 = 1 << 30;
+    let low = |free: u64, total: u64| total > 0 && (free < 10 * GB || free * 20 < total);
+    let gb = |b: u64| format!("{:.1} GB", b as f64 / GB as f64);
+    let mut out = Vec::new();
+    for m in macs.iter().filter(|m| m.ok) {
+        if low(m.disk_free, m.disk_total) {
+            out.push((format!("disk:{}", m.name), format!("{} is almost out of disk space: {} free", m.name, gb(m.disk_free))));
+        }
+        for v in m.volumes.iter().filter(|v| low(v.free, v.total)) {
+            out.push((format!("vol:{}:{}", m.name, v.name), format!("{} on {} is almost full: {} free", v.name, m.name, gb(v.free))));
+        }
+        if m.pressure >= 4 {
+            out.push((format!("mem:{}", m.name), format!("{} is out of memory", m.name)));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::health::{Mac, Volume};
+
+    #[test]
+    fn low_disk_and_memory() {
+        let gb = 1u64 << 30;
+        let fine = Mac { name: "Mac mini".into(), ok: true, disk_free: 179 * gb, disk_total: 460 * gb, pressure: 1, volumes: vec![Volume { name: "storage".into(), free: 262 * gb, total: 931 * gb }], ..Default::default() };
+        assert!(problems(std::slice::from_ref(&fine)).is_empty());
+        let tight = Mac { name: "AustinM5Max".into(), ok: true, disk_free: 8 * gb, disk_total: 2000 * gb, pressure: 4, volumes: vec![Volume { name: "Backup".into(), free: 40 * gb, total: 4000 * gb }], ..Default::default() };
+        let p = problems(&[fine.clone(), tight]);
+        let keys: Vec<&str> = p.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["disk:AustinM5Max", "vol:AustinM5Max:Backup", "mem:AustinM5Max"]);
+        assert_eq!(p[0].1, "AustinM5Max is almost out of disk space: 8.0 GB free");
+        // A Mac that isn't answering has no numbers to judge.
+        let quiet = Mac { name: "Old".into(), ok: false, disk_total: 100 * gb, ..Default::default() };
+        assert!(problems(&[quiet]).is_empty());
     }
 }

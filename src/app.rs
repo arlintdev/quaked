@@ -13,6 +13,8 @@ mod calendar;
 mod call;
 mod deploy;
 mod digin_actions;
+mod relevance;
+use relevance::Urgency;
 mod focus;
 mod health;
 mod night;
@@ -150,6 +152,7 @@ struct Attention {
     page: PageId,
     reason: String,
     until: Instant,
+    urgency: Urgency,
 }
 
 struct Gfx {
@@ -245,6 +248,12 @@ struct App {
     cursor: (f64, f64),
     flash: Option<(Hit, Instant)>,
     attention: Option<Attention>,
+    /// The page the board last jumped to for an alert, how urgent it was, and when.
+    jumped: Option<(PageId, Urgency, Instant)>,
+    /// An urgent alert that came while you were using the board: jump once you stop.
+    pending_jump: Option<(PageId, Urgency, Instant)>,
+    /// Health problems already announced (app/health.rs `problems` keys).
+    health_flags: std::collections::HashSet<String>,
     blink_on: bool,
     next_blink: Instant,
     next_poll: Instant,
@@ -702,6 +711,12 @@ impl App {
     /// Flags something new on `page`: blink the ring, show why, and jump there unless
     /// the board is in use. Returns whether it jumped.
     fn alert(&mut self, page: PageId, reason: String, chirp: bool) -> bool {
+        self.alert_with(page, reason, chirp, Urgency::of(page))
+    }
+
+    /// `alert` with an urgency: what's on the board decides whether it may take it
+    /// (see app/relevance.rs). Returns whether it jumped.
+    fn alert_with(&mut self, page: PageId, reason: String, chirp: bool, urgency: Urgency) -> bool {
         let a = self.cfg.alerts.clone();
         let wanted = match page {
             PageId::Ai => a.ai,
@@ -709,21 +724,33 @@ impl App {
             PageId::Ops => a.ops,
             PageId::Docker => a.docker,
             PageId::Digin => a.digin,
+            PageId::Health => a.health,
             _ => true,
         };
         if !wanted || !self.cfg.pages.contains(&page) {
             return false;
         }
         device::log(format!("new: {reason}"));
-        let jump = a.jump && self.page != page && self.last_input.elapsed() > JUMP_QUIET;
-        if jump {
-            self.set_page(page);
+        // A more urgent notice that's still up keeps the top bar.
+        if self.attention.as_ref().is_some_and(|cur| cur.urgency > urgency && cur.page != page && Instant::now() < cur.until) {
+            return false;
         }
-        self.attention = Some(Attention { page, reason, until: Instant::now() + Duration::from_secs(a.seconds.max(10)) });
-        self.blink_on = true;
-        self.next_blink = Instant::now() + BLINK;
-        if chirp && self.cfg.buzzer {
-            let _ = self.commands.send(Command::Tone(NEW_STUFF_TONE.to_vec()));
+        let jump = if !self.may_jump(page, urgency) {
+            false
+        } else if self.last_input.elapsed() > JUMP_QUIET {
+            self.jump_for(page, urgency);
+            true
+        } else {
+            self.defer_jump(page, urgency);
+            false
+        };
+        self.attention = Some(Attention { page, reason, until: Instant::now() + Duration::from_secs(a.seconds.max(10)), urgency });
+        if urgency > Urgency::Low {
+            self.blink_on = true;
+            self.next_blink = Instant::now() + BLINK;
+            if chirp && self.cfg.buzzer {
+                let _ = self.commands.send(Command::Tone(NEW_STUFF_TONE.to_vec()));
+            }
         }
         self.update_ring();
         self.redraw();
@@ -1136,7 +1163,7 @@ impl App {
     fn show_pair_ask(&mut self) {
         let Some(a) = &self.pair_ask else { return };
         let reason = format!("{} wants to pair  ·  press to allow  ·  double-click to refuse", a.name);
-        self.attention = Some(Attention { page: self.page, reason, until: a.until });
+        self.attention = Some(Attention { page: self.page, reason, until: a.until, urgency: Urgency::Critical });
         self.blink_on = true;
         self.next_blink = Instant::now() + BLINK;
         if self.cfg.buzzer {
@@ -1997,7 +2024,14 @@ impl ApplicationHandler<Event> for App {
                 self.redraw();
             }
             Event::League(league::Event::Status(st)) => {
+                // Loading into a game: show it (unless you're using the board).
+                let started = !matches!(self.league.phase.as_str(), "GameStart" | "InProgress") && matches!(st.phase.as_str(), "GameStart" | "InProgress");
                 self.league = st;
+                if started && self.cfg.league.snap && self.cfg.pages.contains(&PageId::League) && self.may_jump(PageId::League, Urgency::High) {
+                    if self.last_input.elapsed() > JUMP_QUIET {
+                        self.jump_for(PageId::League, Urgency::High);
+                    }
+                }
                 self.update_ring();
                 if self.page == PageId::League || self.page == PageId::Dash {
                     self.redraw();
@@ -2170,11 +2204,13 @@ impl ApplicationHandler<Event> for App {
             self.next_logs = now + LOG_REFRESH;
         }
         let idle_for = Duration::from_secs(self.cfg.idle_seconds.max(5));
+        self.relevance_tick();
         if self.asks.is_empty() && self.last_input.elapsed() > idle_for && self.page_since.elapsed() > idle_for {
             // Stay on League while a match is being accepted or picked.
-            let league_busy = self.page == PageId::League && matches!(self.league.phase.as_str(), "ReadyCheck" | "ChampSelect");
-            if self.cfg.idle_home && self.page != PageId::Dash && self.cfg.pages.contains(&PageId::Dash) && !league_busy {
-                self.set_page(PageId::Dash);
+            let league_busy = self.page == PageId::League && relevance::in_match(&self.league.phase);
+            let home = if self.cfg.idle_home && !league_busy { self.idle_page() } else { None };
+            if let Some(page) = home.filter(|p| *p != self.page) {
+                self.set_page(page);
                 self.redraw();
             } else if self.level != Level::Top {
                 self.level = Level::Top;
@@ -2566,6 +2602,9 @@ pub fn run() {
         cursor: (0.0, 0.0),
         flash: None,
         attention: None,
+        jumped: None,
+        pending_jump: None,
+        health_flags: Default::default(),
         blink_on: false,
         next_blink: Instant::now(),
         next_poll: Instant::now(),

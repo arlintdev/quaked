@@ -107,6 +107,10 @@ pub struct Config {
     /// After `idle_seconds` without input, go back to the dashboard (when it's shown);
     /// otherwise just back to the top level of the current page.
     pub idle_home: bool,
+    /// With `idle_home`: go to what matters right now instead of always the dashboard (a
+    /// game, a meeting about to start, a Claude session waiting on you, a deploy, a focus
+    /// block).
+    pub idle_smart: bool,
     /// Pages in knob order. Leave one out to hide it.
     pub pages: Vec<PageId>,
     /// Show quaked's icon in the menu bar.
@@ -285,13 +289,13 @@ pub struct CalendarSettings {
     pub enabled: bool,
     /// Calendar names to show; empty = all.
     pub calendars: Vec<String>,
-    /// Minutes before a meeting with a join link to blink the ring and show the
-    /// Calendar page (0 = never).
-    pub alert_minutes: u64,
+    /// Minutes before each meeting to blink the ring and jump to the Calendar page (0 = as
+    /// it starts); empty = never.
+    pub jump_minutes: Vec<u32>,
 }
 impl Default for CalendarSettings {
     fn default() -> Self {
-        CalendarSettings { enabled: true, calendars: Vec::new(), alert_minutes: 2 }
+        CalendarSettings { enabled: true, calendars: Vec::new(), jump_minutes: vec![15, 10, 5, 0] }
     }
 }
 
@@ -418,11 +422,18 @@ pub struct Alerts {
     pub docker: bool,
     /// New Digin mentions, DMs and assignments.
     pub digin: bool,
+    /// While a League game is on the board, only the most urgent things (a meeting about
+    /// to start) take it away.
+    pub quiet_in_games: bool,
+    /// Same during a focus block.
+    pub quiet_in_focus: bool,
+    /// A Mac running low on disk space or memory.
+    pub health: bool,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { blink: true, jump: true, seconds: 300, ai: true, code: true, ops: true, docker: true, digin: true }
+        Alerts { blink: true, jump: true, seconds: 300, ai: true, code: true, ops: true, docker: true, digin: true, quiet_in_games: true, quiet_in_focus: true, health: true }
     }
 }
 
@@ -596,6 +607,7 @@ impl Default for Config {
             buzzer: true,
             idle_seconds: 45,
             idle_home: true,
+            idle_smart: true,
             menu_bar: true,
             session_idle_minutes: 5,
             pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Digin, PageId::Calendar, PageId::Focus, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],

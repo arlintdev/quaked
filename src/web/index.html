@@ -484,18 +484,22 @@ function viewGeneral(main) {
     slider("Screen brightness", "device.screenBrightness", 10, 255, 1, (v) => `${Math.round(v / 255 * 100)}%`),
     toggle("Buzzer", "buzzer", "Chirps when a Claude session waits on you or something new comes in"),
     choice("Idle after", "idleSeconds", idle.map((s) => [s, secs(s)]), "Time without input before the board backs out", true),
-    toggle("Go back to the dashboard when idle", "idleHome", "Stays on League during a ready check or champ select"),
+    toggle("Go back when idle", "idleHome", "Off: just back to the top of the current page"),
+    toggle("Go to what matters", "idleSmart", "When idle, show your game, a meeting about to start, a Claude session waiting on you, a running deploy or focus block; otherwise the dashboard"),
     choice("Drop finished Claude sessions after", "sessionIdleMinutes", [[0, "Never"], [2, "2 min"], [5, "5 min"], [10, "10 min"], [30, "30 min"], [60, "1 hour"]], "Done or idle that long; working and waiting ones always stay", true),
     toggle("Show quaked in the menu bar", "menuBar", "Status, Open Settings, the Quake's pages, Restart and Quit"),
     toggle("The Quake's own microphone", "device.mic", "Off also turns off its bright indicator light"),
     toggle("Flip touch left / right", "touch.flipX"),
     toggle("Flip touch top / bottom", "touch.flipY", "On by default: the panel reports y from the bottom")));
-  main.append(card("New stuff", "Touching the board stops the blinking. It won't jump while you've used the board in the last 15 seconds.",
+  main.append(card("New stuff", "Touching the board stops the blinking. Nothing jumps while you're using the board; something urgent jumps once you've left it for 15 seconds. A page the board just jumped to only gives way to something more urgent for a minute.",
     toggle("Blink the ring", "alerts.blink"), toggle("Jump to the pane that has it", "alerts.jump"),
+    toggle("Keep my game on the board", "alerts.quietInGames", "During a League game only a meeting about to start takes the board"),
+    toggle("Keep focus blocks quiet", "alerts.quietInFocus", "During a focus block only urgent things jump; the rest just blink"),
     choice("Stop blinking after", "alerts.seconds", [[60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [1800, "30 min"]], null, true),
     toggle("Claude sessions waiting on you", "alerts.ai"), toggle("Review requests, failing CI, approvals, conflicts", "alerts.code"),
     toggle("Hosts going down, sites failing", "alerts.ops"), toggle("Containers stopping", "alerts.docker"),
-    toggle("Digin mentions, messages and assignments", "alerts.digin")));
+    toggle("Digin mentions, messages and assignments", "alerts.digin"),
+    toggle("A Mac low on disk space or memory", "alerts.health")));
   main.append(card("Claude's questions and permissions", "When Claude asks you to choose or needs permission, the prompt shows on the Quake next to Claude's own: turn to an option and press, or answer on the Mac. Whichever you answer first applies, and the other clears.",
     toggle("Answer Claude's questions on the Quake", "ask.enabled"),
     toggle("Permission prompts on the Quake too", "ask.permissions", "Allow, Always allow (when Claude Code offers a rule) or Deny with the knob"),
@@ -546,7 +550,14 @@ function viewExtras(main) {
   main.append(card("Calendar", "Uses the calendars in macOS Calendar (macOS asks once for access).",
     toggle("Calendar", "calendar.enabled"),
     lines("Only these calendars", "calendar.calendars", "One name per line; empty = all"),
-    choice("Heads-up before meetings with a link", "calendar.alertMinutes", [[0, "Off"], [1, "1 min"], [2, "2 min"], [5, "5 min"], [10, "10 min"]], "Blinks the ring and jumps to the calendar", true)));
+    (() => {
+      const opts = [["15,10,5,0", "15, 10 and 5 min before, and as it starts"], ["10,5,0", "10 and 5 min before, and as it starts"], ["5,0", "5 min before and as it starts"], ["15,5", "15 and 5 min before"], ["0", "As it starts"], ["", "Never"]];
+      const cur = (get("calendar.jumpMinutes") || []).join(",");
+      if (!opts.some(([v]) => v === cur)) opts.unshift([cur, `${cur} min before`]);
+      const sel = h("select", { onchange: (e) => set("calendar.jumpMinutes", e.target.value ? e.target.value.split(",").map(Number) : []) },
+        opts.map(([v, t]) => h("option", { value: v, selected: v === cur }, t)));
+      return h("div", { class: "row" }, h("div", { class: "label" }, "Jump to the calendar before meetings", h("small", {}, "Blinks the ring and shows the meeting; 5 minutes and less also takes the board from a game or a focus block")), sel);
+    })()));
   main.append(card("Clipboard and windows", "Copies from password managers are never kept; the history lives in memory only.",
     toggle("Clipboard picker", "paste.enabled"),
     choice("Remember", "paste.history", [[10, "10 copies"], [20, "20 copies"], [40, "40 copies"]], null, true),

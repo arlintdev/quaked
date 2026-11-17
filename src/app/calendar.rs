@@ -5,6 +5,7 @@
 //! Calendar), and a meeting with a join link is announced a couple of minutes before it
 //! starts: the ring blinks and the board shows the Calendar page.
 use super::*;
+use super::relevance::Urgency;
 use crate::calendar::{self as cal, Event};
 use objc2::rc::autoreleasepool;
 use objc2::runtime::AnyObject;
@@ -39,7 +40,7 @@ impl App {
                 // The knob's pick and what's been announced live here, not in the thread.
                 st.selected = std::mem::take(&mut self.calendar.selected);
                 st.announced = std::mem::take(&mut self.calendar.announced);
-                st.announced.retain(|id| st.events.iter().any(|e| &e.id == id));
+                st.announced.retain(|k| st.events.iter().any(|e| k.rsplit_once('@').is_some_and(|(id, _)| id == e.id)));
                 if !st.events.iter().any(|e| e.id == st.selected) {
                     st.selected.clear();
                 }
@@ -124,36 +125,50 @@ impl App {
         }
     }
 
-    /// Meetings with a join link that start within `alertMinutes` and haven't been announced.
+    /// Meetings reaching one of `jumpMinutes` before they start (15, 10, 5 and 0 by default):
+    /// blink, say it and jump to the Calendar page, leading with that meeting. 5 minutes and
+    /// less is critical (it takes the board from a game or a focus block too).
     fn calendar_announce(&mut self) {
-        let lead = self.cfg.calendar.alert_minutes * 60_000;
-        if lead == 0 || !self.calendar.authorized {
+        if self.cfg.calendar.jump_minutes.is_empty() || !self.calendar.authorized {
             return;
         }
         let now = status::now_ms();
-        let due = self.calendar.events.iter().find(|e| !e.all_day && !e.join_url.is_empty() && e.start_ms > now && e.start_ms - now <= lead && !self.calendar.announced.contains(&e.id)).cloned();
-        let Some(e) = due else { return };
-        self.calendar.announced.push(e.id.clone());
-        let mins = (e.start_ms - now).div_ceil(60_000);
-        self.alert(PageId::Calendar, format!("{} in {mins} min", e.title), true);
+        let due = self.calendar.events.iter().filter(|e| !e.all_day).find_map(|e| {
+            let reached = reached_marks(&self.cfg.calendar.jump_minutes, e.start_ms, now);
+            let closest = *reached.iter().min()?;
+            (!self.calendar.announced.contains(&mark_key(&e.id, closest))).then(|| (e.clone(), reached, closest))
+        });
+        let Some((e, reached, closest)) = due else { return };
+        // Every mark already passed counts as said (quaked starting 3 minutes before a
+        // meeting doesn't announce 15, 10 and 5 in a row).
+        for m in reached {
+            let k = mark_key(&e.id, m);
+            if !self.calendar.announced.contains(&k) {
+                self.calendar.announced.push(k);
+            }
+        }
+        let reason = if e.start_ms <= now {
+            format!("{} is starting", e.title)
+        } else {
+            format!("{} in {} min", e.title, (e.start_ms - now).div_ceil(60_000))
+        };
+        let urgency = if closest <= 5 { Urgency::Critical } else { Urgency::High };
+        self.alert_with(PageId::Calendar, reason, closest <= 5, urgency);
         // After the alert (showing the page resets the pick): lead with this meeting.
         self.calendar.selected = e.id;
         self.redraw();
     }
 
-    /// Called on every loop; return when it next needs waking (timers, animation).
+    /// Called on every loop; return when it next needs waking (the next mark).
     pub(super) fn calendar_tick(&mut self, now: Instant) -> Option<Instant> {
         self.calendar_announce();
-        let lead = self.cfg.calendar.alert_minutes * 60_000;
-        if lead == 0 {
-            return None;
-        }
         let ms = status::now_ms();
+        let marks = &self.cfg.calendar.jump_minutes;
         self.calendar
             .events
             .iter()
-            .filter(|e| !e.all_day && !e.join_url.is_empty() && !self.calendar.announced.contains(&e.id))
-            .map(|e| e.start_ms.saturating_sub(lead))
+            .filter(|e| !e.all_day)
+            .flat_map(|e| marks.iter().filter(|&&m| !self.calendar.announced.contains(&mark_key(&e.id, m))).map(move |&m| e.start_ms.saturating_sub(m as u64 * 60_000)))
             .filter(|&at| at > ms)
             .min()
             .map(|at| now + Duration::from_millis(at - ms))
@@ -177,5 +192,41 @@ impl App {
             "selected": self.calendar_selected().as_ref().map(ev),
             "next": c.next(now).map(ev),
         })
+    }
+}
+
+/// The id `announced` keeps for one meeting at one mark ("<event id>@<minutes>").
+fn mark_key(id: &str, minutes: u32) -> String {
+    format!("{id}@{minutes}")
+}
+
+/// The marks (minutes before `start`) already reached at `now`, while the meeting is still
+/// starting (up to a minute after it begins).
+fn reached_marks(marks: &[u32], start: u64, now: u64) -> Vec<u32> {
+    let left = start as i64 - now as i64;
+    if left <= -60_000 {
+        return Vec::new();
+    }
+    marks.iter().copied().filter(|&m| left <= m as i64 * 60_000).collect()
+}
+
+#[cfg(test)]
+mod mark_tests {
+    use super::*;
+
+    const M: u64 = 60_000;
+
+    #[test]
+    fn marks_reached_as_the_meeting_nears() {
+        let marks = [15, 10, 5, 0];
+        let start = 100 * M;
+        assert!(reached_marks(&marks, start, start - 16 * M).is_empty());
+        assert_eq!(reached_marks(&marks, start, start - 15 * M), [15]);
+        assert_eq!(reached_marks(&marks, start, start - 7 * M), [15, 10]);
+        assert_eq!(reached_marks(&marks, start, start - 3 * M), [15, 10, 5]);
+        assert_eq!(reached_marks(&marks, start, start), [15, 10, 5, 0]);
+        assert_eq!(reached_marks(&marks, start, start + 30_000), [15, 10, 5, 0]);
+        assert!(reached_marks(&marks, start, start + 2 * M).is_empty());
+        assert_eq!(mark_key("abc@123", 5), "abc@123@5");
     }
 }

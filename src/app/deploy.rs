@@ -61,7 +61,9 @@ impl App {
                     if self.cfg.pages.contains(&PageId::Deploy) {
                         self.deploy.pulse = Some((f.ok, status::now_ms() + PULSE_MS));
                     }
-                    self.alert(PageId::Deploy, reason, true);
+                    // A failure is waiting on you; a success is just news.
+                    let urgency = if f.ok { super::relevance::Urgency::Normal } else { super::relevance::Urgency::High };
+                    self.alert_with(PageId::Deploy, reason, true, urgency);
                 }
             }
             Update::Notice(text) => self.deploy_toast(text),
