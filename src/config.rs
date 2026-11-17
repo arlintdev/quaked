@@ -185,10 +185,18 @@ impl Default for Code {
 #[serde(rename_all = "camelCase", default)]
 pub struct CallSettings {
     pub enabled: bool,
+    /// Count a web browser holding the microphone as a call (Meet, Teams or Zoom in a tab).
+    pub browsers: bool,
+    /// More call apps, by bundle id ("com.example.Meetings").
+    pub apps: Vec<String>,
+    /// When the soundboard isn't carrying your mic, a press brings the call app forward
+    /// and types its own mute shortcut (Zoom ⌘⇧A, Teams / Webex / Discord ⌘⇧M, Slack
+    /// ⌘⇧Space). Off: a press only brings the call app forward so you can mute there.
+    pub mute_shortcut: bool,
 }
 impl Default for CallSettings {
     fn default() -> Self {
-        CallSettings { enabled: true }
+        CallSettings { enabled: true, browsers: true, apps: Vec::new(), mute_shortcut: false }
     }
 }
 
@@ -258,10 +266,13 @@ pub struct CalendarSettings {
     pub enabled: bool,
     /// Calendar names to show; empty = all.
     pub calendars: Vec<String>,
+    /// Minutes before a meeting with a join link to blink the ring and show the
+    /// Calendar page (0 = never).
+    pub alert_minutes: u64,
 }
 impl Default for CalendarSettings {
     fn default() -> Self {
-        CalendarSettings { enabled: true, calendars: Vec::new() }
+        CalendarSettings { enabled: true, calendars: Vec::new(), alert_minutes: 2 }
     }
 }
 

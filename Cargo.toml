@@ -19,6 +19,7 @@ libc = "0.2"
 cpal = "0.15"
 native-tls = "0.2"
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "alac", "flac", "wav", "pcm", "aiff", "caf"] }
+block2 = "0.5"
 
 [profile.release]
 opt-level = 3
