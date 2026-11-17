@@ -1852,7 +1852,9 @@ fn soundboard(c: &mut Canvas, v: &View) {
 
 fn bytes(n: u64) -> String {
     let f = n as f64;
-    if f >= 1e9 {
+    if f >= 1_099_511_627_776.0 {
+        format!("{:.1} TB", f / 1_099_511_627_776.0)
+    } else if f >= 1e9 {
         format!("{:.1} GB", f / 1_073_741_824.0)
     } else if f >= 1e6 {
         format!("{:.0} MB", f / 1_048_576.0)

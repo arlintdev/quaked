@@ -96,10 +96,21 @@ pub struct Mac {
     pub net_out: f64,
     pub disk_free: u64,
     pub disk_total: u64,
+    /// Attached drives (local, writable volumes under /Volumes), by name.
+    pub volumes: Vec<Volume>,
     pub uptime_s: u64,
     pub power: Option<Power>,
     pub batteries: Vec<Battery>,
     pub hist: Hist,
+}
+
+/// An attached drive: an external disk or a second internal one mounted under /Volumes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Volume {
+    pub name: String,
+    pub free: u64,
+    pub total: u64,
 }
 
 /// What the board shows: this Mac first, then the paired Macs.
@@ -325,6 +336,7 @@ impl Sampler {
             m.disk_free = free;
             m.disk_total = total;
         }
+        m.volumes = volumes();
         m.uptime_s = uptime().unwrap_or(0);
         m.at_ms = now_ms();
         let round = |v: f64| ((v * 10.0).round() / 10.0) as f32;
@@ -434,6 +446,41 @@ fn disk(path: &str) -> Option<(u64, u64)> {
     }
     let bs = st.f_bsize as u64;
     Some((st.f_bavail * bs, st.f_blocks * bs))
+}
+
+/// The attached drives: local, writable, browsable volumes under /Volumes (so no network
+/// shares, which can hang statfs, no disk images or installers, no system volumes).
+fn volumes() -> Vec<Volume> {
+    let mut list: *mut libc::statfs = std::ptr::null_mut();
+    // MNT_NOWAIT: the kernel's cached list, without asking each file system (fresh numbers
+    // come from statfs on the ones kept).
+    let n = unsafe { libc::getmntinfo(&mut list, libc::MNT_NOWAIT) };
+    if n <= 0 || list.is_null() {
+        return Vec::new();
+    }
+    let all = unsafe { std::slice::from_raw_parts(list, n as usize) };
+    let mut out: Vec<Volume> = all
+        .iter()
+        .filter_map(|st| {
+            let on = unsafe { std::ffi::CStr::from_ptr(st.f_mntonname.as_ptr()) }.to_string_lossy().into_owned();
+            let name = attached(&on, st.f_flags)?.to_string();
+            let (free, total) = disk(&on)?;
+            (total > 0).then_some(Volume { name, free, total })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// The volume's name when a mount at `on` with these flags is an attached drive.
+fn attached(on: &str, flags: u32) -> Option<&str> {
+    let name = on.strip_prefix("/Volumes/")?;
+    let flags = flags as i32;
+    let local = flags & libc::MNT_LOCAL != 0;
+    let read_only = flags & libc::MNT_RDONLY != 0;
+    let hidden = flags & libc::MNT_DONTBROWSE != 0;
+    (local && !read_only && !hidden && !name.is_empty() && !name.contains('/')).then_some(name)
 }
 
 fn net_bytes() -> Option<(u64, u64)> {
@@ -615,6 +662,7 @@ pub fn sample() -> Status {
         net_out: 318_000.0,
         disk_free: 412_000_000_000,
         disk_total: 994_662_584_320,
+        volumes: vec![Volume { name: "storage".into(), free: 262_000_000_000, total: 1_000_000_000_000 }, Volume { name: "Time Machine".into(), free: 1_400_000_000_000, total: 4_000_000_000_000 }],
         uptime_s: 3 * 86_400 + 6 * 3600 + 12 * 60,
         power: None,
         batteries: vec![
@@ -665,6 +713,25 @@ pub fn sample() -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attached_drives_only() {
+        let (local, ro, hidden) = (libc::MNT_LOCAL as u32, libc::MNT_RDONLY as u32, libc::MNT_DONTBROWSE as u32);
+        assert_eq!(attached("/Volumes/storage", local), Some("storage"));
+        assert_eq!(attached("/Volumes/Time Machine", local), Some("Time Machine"));
+        assert_eq!(attached("/", local | ro), None);
+        assert_eq!(attached("/System/Volumes/Data", local | hidden), None);
+        assert_eq!(attached("/Volumes/Install macOS", local | ro), None);
+        assert_eq!(attached("/Volumes/share", 0), None);
+        assert_eq!(attached("/Volumes/Backups", local | hidden), None);
+        assert_eq!(attached("/Volumes/a/b", local), None);
+    }
+
+    #[test]
+    fn older_peers_have_no_volumes() {
+        let m: Mac = serde_json::from_str(r#"{"name":"Old","ok":true,"diskFree":1,"diskTotal":2}"#).unwrap();
+        assert!(m.volumes.is_empty());
+    }
 
     const VM_STAT: &str = "Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                                    21053.

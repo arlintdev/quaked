@@ -101,19 +101,7 @@ fn mac_column(c: &mut Canvas, v: &View, m: &Mac, r: R, local: bool) {
     let ix = x + 26.0;
     let right = x + w - 24.0;
 
-    // Header: name (+ THIS MAC), chip · cores · uptime; disk and battery on the right.
-    let mut rx = right;
-    if m.ok {
-        rx = disk_block(c, v, m, rx, y);
-        if let Some(p) = &m.power {
-            rx = power_block(c, p, rx - 28.0, y);
-        }
-    }
-    let name_max = (rx - 24.0 - ix - if local { 100.0 } else { 0.0 }).max(80.0);
-    let nw = c.fit(F::Bold, &m.name, 26.0, name_max, ix, y + 40.0, if m.ok { TEXT } else { TEXT_2 }, Align::Left);
-    if local {
-        c.pill(ix + nw + 12.0, y + 20.0, "THIS MAC", 11.0, 0x1E3634, v.accent);
-    }
+    // Header: name (+ THIS MAC), chip · cores · uptime; disks and battery on the right.
     let mut sub: Vec<String> = Vec::new();
     if !m.chip.is_empty() {
         sub.push(m.chip.clone());
@@ -124,7 +112,25 @@ fn mac_column(c: &mut Canvas, v: &View, m: &Mac, r: R, local: bool) {
     if m.ok && m.uptime_s > 0 {
         sub.push(format!("up {}", uptime(m.uptime_s)));
     }
-    c.clip(F::Medium, &sub.join("  ·  "), 15.0, (rx - 24.0 - ix).max(80.0), ix, y + 64.0, MUTED);
+    let sub = sub.join("  ·  ");
+    let mut rx = right;
+    if m.ok {
+        // Drives stop short of the name (and THIS MAC) and the line under it; a long name
+        // gets clipped at 260 px.
+        let name_w = c.measure(F::Bold, &m.name, 26.0).min(260.0) + if local { 104.0 } else { 0.0 };
+        let sub_w = c.measure(F::Medium, &sub, 15.0).min(300.0);
+        let battery_w = if m.power.is_some() { 110.0 } else { 0.0 };
+        rx = disk_block(c, v, m, rx, y, ix + name_w.max(sub_w) + 16.0 + battery_w);
+        if let Some(p) = &m.power {
+            rx = power_block(c, p, rx - 28.0, y);
+        }
+    }
+    let name_max = (rx - 24.0 - ix - if local { 100.0 } else { 0.0 }).max(80.0);
+    let nw = c.fit(F::Bold, &m.name, 26.0, name_max, ix, y + 40.0, if m.ok { TEXT } else { TEXT_2 }, Align::Left);
+    if local {
+        c.pill(ix + nw + 12.0, y + 20.0, "THIS MAC", 11.0, 0x1E3634, v.accent);
+    }
+    c.clip(F::Medium, &sub, 15.0, (rx - 24.0 - ix).max(80.0), ix, y + 64.0, MUTED);
 
     if !m.ok {
         let why = m.error.as_deref().unwrap_or("not answering");
@@ -272,18 +278,38 @@ fn metric(c: &mut Canvas, r: R, m: &Metric) {
     }
 }
 
-/// "412 GB free" over a used bar, right-aligned at `rx`; returns where it starts.
-fn disk_block(c: &mut Canvas, v: &View, m: &Mac, rx: f32, y: f32) -> f32 {
-    if m.disk_total == 0 {
-        return rx;
+/// The Mac's disk, then its attached drives to the left of it, each "412 GB free" over a
+/// used bar, right-aligned at `rx` and stopping at `min_x` (the rest become "+2 more");
+/// returns where they start.
+fn disk_block(c: &mut Canvas, v: &View, m: &Mac, rx: f32, y: f32, min_x: f32) -> f32 {
+    let mut disks: Vec<(String, u64, u64)> = Vec::new();
+    if m.disk_total > 0 {
+        disks.push(("DISK".into(), m.disk_free, m.disk_total));
     }
-    let label = format!("{} free", bytes(m.disk_free));
-    let tw = c.text(F::Mono, &label, 16.0, rx, y + 38.0, TEXT_2, Align::Right);
-    let bw = tw.max(130.0);
-    let used = 1.0 - m.disk_free as f32 / m.disk_total.max(1) as f32;
-    bar(c, rx - bw, y + 52.0, bw, used, usage_color(used, v.accent));
-    let lw = c.text(F::Bold, "DISK", 12.0, rx - bw - 12.0, y + 37.0, FAINT, Align::Right);
-    rx - bw - 12.0 - lw
+    disks.extend(m.volumes.iter().map(|d| (d.name.to_uppercase(), d.free, d.total)));
+    let mut rx = rx;
+    for (k, (name, free, total)) in disks.iter().enumerate() {
+        let label = format!("{} free", bytes(*free));
+        let tw = c.measure(F::Mono, &label, 16.0);
+        let bw = tw.max(110.0);
+        let lw = c.measure(F::Bold, name, 12.0).min(120.0);
+        let need = bw + 12.0 + lw;
+        let more = disks.len() - k;
+        // Leave room for the "+N" pill unless this is the last one.
+        let pill = if more > 1 { 60.0 } else { 0.0 };
+        if k > 0 && rx - need - pill < min_x {
+            let label = format!("+{more}");
+            let pw = c.measure(F::Bold, &label, 13.0) + 13.0 * 1.4;
+            c.pill(rx - pw, y + 26.0, &label, 13.0, 0x2A2A31, TEXT_2);
+            return rx - pw;
+        }
+        c.text(F::Mono, &label, 16.0, rx, y + 38.0, TEXT_2, Align::Right);
+        let used = 1.0 - *free as f32 / (*total).max(1) as f32;
+        bar(c, rx - bw, y + 52.0, bw, used, usage_color(used, v.accent));
+        c.clip(F::Bold, name, 12.0, lw, rx - bw - 12.0 - lw, y + 37.0, FAINT);
+        rx -= need + 22.0;
+    }
+    rx + 22.0
 }
 
 /// The Mac's own battery (laptops), right-aligned at `rx`; returns where it starts.
