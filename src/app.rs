@@ -1823,6 +1823,19 @@ impl App {
             self.last_input = Instant::now();
             self.clear_attention();
         }
+        // Presses in the log (like taps), to tell a quick press-press from a double-click.
+        if let Input::KnobPress(code @ (KNOB_PRESS | KNOB_DOUBLE | KNOB_HOLD)) = input {
+            let what = match code {
+                KNOB_PRESS => "press",
+                KNOB_DOUBLE => "double-click",
+                _ => "hold",
+            };
+            let level = match &self.level {
+                Level::Detail(d) => format!("detail {d}"),
+                l => format!("{l:?}").to_lowercase(),
+            };
+            device::log(format!("knob: {what} on {} ({level})", self.page.title()));
+        }
         match input {
             Input::Connected { luminance, firmware } => {
                 device::log(format!("device: Quake firmware {}", firmware.as_deref().unwrap_or("?")));
@@ -2236,6 +2249,9 @@ impl ApplicationHandler<Event> for App {
         }
         let idle_for = Duration::from_secs(self.cfg.idle_seconds.max(5));
         self.relevance_tick();
+        // Reading a chart isn't being idle: an opened stock stays up for 10 minutes.
+        let reading = self.page == PageId::Stocks && matches!(self.level, Level::Detail(_));
+        let idle_for = if reading { idle_for.max(Duration::from_secs(600)) } else { idle_for };
         if self.asks.is_empty() && self.last_input.elapsed() > idle_for && self.page_since.elapsed() > idle_for {
             // Stay on League while a match is being accepted or picked.
             let league_busy = self.page == PageId::League && relevance::in_match(&self.league.phase);
