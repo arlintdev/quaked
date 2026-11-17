@@ -278,7 +278,7 @@ fn preview(dir: &str) {
     let dg = digin::Status {
         accounts: vec![digin::Account { url: "https://digin.work".into(), label: "digin.work".into(), signed_in: true, handle: "austin".into(), name: "Austin".into(), ..Default::default() }],
         issues: vec![
-            digin::Issue { key: "DIG-612".into(), title: "Runner pool drains when the API restarts".into(), status: "in_progress".into(), status_name: "In progress".into(), priority: 1, url: String::new(), ..Default::default() },
+            digin::Issue { id: 4512, key: "DIG-612".into(), title: "Runner pool drains when the API restarts".into(), status: "in_progress".into(), status_name: "In progress".into(), priority: 1, url: String::new(), ..Default::default() },
             digin::Issue { key: "DIG-598".into(), title: "Bot kinds: per-kind rate limits".into(), status: "todo".into(), status_name: "Todo".into(), priority: 2, ..Default::default() },
             digin::Issue { key: "KES-41".into(), title: "Wiki: drag pages between projects".into(), status: "waiting".into(), status_name: "Waiting".into(), priority: 3, ..Default::default() },
             digin::Issue { key: "DIG-577".into(), title: "Calendar invites show the wrong time zone".into(), status: "backlog".into(), status_name: "Backlog".into(), priority: 4, ..Default::default() },
@@ -289,14 +289,77 @@ fn preview(dir: &str) {
             digin::Note { id: 3, kind: "assigned".into(), title: "DIG-612 assigned to you".into(), body: "Runner pool drains when the API restarts".into(), created: now - 70 * 60_000, ..Default::default() },
         ],
         pages: vec![
-            digin::DocPage { title: "Release checklist 0.47".into(), project: "DIG".into(), updated: now - 9 * 60_000, changed: true, ..Default::default() },
+            digin::DocPage { id: 77, title: "Release checklist 0.47".into(), project: "DIG".into(), updated: now - 9 * 60_000, changed: true, ..Default::default() },
             digin::DocPage { title: "Runner architecture".into(), project: "DIG".into(), updated: now - 3 * 3_600_000, changed: false, ..Default::default() },
             digin::DocPage { title: "Onboarding".into(), project: "KES".into(), updated: now - 26 * 3_600_000, changed: false, ..Default::default() },
         ],
         chat_unread: 14,
         chat_mentions: 1,
         chat_channels: 3,
+        detail: None,
+        reply: None,
     };
+    // Digin items open on the board: an issue with "Done" waiting for its second press, an
+    // inbox mention in full, a page's text.
+    let dg_open = |key: &str, body: digin::Body, focus: Option<usize>, armed: bool| digin::Status {
+        detail: Some(digin::Detail { key: key.into(), account: 0, body, loading: false, error: None, focus, armed: armed.then(|| (focus.unwrap_or(0), std::time::Instant::now())), busy: None, said: None }),
+        ..dg.clone()
+    };
+    let dg_status = |id: i64, name: &str, category: &str| digin::StatusOpt { id, name: name.into(), category: category.into() };
+    let dg_issue = dg_open(
+        "issue:0:4512",
+        digin::Body::Issue(digin::IssueView {
+            id: 4512,
+            key: "DIG-612".into(),
+            title: "Runner pool drains when the API restarts".into(),
+            status: "in_progress".into(),
+            status_id: 31,
+            status_name: "In progress".into(),
+            priority: 1,
+            project: "Digin".into(),
+            assignee: "you".into(),
+            updated: now - 3 * 3_600_000,
+            description: digin::markdown("When the API restarts, runners lose their lease and the pool drains to zero for about two minutes. Jobs queue up behind it and the dashboard shows every runner as **offline**.\n\n## What happens\n- the API exits on `SIGTERM` without handing leases over\n- runners back off for 120 s before they register again\n\n[[steps]]\n- [x] Reproduce on staging\n- [ ] Keep leases across restarts\n\n```\nlease.renew(ttl = 30s)\n```"),
+            comments: vec![
+                digin::Comment { author: "Priya".into(), created: now - 22 * 60_000, text: digin::markdown("Pushed a fix on `runner-lease`: leases now survive a restart. Can you take a look before 0.47?") },
+                digin::Comment { author: "Sam".into(), created: now - 64 * 60_000, text: digin::markdown("Seeing this on prod too, three times this week.") },
+            ],
+            comment_count: 2,
+            statuses: vec![dg_status(29, "Backlog", "backlog"), dg_status(30, "Todo", "todo"), dg_status(31, "In progress", "in_progress"), dg_status(32, "In review", "waiting"), dg_status(33, "Done", "done"), dg_status(34, "Canceled", "canceled")],
+            ..Default::default()
+        }),
+        Some(4),
+        true,
+    );
+    let dg_note = dg_open(
+        "note:0:1",
+        digin::Body::Note(digin::NoteView {
+            id: 1,
+            kind: "mentioned".into(),
+            title: "Sam in #release".into(),
+            author: "Sam Okafor".into(),
+            created: now - 4 * 60_000,
+            text: digin::markdown("@austin can you sign off on **0.47** before 5? Everything on the [release checklist](/DIG/pages/77) is green except the runner drain.\n\n- DIG-612 has a fix on `runner-lease`, Priya says it's ready\n- staging has been up on it since this morning\n\nIf you'd rather hold, say so and I'll move the release to Thursday."),
+            ..Default::default()
+        }),
+        None,
+        false,
+    );
+    let dg_page = dg_open(
+        "page:0:77",
+        digin::Body::Page(digin::PageView {
+            id: 77,
+            title: "Release checklist 0.47".into(),
+            project: "Digin".into(),
+            updated_by: "Priya".into(),
+            updated: now - 9 * 60_000,
+            changed: true,
+            text: digin::markdown("# Before the release\n\n1. Merge everything tagged **0.47** into `main`\n2. Run the migrations on staging and check the runner pool\n3. Write the changelog: what changed for *people*, not for code\n\n## Sign-off\n\n| Area | Owner | State |\n|---|---|---|\n| Runners | Priya | ready |\n| Calendar | Sam | ready |\n\n> Nothing ships on a Friday.\n\n## Commands\n\n```sh\n./deploy.sh --stage\n./deploy.sh --prod\n```\n\nAfter the release, watch the [dashboard](https://digin.work/ops) for an hour and post in #release."),
+            ..Default::default()
+        }),
+        None,
+        false,
+    );
     let mut history = render::History::default();
     for i in 0..34u32 {
         render::History::push(&mut history.ai_steps, [0.0, 2.0, 5.0, 9.0, 4.0, 0.0, 0.0, 3.0, 12.0, 7.0, 6.0, 1.0][(i % 12) as usize]);
@@ -319,7 +382,7 @@ fn preview(dir: &str) {
     let (call_on, call_off) = (call::sample(), call::Status::default());
     let (night_on, night_off) = (night::sample(), night::Status::default());
     let (focus_s, deploy_s, paste_s, windows_s, calendar_s, health_s, viz_s) = (focus::sample(), deploy::sample(), clipboard::sample(), windows::sample(), calendar::sample(), health::sample(), viz::sample());
-    let shots: [(&str, Page, Level, usize, usize, usize); 31] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 34] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -351,6 +414,9 @@ fn preview(dir: &str) {
         ("37-night", Page::Dash, Level::Top, 0, 0, 0),
         ("38-music-viz", Page::Music, Level::Top, 0, 0, 0),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
+        ("25-digin-issue", Page::Digin, Level::Detail("issue:0:4512".into()), 0, 0, 0),
+        ("26-digin-note", Page::Digin, Level::Detail("note:0:1".into()), 0, 0, 4),
+        ("27-digin-page", Page::Digin, Level::Detail("page:0:77".into()), 0, 0, 7),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
     let empty = audio::Status::default();
@@ -368,7 +434,12 @@ fn preview(dir: &str) {
             docker: &dk,
             ops: &opsd,
             code: &code,
-            digin: &dg,
+            digin: match name {
+                "25-digin-issue" => &dg_issue,
+                "26-digin-note" => &dg_note,
+                "27-digin-page" => &dg_page,
+                _ => &dg,
+            },
             settings,
             ring: &cfg.ring,
             call: if name == "36-call" { &call_on } else { &call_off },

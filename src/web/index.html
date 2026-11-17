@@ -520,7 +520,7 @@ function viewDigin(main) {
   const status = state.status?.digin || {};
   const accounts = status.accounts || [];
   const where = state.route?.kind === "remote" ? state.route.name : "this Mac";
-  main.append(h("h1", {}, "Digin"), h("p", { class: "sub" }, `Your issues, inbox, chat and pages on the Quake. Sign-ins are read-only and stay in the Keychain on ${where} (the Mac with the Quake).`));
+  main.append(h("h1", {}, "Digin"), h("p", { class: "sub" }, `Your issues, inbox, chat and pages on the Quake: read them there, move an issue to another status, mark inbox items read. Sign-ins stay in the Keychain on ${where} (the Mac with the Quake). Signed in before this could change things? Sign in again to allow it.`));
   main.append(card("Servers", accounts.length ? null : "Add a server below.", ...(accounts.length ? accounts.map((a) => {
     const pill = a.signedIn && !a.error ? h("span", { class: "pill green" }, "Signed in") : a.signedIn ? h("span", { class: "pill amber" }, a.error || "Problem") : h("span", { class: "pill" }, "Not signed in");
     return h("div", { class: "row" },
@@ -568,7 +568,7 @@ function viewDigin(main) {
       h("button", { class: "btn small", disabled: dg.busy, onclick: async () => { if (await diginStep({ step: "email-start", url: dg.url, email: dg.email })) toast("Sent a new code"); } }, "Send again")));
   }
   if (dg.step === "token") {
-    rows.push(h("div", { class: "row" }, h("div", { class: "label" }, `Token for ${dg.url}`, h("small", {}, "Make one in Digin: Settings → Access (read access to issues, pages, chat, profile)")), input("token", "digin_…", { mono: true, width: "300px" }),
+    rows.push(h("div", { class: "row" }, h("div", { class: "label" }, `Token for ${dg.url}`, h("small", {}, "Make one in Digin: Settings → Access (issues: write, chat: write, profile: write, pages: read)")), input("token", "digin_…", { mono: true, width: "300px" }),
       go("Sign in", async () => {
         const r = await diginStep({ step: "token", url: dg.url, token: dg.token.trim() });
         if (r && r.ok) { toast("Signed in"); Object.assign(dg, { step: "url", token: "", url: "digin.work" }); cfg = null; poll(); }
@@ -576,7 +576,7 @@ function viewDigin(main) {
   }
   const back = dg.step !== "url" ? h("button", { class: "btn small", onclick: () => { Object.assign(dg, { step: "url", error: "", notice: null }); render(); } }, "Start over") : null;
   const tokenLink = dg.step === "email" || dg.step === "code" ? h("button", { class: "btn small", onclick: () => { dg.step = "token"; dg.error = ""; render(); } }, "Use a token instead") : null;
-  main.append(card("Add or sign in to a server", "quaked asks for read access only. Tokens last 90 days; sign in again when one runs out.", ...rows,
+  main.append(card("Add or sign in to a server", "quaked asks to read your issues, pages, chat and profile, and to write only what the Quake changes: an issue's status (issues), marking notifications read (profile) and conversations read (chat; it never sends messages). Tokens last 90 days; sign in again when one runs out.", ...rows,
     (dg.error || back || tokenLink) ? h("div", { class: "row" }, h("span", { style: { flex: 1, color: "var(--red)", fontSize: "13px" } }, dg.error), tokenLink, back) : null));
   main.append(card("Refresh", null, choice("Check every", "digin.refreshSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], "Three times as often while the Digin pane is showing", true)));
 }
