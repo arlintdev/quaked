@@ -35,7 +35,7 @@ fn empty(c: &mut Canvas, v: &View, title: &str, sub: &str) {
 pub(super) fn draw(c: &mut Canvas, v: &View) {
     let st = v.windows;
     if st.off {
-        return empty(c, v, "Window switcher is off", "Turn it on in Quaked Settings (windows → enabled).");
+        return empty(c, v, "Window switcher is off", "Turn it on in Quaked Settings (Extras › Window switcher).");
     }
     if !st.loaded {
         return empty(c, v, "Looking at your windows…", "Apps show up here front to back.");

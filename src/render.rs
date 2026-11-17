@@ -3676,7 +3676,7 @@ fn digin_page(c: &mut Canvas, v: &View) {
         c.rrect((M, CY, W - 2.0 * M, CH), 16.0, PANEL_DEEP, 1.0);
         c.symbol(page_symbol(Page::Digin), 46.0, W / 2.0, CY + CH / 2.0 - 60.0, v.accent);
         c.text(F::Medium, "No Digin servers yet", 34.0, W / 2.0, CY + CH / 2.0 + 10.0, TEXT_2, Align::Center);
-        c.text(F::Regular, "Add one in Quaked Settings → Digin: sign in with your email and a code.", 20.0, W / 2.0, CY + CH / 2.0 + 50.0, FAINT, Align::Center);
+        c.text(F::Regular, "Add one in the Digin tab of Quaked Settings: sign in with your email and a code.", 20.0, W / 2.0, CY + CH / 2.0 + 50.0, FAINT, Align::Center);
         return;
     }
     // Strip: one chip per account, chat summary on the right.
@@ -3769,7 +3769,7 @@ fn dash_digin(c: &mut Canvas, v: &View, r: R, accent: u32, b: &Brief) {
     let d = v.digin;
     c.fit(F::Bold, &b.big, 26.0, w, x, y + 26.0, b.big_color, Align::Left);
     if !d.signed_in() {
-        c.clip(F::Medium, "Sign in from Quaked Settings → Digin", 14.0, w, x, y + 54.0, FAINT);
+        c.clip(F::Medium, "Sign in on the Digin tab of Quaked Settings", 14.0, w, x, y + 54.0, FAINT);
         return;
     }
     // Three counts side by side.

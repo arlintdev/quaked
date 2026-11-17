@@ -79,7 +79,7 @@ fn empty(c: &mut Canvas, v: &View, title: &str, sub: &str) {
 pub(super) fn draw(c: &mut Canvas, v: &View) {
     let p = v.paste;
     if p.off {
-        return empty(c, v, "Clipboard picker is off", "Turn it on in Quaked Settings (paste → enabled).");
+        return empty(c, v, "Clipboard picker is off", "Turn it on in Quaked Settings (Extras › Clipboard picker).");
     }
     if p.items.is_empty() {
         let sub = if p.skipped > 0 {

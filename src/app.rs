@@ -1401,6 +1401,11 @@ impl App {
             PageId::Settings => render::SETTING_COUNT,
             PageId::Dash => render::dash_pages(&self.cfg.pages).len(),
             PageId::Digin => self.digin.issues.len() + self.digin.inbox.len() + self.digin.pages.len(),
+            // Feature pages that keep their selection in `tile` (refreshes clamp to this).
+            PageId::Deploy => self.deploy.projects.len(),
+            PageId::Paste => self.paste.items.len(),
+            PageId::Windows => self.windows.apps.len(),
+            PageId::Health => self.health.macs.len(),
             _ => 0,
         }
     }
