@@ -77,7 +77,9 @@ fn sample_sessions(now: u64) -> Vec<status::Session> {
         transcript: String::new(),
         comment: String::new(),
         machine: String::new(),
+        todos: Vec::new(),
     };
+    let todo = |text: &str, state: status::TodoState| status::Todo { text: text.into(), state };
     let mut a = base("a", "digin", State::Working, 4 * m);
     a.prompt = "The publish job OOMs on workbench again, cap its memory and rerun with -p 4".into();
     a.step_count = 38;
@@ -90,6 +92,16 @@ fn sample_sessions(now: u64) -> Vec<status::Session> {
         step(40 * s, "$", "ssh workbench 'journalctl --user -u publish -n 50'", StepStatus::Ok),
         step(12 * s, "$", "cargo test --release -p digin-publish", StepStatus::Running),
     ];
+    {
+        use status::TodoState::*;
+        a.todos = vec![
+            todo("Find why publish runs out of memory", Completed),
+            todo("Cap the publish scope at 6 GB", Completed),
+            todo("Rerun the publish with -p 4", InProgress),
+            todo("Check the runner pool drains cleanly", Pending),
+            todo("Write up what changed", Pending),
+        ];
+    }
     let mut b = base("b", "plcplayground", State::Waiting, 50 * s);
     b.prompt = "Add a timer instruction (TON) to the simulator and wire it into the toolbox".into();
     b.notice = "Claude needs your permission to use Bash".into();

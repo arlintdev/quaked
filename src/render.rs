@@ -1553,7 +1553,14 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
     let ew = c.text(F::Medium, &elapsed, 17.0, x + w - 16.0, y + 34.0, MUTED, Align::Right);
     c.fit(F::Bold, &s.name, 26.0, iw - ew - 12.0, ix, y + 35.0, TEXT, Align::Left);
     let pw = c.pill(ix, y + 48.0, st.label, 13.0, st.accent, st.on_accent);
-    let steps = if s.step_count == 1 { "1 step".to_string() } else { format!("{} steps", s.step_count) };
+    let done = s.todos.iter().filter(|t| t.state == crate::status::TodoState::Completed).count();
+    let steps = if !s.todos.is_empty() {
+        format!("{done} of {} done", s.todos.len())
+    } else if s.step_count == 1 {
+        "1 step".to_string()
+    } else {
+        format!("{} steps", s.step_count)
+    };
     let sw = c.text(F::Medium, &steps, 15.0, ix + pw + 10.0, y + 66.0, MUTED, Align::Left);
     if !s.machine.is_empty() {
         // Synced from another Mac
@@ -1584,10 +1591,54 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
     c.rect((ix, cy - 10.0, iw, 1.0), LINE, 1.0);
     cy += 14.0;
     let line_h = 24.0;
-    let room = ((y + h - 12.0 - cy) / line_h).floor().max(0.0) as usize;
+    let mut room = ((y + h - 12.0 - cy) / line_h).floor().max(0.0) as usize;
+    if !s.todos.is_empty() {
+        // Claude's task list: from just before the item in progress, so what's next shows.
+        let shown = room.saturating_sub(1).max(1).min(s.todos.len());
+        let first_open = s.todos.iter().position(|t| t.state != crate::status::TodoState::Completed).unwrap_or(s.todos.len());
+        let start = first_open.saturating_sub(1).min(s.todos.len() - shown);
+        for t in s.todos.iter().skip(start).take(shown) {
+            todo_line(c, t, ix, cy, iw, s.state == State::Working);
+            cy += line_h;
+        }
+        room = room.saturating_sub(shown);
+        // The command running now, under the list.
+        if room > 0 {
+            if let Some(step) = s.steps.iter().rev().find(|st| st.status == StepStatus::Running) {
+                step_line(c, v, step, ix - 4.0, cy, iw + 4.0, 14.0, 76.0);
+            }
+        }
+        return;
+    }
     for step in s.steps.iter().rev().filter(|st| st.status != StepStatus::Info).take(room) {
         step_line(c, v, step, ix - 4.0, cy, iw + 4.0, 14.0, 76.0);
         cy += line_h;
+    }
+}
+
+/// One item of a session's task list: a check when done (dimmed, struck through), a
+/// filled dot while in progress, an empty ring still to do.
+fn todo_line(c: &mut Canvas, t: &crate::status::Todo, x: f32, y: f32, w: f32, working: bool) {
+    use crate::status::TodoState;
+    let cy = y - 6.0;
+    let (fg, font) = match t.state {
+        TodoState::Completed => {
+            c.symbol("checkmark.circle.fill", 15.0, x + 8.0, cy, GREEN);
+            (FAINT, F::Regular)
+        }
+        TodoState::InProgress => {
+            c.symbol("circle", 15.0, x + 8.0, cy, ORANGE);
+            c.circle(x + 8.0, cy, 4.0, if working { ORANGE } else { MUTED }, 1.0);
+            (TEXT, F::Bold)
+        }
+        TodoState::Pending => {
+            c.symbol("circle", 15.0, x + 8.0, cy, FAINT);
+            (TEXT_2, F::Regular)
+        }
+    };
+    let tw = c.clip(font, &t.text, 16.0, w - 26.0, x + 24.0, y, fg);
+    if t.state == TodoState::Completed {
+        c.rect((x + 24.0, cy + 1.0, tw, 1.0), FAINT, 0.8);
     }
 }
 

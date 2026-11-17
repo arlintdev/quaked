@@ -82,6 +82,83 @@ pub struct Session {
     /// Which Mac it runs on, for sessions synced from another one ("" = this Mac).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub machine: String,
+    /// Claude's task list for this work (the desktop app's plan, or TodoWrite).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<Todo>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoState {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One item of a session's task list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Todo {
+    pub text: String,
+    pub state: TodoState,
+}
+
+/// Follows Claude's task list through its tool calls: the desktop app's plan tool (a whole
+/// list, or advance / done / start on it), the CLI's TodoWrite, and the next-step tool,
+/// which checks everything off. Returns whether it changed.
+pub fn update_todos(todos: &mut Vec<Todo>, tool: &str, input: &Value) -> bool {
+    let state = |s: &str| match s {
+        "completed" => TodoState::Completed,
+        "in_progress" => TodoState::InProgress,
+        _ => TodoState::Pending,
+    };
+    let list = |items: &[Value], text_key: &str| -> Vec<Todo> {
+        items
+            .iter()
+            .filter_map(|i| {
+                let text = i.get(text_key)?.as_str()?.trim();
+                (!text.is_empty()).then(|| Todo { text: squash(text, 140), state: state(i.get("status").and_then(Value::as_str).unwrap_or("")) })
+            })
+            .take(16)
+            .collect()
+    };
+    if tool.ends_with("__update_plan") {
+        if let Some(items) = input.get("items").and_then(Value::as_array) {
+            *todos = list(items, "content");
+            return true;
+        }
+        let before = todos.clone();
+        if input.get("advance").and_then(Value::as_bool) == Some(true) {
+            if let Some(t) = todos.iter_mut().find(|t| t.state == TodoState::InProgress) {
+                t.state = TodoState::Completed;
+            }
+            if let Some(t) = todos.iter_mut().find(|t| t.state == TodoState::Pending) {
+                t.state = TodoState::InProgress;
+            }
+        }
+        for n in input.get("done").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64) {
+            if let Some(t) = (n as usize).checked_sub(1).and_then(|i| todos.get_mut(i)) {
+                t.state = TodoState::Completed;
+            }
+        }
+        if let Some(t) = input.get("start").and_then(Value::as_u64).and_then(|n| (n as usize).checked_sub(1)).and_then(|i| todos.get_mut(i)) {
+            t.state = TodoState::InProgress;
+        }
+        return *todos != before;
+    }
+    if tool == "TodoWrite" {
+        if let Some(items) = input.get("todos").and_then(Value::as_array) {
+            *todos = list(items, "content");
+            return true;
+        }
+    }
+    if tool == NEXT_STEP_TOOL && todos.iter().any(|t| t.state != TodoState::Completed) {
+        for t in todos.iter_mut() {
+            t.state = TodoState::Completed;
+        }
+        return true;
+    }
+    false
 }
 
 impl Session {
@@ -429,6 +506,7 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
         transcript: String::new(),
         comment: String::new(),
         machine: String::new(),
+        todos: Vec::new(),
     });
     s.cwd = cwd.clone();
     s.name = project_name(&cwd);
@@ -446,6 +524,10 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
             s.prompt = squash(&typed_prompt(&input.prompt), 600);
             s.notice.clear();
             s.comment.clear();
+            // A finished list belongs to the last piece of work.
+            if s.todos.iter().all(|t| t.state == TodoState::Completed) {
+                s.todos.clear();
+            }
             push_step(&mut s, Step { ts: now, tag: "you".into(), text: squash(&typed_prompt(&input.prompt), 240), status: StepStatus::Info, tool_id: String::new() });
         }
         "PreToolUse" => {
@@ -462,6 +544,9 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
             new_state = State::Working;
             s.notice.clear();
             let status = if input.hook_event_name == "PostToolUse" { StepStatus::Ok } else { StepStatus::Error };
+            if status == StepStatus::Ok {
+                update_todos(&mut s.todos, &input.tool_name, &input.tool_input);
+            }
             let (tag, text) = summarize(&input.tool_name, &input.tool_input, &cwd);
             match running_step(&mut s, &input.tool_use_id, &tag) {
                 Some(step) => step.status = status,
@@ -850,6 +935,25 @@ mod tests {
         fs::write(&path, next).unwrap();
         assert_eq!(turn_comment(path.to_str().unwrap()), "", "a new prompt starts a new turn");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_lists_follow_the_plan_tools() {
+        use TodoState::*;
+        let mut t = Vec::new();
+        let plan = "mcp__ccd_turn__update_plan";
+        assert!(update_todos(&mut t, plan, &json!({"items": [{"content": "Read", "status": "in_progress"}, {"content": "Fix", "status": "pending"}, {"content": "Test", "status": "pending"}]})));
+        assert_eq!(t.iter().map(|x| x.state).collect::<Vec<_>>(), [InProgress, Pending, Pending]);
+        assert!(update_todos(&mut t, plan, &json!({"advance": true})));
+        assert_eq!(t.iter().map(|x| x.state).collect::<Vec<_>>(), [Completed, InProgress, Pending]);
+        assert!(update_todos(&mut t, plan, &json!({"done": [2], "start": 3})));
+        assert_eq!(t.iter().map(|x| x.state).collect::<Vec<_>>(), [Completed, Completed, InProgress]);
+        assert!(!update_todos(&mut t, plan, &json!({"done": [0, 9]})), "out of range does nothing");
+        assert!(update_todos(&mut t, NEXT_STEP_TOOL, &json!({"recap": "done"})));
+        assert!(t.iter().all(|x| x.state == Completed));
+        assert!(update_todos(&mut t, "TodoWrite", &json!({"todos": [{"content": "One", "status": "completed", "activeForm": "Doing one"}]})));
+        assert_eq!(t, [Todo { text: "One".into(), state: Completed }]);
+        assert!(!update_todos(&mut t, "Bash", &json!({"command": "ls"})));
     }
 
     #[test]
