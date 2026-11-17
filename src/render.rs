@@ -35,7 +35,9 @@ const CH: f32 = H - CY - M; // content height
 const DETAIL_LEFT_W: f32 = 520.0;
 const DETAIL_ROW_H: f32 = 30.0;
 const DETAIL_ROWS_TOP: f32 = CY + 46.0;
-pub const DETAIL_ROWS: usize = ((CH - 56.0) / DETAIL_ROW_H) as usize;
+/// The status box under a session's tasks and steps.
+const STATUS_H: f32 = 50.0;
+pub const DETAIL_ROWS: usize = ((CH - STATUS_H - G - 56.0) / DETAIL_ROW_H) as usize;
 
 pub type Page = PageId;
 
@@ -1033,7 +1035,11 @@ fn detail_left() -> R {
 }
 
 fn detail_right() -> R {
-    (M + DETAIL_LEFT_W + G, CY, W - 2.0 * M - DETAIL_LEFT_W - G, CH)
+    (M + DETAIL_LEFT_W + G, CY, W - 2.0 * M - DETAIL_LEFT_W - G, CH - STATUS_H - G)
+}
+
+fn detail_status() -> R {
+    (M + DETAIL_LEFT_W + G, CY + CH - STATUS_H, W - 2.0 * M - DETAIL_LEFT_W - G, STATUS_H)
 }
 
 fn back_button() -> R {
@@ -1591,7 +1597,14 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
     c.rect((ix, cy - 10.0, iw, 1.0), LINE, 1.0);
     cy += 14.0;
     let line_h = 24.0;
-    let mut room = ((y + h - 12.0 - cy) / line_h).floor().max(0.0) as usize;
+    // While it works, the status line sits in its own strip at the bottom of the card.
+    let strip = (s.state == State::Working).then(|| (x + 14.0, y + h - 48.0, w - 26.0, 38.0));
+    if let Some(r) = strip {
+        c.rrect(r, 10.0, PANEL_DEEP, 1.0);
+        activity_line(c, v, s, r.0 + 12.0, r.1 + r.3 / 2.0 + 6.0, r.2 - 24.0);
+    }
+    let bottom = strip.map_or(y + h - 12.0, |r| r.1 - 8.0);
+    let mut room = ((bottom - cy) / line_h).floor().max(0.0) as usize;
     if !s.todos.is_empty() {
         // Claude's task list: from just before the item in progress, so what's next shows.
         let shown = room.saturating_sub(1).max(1).min(s.todos.len());
@@ -1602,23 +1615,13 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
             cy += line_h;
         }
         room = room.saturating_sub(shown);
-        // What it's doing now and for how long, then the command itself.
-        if room > 0 && s.state == State::Working {
-            activity_line(c, v, s, ix, cy + 4.0, iw);
-            cy += line_h + 4.0;
-            room -= 1;
-        }
+        // The command running now, under the list.
         if room > 0 {
             if let Some(step) = s.steps.iter().rev().find(|st| st.status == StepStatus::Running) {
                 step_line(c, v, step, ix - 4.0, cy, iw + 4.0, 14.0, 76.0);
             }
         }
         return;
-    }
-    if room > 0 && s.state == State::Working {
-        activity_line(c, v, s, ix, cy, iw);
-        cy += line_h;
-        room -= 1;
     }
     for step in s.steps.iter().rev().filter(|st| st.status != StepStatus::Info).take(room) {
         step_line(c, v, step, ix - 4.0, cy, iw + 4.0, 14.0, 76.0);
@@ -1669,6 +1672,45 @@ fn activity_line(c: &mut Canvas, v: &View, s: &Session, x: f32, y: f32, w: f32) 
     }
     let vw = c.clip(F::Medium, &verb, 16.0, w - 120.0, x + 24.0, y, TEXT_2);
     c.text(F::Medium, &time, 16.0, x + 24.0 + vw + 10.0, y, MUTED, Align::Left);
+}
+
+/// The status box: what the session is doing now and for how long (with the command it's
+/// running), what it needs from you, or when it finished.
+fn status_box(c: &mut Canvas, v: &View, s: &Session, r: R) {
+    let (x, y, w, h) = r;
+    let waiting = s.state == State::Waiting;
+    c.rrect(r, 14.0, if waiting { 0x231C06 } else { PANEL_DEEP }, 1.0);
+    let base = y + h / 2.0 + 6.0;
+    match s.state {
+        State::Working => {
+            let split = (w * 0.42).min(440.0);
+            activity_line(c, v, s, x + 18.0, base, split - 18.0);
+            if let Some(step) = s.steps.iter().rev().find(|st| st.status == StepStatus::Running) {
+                step_line(c, v, step, x + split, base, w - split - 18.0, 14.0, 76.0);
+            }
+        }
+        State::Waiting => {
+            c.symbol("hand.raised.fill", 16.0, x + 28.0, base - 6.0, AMBER);
+            let lw = c.text(F::Bold, "Needs you", 16.0, x + 46.0, base, AMBER, Align::Left);
+            let why = if s.notice.is_empty() { "Claude is waiting for your answer" } else { s.notice.as_str() };
+            c.clip(F::Medium, why, 16.0, w - lw - 90.0, x + 46.0 + lw + 14.0, base, TEXT_2);
+            let ago = age(v.now_ms.saturating_sub(s.since));
+            c.text(F::Medium, &ago, 15.0, x + w - 18.0, base, MUTED, Align::Right);
+        }
+        State::Done | State::Idle => {
+            let (sym, col, word) = if s.state == State::Done { ("checkmark.circle.fill", GREEN, "Done") } else { ("moon.zzz.fill", MUTED, "Idle") };
+            c.symbol(sym, 16.0, x + 28.0, base - 6.0, col);
+            let lw = c.text(F::Bold, word, 16.0, x + 46.0, base, col, Align::Left);
+            let ago = v.now_ms.saturating_sub(s.since);
+            let when = if ago < 60_000 { "just now".to_string() } else { format!("{} ago", age(ago)) };
+            let turn = s.steps.iter().rev().find(|st| st.tag == "you").map(|st| turn_time(s.since.saturating_sub(st.ts)));
+            let line = match turn {
+                Some(t) if s.state == State::Done => format!("finished {when}  ·  took {t}"),
+                _ => format!("since {when}"),
+            };
+            c.clip(F::Medium, &line, 16.0, w - lw - 80.0, x + 46.0 + lw + 14.0, base, TEXT_2);
+        }
+    }
 }
 
 /// One item of a session's task list: a check when done (dimmed, struck through), a
@@ -1761,14 +1803,12 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
         let rows = ((tr.3 - 60.0) / 30.0).floor().max(1.0) as usize;
         let first_open = s.todos.iter().position(|t| t.state != crate::status::TodoState::Completed).unwrap_or(s.todos.len());
         let start = first_open.saturating_sub(2).min(s.todos.len().saturating_sub(rows));
-        let rows = if s.state == State::Working { rows.saturating_sub(1).max(1) } else { rows };
-        let start = start.min(s.todos.len().saturating_sub(rows));
         for (k, t) in s.todos.iter().skip(start).take(rows).enumerate() {
             todo_line(c, t, tr.0 + 22.0, tr.1 + 66.0 + k as f32 * 30.0, tw - 44.0, s.state == State::Working);
         }
-        activity_line(c, v, s, tr.0 + 22.0, tr.1 + tr.3 - 22.0, tw - 44.0);
         (full.0 + tw + G, full.1, full.2 - tw - G, full.3)
     };
+    status_box(c, v, s, detail_status());
     let (rx, ry, rw, rh) = rr;
     c.rrect(rr, 14.0, PANEL_DEEP, 1.0);
     c.text(F::Bold, "STEPS", 12.0, rx + 24.0, ry + 28.0, FAINT, Align::Left);
