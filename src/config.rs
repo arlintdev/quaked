@@ -151,13 +151,15 @@ impl Default for Code {
 #[serde(rename_all = "camelCase", default)]
 pub struct AskSettings {
     pub enabled: bool,
+    /// Permission prompts too (Allow / Always allow / Deny on the Quake).
+    pub permissions: bool,
     /// Unanswered this long, the question goes back to Claude's own prompt.
     pub timeout_seconds: u64,
 }
 
 impl Default for AskSettings {
     fn default() -> Self {
-        AskSettings { enabled: true, timeout_seconds: 120 }
+        AskSettings { enabled: true, permissions: true, timeout_seconds: 120 }
     }
 }
 

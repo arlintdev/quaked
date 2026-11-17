@@ -53,6 +53,8 @@ const BLINK: Duration = Duration::from_millis(420);
 /// Don't yank the board away if it was used this recently.
 const JUMP_QUIET: Duration = Duration::from_secs(15);
 const LOG_REFRESH: Duration = Duration::from_secs(3);
+/// A question or permission prompt ignores presses this soon after it appears.
+const ASK_GUARD: Duration = Duration::from_millis(1000);
 const LUMINANCE_DIM: u8 = 24;
 const VOLUME_STEP: i32 = 4;
 /// What the ring showed before quaked took over (read from the device), restored when
@@ -95,6 +97,15 @@ struct Ask {
     answers: serde_json::Map<String, serde_json::Value>,
     reply: Sender<Vec<u8>>,
     until: Instant,
+    /// When it appeared: presses in the first second are ignored (no accidental approvals).
+    shown: Instant,
+    /// The session it came from, and how far along it was: once it moves on (you answered
+    /// Claude's own prompt on the Mac), the Quake's copy clears itself.
+    session_id: String,
+    mark: Option<(u32, usize, bool)>,
+    mark_after: Instant,
+    /// A permission prompt: (tag, what exactly, Claude's description).
+    perm: Option<(String, String, String)>,
 }
 
 /// A Mac waiting for you to allow pairing (on the board or the settings page).
@@ -356,6 +367,7 @@ impl App {
                     count: a.questions.len(),
                     secs_left: a.until.saturating_duration_since(Instant::now()).as_secs(),
                     queued: self.asks.len() - 1,
+                    detail: a.perm.as_ref().map(|(t, w, d)| (t.as_str(), w.as_str(), d.as_str())),
                 })
             }),
             level: &self.level,
@@ -565,6 +577,9 @@ impl App {
         }
         self.states = states;
         self.loaded_once = true;
+        if !self.asks.is_empty() {
+            self.drop_answered_elsewhere();
+        }
         // Dashboard: Claude steps per 30 seconds, across every Mac.
         if Instant::now() >= self.next_ai_sample {
             let total: u64 = self.sessions.iter().map(|s| s.step_count as u64).sum();
@@ -749,6 +764,53 @@ impl App {
             return;
         }
         let text = |q: &serde_json::Value, k: &str| q.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if v["kind"] == "permission" {
+            if !self.cfg.ask.permissions {
+                let _ = reply.send(SKIP.to_vec());
+                return;
+            }
+            let tool = text(&v, "tool");
+            let what = match tool.as_str() {
+                "Bash" => "run a command",
+                "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => "change a file",
+                "Read" | "Glob" | "Grep" => "read files",
+                "WebFetch" => "fetch a web page",
+                "WebSearch" => "search the web",
+                t if t.starts_with("mcp__") => "use a connector tool",
+                _ => "use a tool",
+            };
+            let short = tool.rsplit("__").next().unwrap_or(&tool).to_string();
+            let mut options = vec![("Allow".to_string(), "just this once".to_string())];
+            let rule = text(&v, "rule");
+            if !rule.is_empty() {
+                options.push(("Always allow".to_string(), format!("don't ask again for {rule}")));
+            }
+            options.push(("Deny".to_string(), "tell Claude no".to_string()));
+            let ask = Ask {
+                session: text(&v, "session"),
+                machine: text(&v, "machine"),
+                questions: vec![(format!("Claude wants to {what}  ·  {short}"), "Permission".to_string(), options, false)],
+                at: 0,
+                sel: 0,
+                picked: Vec::new(),
+                answers: serde_json::Map::new(),
+                reply,
+                until: Instant::now(),
+                shown: Instant::now(),
+                perm: Some((text(&v, "tag"), text(&v, "detail"), text(&v, "description"))),
+                session_id: text(&v, "sessionId"),
+                mark: None,
+                mark_after: Instant::now(),
+            };
+            let mut ask = ask;
+            self.watch_session(&mut ask);
+            device::log(format!("ask: {} asks to {what}: {}", ask.session, text(&v, "detail")));
+            self.asks.push_back(ask);
+            if self.asks.len() == 1 {
+                self.show_ask();
+            }
+            return;
+        }
         let questions: Vec<(String, String, Vec<(String, String)>, bool)> = v["questions"]
             .as_array()
             .map(|qs| {
@@ -782,7 +844,14 @@ impl App {
             answers: serde_json::Map::new(),
             reply,
             until: Instant::now() + Duration::from_secs(self.cfg.ask.timeout_seconds.clamp(15, 580)),
+            shown: Instant::now(),
+            perm: None,
+            session_id: text(&v, "sessionId"),
+            mark: None,
+            mark_after: Instant::now(),
         };
+        let mut ask = ask;
+        self.watch_session(&mut ask);
         device::log(format!("ask: {} asks \"{}\"", ask.session, ask.questions[0].0));
         self.asks.push_back(ask);
         if self.asks.len() == 1 {
@@ -797,9 +866,48 @@ impl App {
         // A fresh question gets the full timeout from when it shows.
         if let Some(a) = self.asks.front_mut() {
             a.until = Instant::now() + Duration::from_secs(self.cfg.ask.timeout_seconds.clamp(15, 580));
+            a.shown = Instant::now();
         }
         self.update_ring();
         self.redraw();
+    }
+
+    /// Starts watching the asking session, so the Quake's copy clears when it moves on.
+    fn watch_session(&self, ask: &mut Ask) {
+        if ask.session_id.is_empty() {
+            return;
+        }
+        if ask.machine.is_empty() {
+            // This Mac's session: read it fresh (the hook wrote it just before asking).
+            ask.mark = status::load(status::now_ms()).iter().find(|s| s.id == ask.session_id).map(progress);
+        } else {
+            // The other Mac's sessions sync every 2 seconds: start watching after that.
+            ask.mark_after = Instant::now() + Duration::from_secs(4);
+        }
+    }
+
+    /// Clears prompts you've already answered on the Mac (their session has moved on).
+    fn drop_answered_elsewhere(&mut self) {
+        let mut gone = Vec::new();
+        for (i, a) in self.asks.iter_mut().enumerate() {
+            let Some(s) = self.sessions.iter().find(|s| s.id == a.session_id) else { continue };
+            let now = progress(s);
+            match a.mark {
+                None if !a.session_id.is_empty() && Instant::now() >= a.mark_after => a.mark = Some(now),
+                Some(m) if m != now => gone.push(i),
+                _ => {}
+            }
+        }
+        for i in gone.into_iter().rev() {
+            if let Some(a) = self.asks.get(i) {
+                device::log(format!("ask: {} answered in Claude; clearing the Quake", a.session));
+            }
+            if i == 0 {
+                self.finish_ask(false);
+            } else if let Some(a) = self.asks.remove(i) {
+                let _ = a.reply.send(b"{\"skip\":true}\n".to_vec());
+            }
+        }
     }
 
     /// Card `i` pressed or tapped.
@@ -842,7 +950,7 @@ impl App {
     fn finish_ask(&mut self, answered: bool) {
         let Some(a) = self.asks.pop_front() else { return };
         let out = if answered { serde_json::json!({"answers": a.answers}) } else { serde_json::json!({"skip": true}) };
-        device::log(format!("ask: {} {}", a.session, if answered { format!("answered {out}") } else { "handed back to Claude".into() }));
+        device::log(format!("ask: {} {}", a.session, if answered { format!("answered on the Quake {out}") } else { "dismissed".into() }));
         let _ = a.reply.send((out.to_string() + "\n").into_bytes());
         self.last_input = Instant::now();
         if self.asks.is_empty() {
@@ -1174,7 +1282,9 @@ impl App {
             match code {
                 KNOB_PRESS => {
                     let sel = self.asks.front().map(|a| a.sel).unwrap_or(0);
-                    self.ask_choose(sel);
+                    if self.asks.front().is_some_and(|a| a.shown.elapsed() >= ASK_GUARD) {
+                        self.ask_choose(sel);
+                    }
                 }
                 KNOB_DOUBLE | KNOB_HOLD => self.finish_ask(false),
                 _ => {}
@@ -1413,7 +1523,9 @@ impl App {
                 if let Some(a) = self.asks.front_mut() {
                     a.sel = i;
                 }
-                self.ask_choose(i);
+                if self.asks.front().is_some_and(|a| a.shown.elapsed() >= ASK_GUARD) {
+                    self.ask_choose(i);
+                }
             }
             Hit::Setting(i, frac) => {
                 self.tile = i;
@@ -1843,6 +1955,12 @@ impl ApplicationHandler<Event> for App {
         self.refresh_menubar();
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
+}
+
+/// How far along a session is, ignoring "needs your permission" notices: steps taken,
+/// tools still running, turn finished.
+fn progress(s: &Session) -> (u32, usize, bool) {
+    (s.step_count, s.steps.iter().filter(|st| st.status == status::StepStatus::Running).count(), matches!(s.state, State::Done | State::Idle))
 }
 
 /// Same settings apart from when they were saved.

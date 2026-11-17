@@ -54,16 +54,23 @@ or a container stops, the ring blinks in that page's color, the top bar says wha
 happened, and the board jumps to the page (unless you used it in the last 15 seconds).
 Touching the board stops the blinking. `quaked ctl alert code "test"` tries it.
 
-## Claude's questions on the Quake
+## Claude's questions and permissions on the Quake
 
-When Claude asks you to choose (its multiple-choice questions: merge or hold, which
-approach...), the question fills the Quake with an option card each: turn to choose,
-press to answer, and the answer goes straight back to Claude. Multi-select questions take
-presses to tick options, then Done. The last card, a double-click or a hold hands it back
-to Claude's own prompt, as does not answering within the timeout (2 minutes; settings
-page → General). A question from a session on your other Mac shows on whichever Mac has
-the Quake. It works through a `PreToolUse` hook on AskUserQuestion (`quaked ask`), which
-`./install.sh` adds.
+When Claude asks you to choose (merge or hold, which approach...) or needs permission
+(a command, a file edit, a fetch), the prompt also shows on the Quake, next to Claude's
+own prompt on the Mac: whichever you answer first applies, and the Quake's copy clears
+itself once you answer on the Mac.
+
+- Questions get a card per option: turn to choose, press to answer; multi-select takes
+  presses to tick options, then Done.
+- Permission prompts show the exact command or path with **Allow**, **Always allow**
+  (when Claude Code offers a "don't ask again" rule) and **Deny**. Presses in the first
+  second are ignored, so a stray press can't approve something you haven't read.
+- The last card or a double-click dismisses it from the Quake; so does no answer within
+  the timeout (2 minutes; settings page → General). Claude's prompt stays up either way.
+- A prompt from a session on your other Mac shows on whichever Mac has the Quake.
+
+It runs as a `PermissionRequest` hook (`quaked permit`), which `./install.sh` adds.
 
 AI cards also show what Claude is saying as it works (its narration between tool calls,
 read from the session transcript), and sessions that have been done or idle for 5 minutes

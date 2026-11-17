@@ -486,9 +486,10 @@ function viewGeneral(main) {
     choice("Stop blinking after", "alerts.seconds", [[60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [1800, "30 min"]], null, true),
     toggle("Claude sessions waiting on you", "alerts.ai"), toggle("Review requests, failing CI, approvals, conflicts", "alerts.code"),
     toggle("Hosts going down, sites failing", "alerts.ops"), toggle("Containers stopping", "alerts.docker")));
-  main.append(card("Claude's questions", "When Claude asks you to choose (merge or hold, which approach...), the question fills the Quake: turn to an option, press to answer. Double-click, or the last card, hands it back to Claude's own prompt.",
+  main.append(card("Claude's questions and permissions", "When Claude asks you to choose or needs permission, the prompt shows on the Quake next to Claude's own: turn to an option and press, or answer on the Mac. Whichever you answer first applies, and the other clears.",
     toggle("Answer Claude's questions on the Quake", "ask.enabled"),
-    choice("Hand back to Claude after", "ask.timeoutSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"], [580, "10 min"]], "If you don't answer on the Quake", true)));
+    toggle("Permission prompts on the Quake too", "ask.permissions", "Allow, Always allow (when Claude Code offers a rule) or Deny with the knob"),
+    choice("Clear it from the Quake after", "ask.timeoutSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"], [580, "10 min"]], "Claude's own prompt stays up on the Mac", true)));
   main.append(card("League of Legends", "Uses the League client's local API while it runs (live or PBE).",
     toggle("Accept the match automatically", "league.autoAccept"),
     slider("Wait before accepting", "league.acceptDelayMs", 0, 8000, 250, (v) => `${(v / 1000).toFixed(2)} s`),

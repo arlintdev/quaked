@@ -512,7 +512,7 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
 /// answer for Claude Code; prints nothing (so Claude asks as usual) if you choose "Answer
 /// in Claude", don't answer in time, or no Quake is around.
 pub fn ask_hook() {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::Read;
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let Ok(input) = serde_json::from_str::<Value>(&raw) else { return };
@@ -525,15 +525,7 @@ pub fn ask_hook() {
     }
     let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
     let payload = serde_json::json!({"session": project_name(cwd), "questions": tool_input["questions"]});
-    let Ok(mut sock) = std::os::unix::net::UnixStream::connect(crate::app::ctl_socket_path()) else { return };
-    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(595)));
-    if writeln!(sock, "ask {payload}").is_err() {
-        return;
-    }
-    let _ = sock.shutdown(std::net::Shutdown::Write);
-    let mut reply = String::new();
-    let _ = BufReader::new(&sock).read_line(&mut reply);
-    let Ok(answer) = serde_json::from_str::<Value>(reply.trim()) else { return };
+    let Some(answer) = ask_board(&payload) else { return };
     let Some(answers) = answer.get("answers").filter(|a| a.as_object().is_some_and(|o| !o.is_empty())) else { return };
     // updatedInput replaces the tool's input: the questions as they were, plus the answers.
     let mut updated = tool_input.clone();
@@ -547,6 +539,92 @@ pub fn ask_hook() {
         }
     });
     println!("{out}");
+}
+
+/// Sends a question to the board (through the control socket; the daemon passes it to the
+/// Mac with the Quake if it isn't here) and waits for the reply line.
+fn ask_board(payload: &Value) -> Option<Value> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut sock = std::os::unix::net::UnixStream::connect(crate::app::ctl_socket_path()).ok()?;
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(595)));
+    writeln!(sock, "ask {payload}").ok()?;
+    let _ = sock.shutdown(std::net::Shutdown::Write);
+    let mut reply = String::new();
+    BufReader::new(&sock).read_line(&mut reply).ok()?;
+    serde_json::from_str(reply.trim()).ok()
+}
+
+/// A permission rule suggestion as one line ("Bash(npm run test:*)").
+fn suggestion_label(suggestions: &Value) -> String {
+    let rules: Vec<String> = suggestions
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .flat_map(|s| s.get("rules").and_then(Value::as_array).cloned().unwrap_or_default())
+                .map(|r| {
+                    let tool = r.get("toolName").and_then(Value::as_str).unwrap_or("");
+                    match r.get("ruleContent").and_then(Value::as_str) {
+                        Some(c) if !c.is_empty() => format!("{tool}({c})"),
+                        _ => tool.to_string(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rules.join(", ")
+}
+
+/// `quaked permit`: a PermissionRequest hook. Shows what Claude wants to do on the Quake
+/// with Allow / Always allow / Deny; prints the decision for Claude Code, or nothing (so
+/// Claude Code asks as usual) if you hand it back, don't answer in time, or no Quake is
+/// around.
+pub fn permit_hook() {
+    use std::io::Read;
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let Ok(input) = serde_json::from_str::<Value>(&raw) else { return };
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string();
+    if tool.is_empty() {
+        return;
+    }
+    let tool_input = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let session_id = input.get("session_id").and_then(Value::as_str).unwrap_or("");
+    // Claude's multiple-choice question: answer it with the picked labels.
+    if tool == "AskUserQuestion" {
+        if tool_input.get("questions").and_then(Value::as_array).is_none_or(|q| q.is_empty()) {
+            return;
+        }
+        let payload = serde_json::json!({"session": project_name(cwd), "sessionId": session_id, "questions": tool_input["questions"]});
+        let Some(reply) = ask_board(&payload) else { return };
+        let Some(answers) = reply.get("answers").filter(|a| a.as_object().is_some_and(|o| !o.is_empty())) else { return };
+        let mut updated = tool_input.clone();
+        updated["answers"] = answers.clone();
+        println!("{}", serde_json::json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedInput": updated}}}));
+        return;
+    }
+    let (tag, detail) = summarize(&tool, &tool_input, cwd);
+    let suggestions = input.get("permission_suggestions").cloned().unwrap_or(Value::Null);
+    let rule = suggestion_label(&suggestions);
+    let payload = serde_json::json!({
+        "kind": "permission",
+        "session": project_name(cwd),
+        "sessionId": session_id,
+        "tool": tool,
+        "tag": tag,
+        "detail": detail,
+        "description": tool_input.get("description").and_then(Value::as_str).unwrap_or(""),
+        "rule": rule,
+    });
+    let Some(reply) = ask_board(&payload) else { return };
+    let Some(choice) = reply.get("answers").and_then(Value::as_object).and_then(|a| a.values().next()).and_then(Value::as_str) else { return };
+    let decision = match choice {
+        "Allow" => serde_json::json!({"behavior": "allow"}),
+        "Always allow" => serde_json::json!({"behavior": "allow", "updatedPermissions": suggestions}),
+        "Deny" => serde_json::json!({"behavior": "deny", "message": "Denied on the Quake."}),
+        _ => return,
+    };
+    println!("{}", serde_json::json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}));
 }
 
 /// `quaked hook`: called by Claude Code with the hook payload on stdin. Prints nothing
@@ -587,12 +665,13 @@ pub fn hook() {
 
 /// The Claude Code events quaked listens to, and whether the entry takes a tool matcher.
 /// The hooks quaked installs: (event, tool matcher, `quaked` subcommand, timeout seconds).
-/// `quaked ask` answers Claude's multiple-choice questions from the Quake, so it may wait.
+/// `quaked permit` mirrors Claude's questions and permission prompts on the Quake, next to
+/// Claude's own prompt (whichever you answer first applies), so it may wait.
 const HOOK_EVENTS: [(&str, Option<&str>, &str, u32); 9] = [
     ("SessionStart", None, "hook", 5),
     ("UserPromptSubmit", None, "hook", 5),
     ("PreToolUse", Some("*"), "hook", 5),
-    ("PreToolUse", Some("AskUserQuestion"), "ask", 600),
+    ("PermissionRequest", Some("*"), "permit", 600),
     ("PostToolUse", Some("*"), "hook", 5),
     ("PostToolUseFailure", Some("*"), "hook", 5),
     ("Notification", None, "hook", 5),
@@ -608,6 +687,15 @@ fn merge_hooks(settings: &mut serde_json::Value, binary: &str) -> Result<Vec<Str
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or("\"hooks\" in settings.json isn't an object")?;
     let mut added = Vec::new();
+    // `quaked ask` ran as a PreToolUse hook, which holds Claude's own prompt back: remove it.
+    for groups in hooks.values_mut().filter_map(Value::as_array_mut) {
+        let before = groups.len();
+        groups.retain(|g| !g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.ends_with("quaked ask")))));
+        if groups.len() != before {
+            added.push("removed the old blocking question hook".to_string());
+        }
+    }
+    hooks.retain(|_, g| g.as_array().is_none_or(|a| !a.is_empty()));
     for (event, matcher, sub, timeout) in HOOK_EVENTS {
         let groups = hooks.entry(event).or_insert_with(|| json!([]));
         let groups = groups.as_array_mut().ok_or(format!("hooks.{event} isn't a list"))?;
@@ -696,8 +784,8 @@ mod tests {
         let mut v: serde_json::Value = serde_json::from_str(r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#).unwrap();
         let added = merge_hooks(&mut v, "/h/.local/bin/quaked").unwrap();
         assert_eq!(added.len(), 9);
-        assert_eq!(v["hooks"]["PreToolUse"][1]["matcher"], "AskUserQuestion");
-        assert_eq!(v["hooks"]["PreToolUse"][1]["hooks"][0]["command"], "/h/.local/bin/quaked ask");
+        assert_eq!(v["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], "/h/.local/bin/quaked permit");
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 1, "no blocking question hook");
         assert_eq!(v["model"], "opus");
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2, "kept the existing Stop hook");
         assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "*");

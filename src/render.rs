@@ -87,6 +87,8 @@ pub struct AskView<'a> {
     pub secs_left: u64,
     /// More questions waiting after this one (from other sessions).
     pub queued: usize,
+    /// A permission prompt: (tag like "$" or "edit", what exactly, Claude's description).
+    pub detail: Option<(&'a str, &'a str, &'a str)>,
 }
 
 /// Cards on screen: the options, Done (multi-select), then "Answer in Claude".
@@ -2811,10 +2813,22 @@ fn ask_overlay(c: &mut Canvas, v: &View, a: &AskView) {
     let mut qy = 92.0;
     if !a.header.is_empty() {
         let pw = c.pill(M, 60.0, &a.header.to_uppercase(), 13.0, 0x3A2C08, AMBER);
-        let _ = pw;
+        if let Some((_, _, why)) = a.detail.filter(|d| !d.2.is_empty()) {
+            c.fit(F::Medium, why, 17.0, W - 2.0 * M - pw - 20.0, M + pw + 14.0, 77.0, MUTED, Align::Left);
+        }
         qy = 110.0;
     }
-    c.paragraph(F::Bold, a.question, 32.0, M, qy, W - 2.0 * M, 2, 38.0, TEXT);
+    if let Some((tag, what, _)) = a.detail {
+        // A permission prompt: the exact command or path, in a code box.
+        c.fit(F::Bold, a.question, 26.0, W - 2.0 * M, M, 104.0, TEXT, Align::Left);
+        let bx = (M, 116.0, W - 2.0 * M, 62.0);
+        c.rrect(bx, 12.0, 0x0E0E11, 1.0);
+        c.outline(bx, 12.0, LINE, 1.0);
+        let tw = c.text(F::Mono, tag, 18.0, M + 18.0, 154.0, 0xE6B673, Align::Left);
+        c.paragraph(F::Mono, what, 18.0, M + 34.0 + tw, 141.0, W - 2.0 * M - 52.0 - tw, 2, 24.0, TEXT);
+    } else {
+        c.paragraph(F::Bold, a.question, 32.0, M, qy, W - 2.0 * M, 2, 38.0, TEXT);
+    }
     if a.multi {
         c.text(F::Medium, "pick any, then Done", 15.0, W - M, 76.0, MUTED, Align::Right);
     }
@@ -2825,9 +2839,16 @@ fn ask_overlay(c: &mut Canvas, v: &View, a: &AskView) {
         let r = ask_card_rect(i, n);
         let (x, y, w, _) = r;
         let sel = i == a.sel;
+        // Allow / Deny read as green / red on a permission prompt.
+        let tone = match a.options.get(i).map(|o| o.0.as_str()) {
+            Some("Allow" | "Always allow") if a.detail.is_some() => GREEN,
+            Some("Deny") if a.detail.is_some() => RED,
+            _ => AMBER,
+        };
         c.rrect(r, 16.0, if sel { 0x2B2412 } else { PANEL }, 1.0);
         if sel {
-            c.outline(r, 16.0, AMBER, 4.0);
+            c.rrect(r, 16.0, tone, 0.10);
+            c.outline(r, 16.0, tone, 4.0);
         }
         let ix = x + 22.0;
         let iw = w - 44.0;
@@ -2854,13 +2875,13 @@ fn ask_overlay(c: &mut Canvas, v: &View, a: &AskView) {
             c.text(F::Bold, "Done", 26.0, x + w / 2.0, y + 150.0, if picked > 0 { TEXT } else { MUTED }, Align::Center);
             c.text(F::Medium, &format!("send {picked} picked"), 16.0, x + w / 2.0, y + 176.0, MUTED, Align::Center);
         } else {
-            c.symbol("macwindow", 36.0, x + w / 2.0, y + 80.0, if sel { TEXT_2 } else { FAINT });
-            c.text(F::Bold, "Answer in Claude", 22.0, x + w / 2.0, y + 150.0, if sel { TEXT } else { MUTED }, Align::Center);
-            c.text(F::Medium, "ask me on the Mac", 15.0, x + w / 2.0, y + 176.0, FAINT, Align::Center);
+            c.symbol("xmark.circle", 36.0, x + w / 2.0, y + 80.0, if sel { TEXT_2 } else { FAINT });
+            c.text(F::Bold, "Dismiss", 22.0, x + w / 2.0, y + 150.0, if sel { TEXT } else { MUTED }, Align::Center);
+            c.text(F::Medium, "answer it in Claude instead", 15.0, x + w / 2.0, y + 176.0, FAINT, Align::Center);
         }
     }
     let _ = v;
-    c.text(F::Medium, "turn  choose     ·     press  answer     ·     double-click  answer in Claude", 15.0, W / 2.0, H - 14.0, FAINT, Align::Center);
+    c.text(F::Medium, "turn  choose     ·     press  answer     ·     double-click  dismiss     ·     or answer on the Mac", 15.0, W / 2.0, H - 14.0, FAINT, Align::Center);
 }
 
 // ---------------------------------------------------------------- SETTINGS

@@ -4,6 +4,7 @@
 //!                                ~/Library/Application Support/Quaked/config.json
 //!   quaked hook                  Claude Code hook: records session state from stdin
 //!   quaked ask                   Claude Code hook: shows Claude's questions on the Quake to answer
+//!   quaked permit                Claude Code hook: permission prompts on the Quake (allow / deny)
 //!   quaked hooks                 adds those hooks to ~/.claude/settings.json (install.sh runs it)
 //!   quaked settings              opens the settings page (http://127.0.0.1:47380)
 //!   quaked ctl <cmd>             drive the running board: turn 1|-1, press, double, hold, tap X Y;
@@ -225,7 +226,12 @@ fn preview(dir: &str) {
         ("Hold".to_string(), "Leave it open; I'll ping you after the demo".to_string()),
         ("Merge as draft release".to_string(), "Merge, but tag it as a pre-release".to_string()),
     ];
-    let shots: [(&str, Page, Level, usize, usize, usize); 17] = [
+    let permit_options = vec![
+        ("Allow".to_string(), "just this once".to_string()),
+        ("Always allow".to_string(), "don't ask again for Bash(./deploy.sh:*)".to_string()),
+        ("Deny".to_string(), "tell Claude no".to_string()),
+    ];
+    let shots: [(&str, Page, Level, usize, usize, usize); 18] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -242,6 +248,7 @@ fn preview(dir: &str) {
         ("15-settings", Page::Settings, Level::Focus, 0, 0, 6),
         ("0-dash", Page::Dash, Level::Top, 0, 0, 0),
         ("17-ask", Page::Ai, Level::Top, 0, 0, 0),
+        ("18-permit", Page::Ai, Level::Top, 0, 0, 0),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
@@ -276,7 +283,22 @@ fn preview(dir: &str) {
                 count: 1,
                 secs_left: 104,
                 queued: 0,
-            }),
+                detail: None,
+            }).or_else(|| (name == "18-permit").then(|| render::AskView {
+                session: "plcplayground",
+                machine: "",
+                header: "Permission",
+                question: "Claude wants to run a command  ·  Bash",
+                options: &permit_options,
+                picked: &[],
+                multi: false,
+                sel: 0,
+                index: 0,
+                count: 1,
+                secs_left: 97,
+                queued: 1,
+                detail: Some(("$", "./deploy.sh --prod && ssh workbench 'docker compose -f ~/Projects/plcplayground/compose.yml up -d'", "Deploy the site to production")),
+            })),
             level: &level,
             sessions: &sessions,
             sel,
@@ -340,6 +362,7 @@ fn main() {
     match sub {
         "hook" => status::hook(),
         "ask" => status::ask_hook(),
+        "permit" => status::permit_hook(),
         "settings" | "ui" => {
             let _ = std::process::Command::new("/usr/bin/open").arg(web::url()).status();
         }
