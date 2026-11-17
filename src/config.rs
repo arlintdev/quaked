@@ -37,6 +37,7 @@ pub enum PageId {
     Docker,
     Ops,
     Code,
+    Digin,
     Settings,
 }
 
@@ -53,6 +54,7 @@ impl PageId {
             PageId::Docker => "Docker",
             PageId::Ops => "Ops",
             PageId::Code => "Code",
+            PageId::Digin => "Digin",
             PageId::Settings => "Settings",
         }
     }
@@ -68,6 +70,7 @@ impl PageId {
             PageId::Docker => "DOCKER",
             PageId::Ops => "OPS",
             PageId::Code => "CODE",
+            PageId::Digin => "DIGIN",
             PageId::Settings => "SETTINGS",
         }
     }
@@ -103,6 +106,7 @@ pub struct Config {
     pub code: Code,
     pub alerts: Alerts,
     pub ask: AskSettings,
+    pub digin: Digin,
     pub sync: SyncSettings,
     pub device: DeviceSettings,
 }
@@ -144,6 +148,30 @@ impl Default for Code {
     fn default() -> Self {
         Code { refresh_seconds: 60, gitlab: true, gitlab_hosts: Vec::new() }
     }
+}
+
+/// Digin servers you're signed in to (the sign-in tokens stay in each Mac's Keychain).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Digin {
+    pub accounts: Vec<DiginAccount>,
+    pub refresh_seconds: u64,
+}
+
+impl Default for Digin {
+    fn default() -> Self {
+        Digin { accounts: Vec::new(), refresh_seconds: 60 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DiginAccount {
+    /// "https://digin.work"
+    pub url: String,
+    /// What the board calls it; empty = the host name.
+    pub label: String,
+    pub email: String,
 }
 
 /// Claude's multiple-choice questions on the Quake: spin to an option, press to answer.
@@ -195,11 +223,13 @@ pub struct Alerts {
     pub code: bool,
     pub ops: bool,
     pub docker: bool,
+    /// New Digin mentions, DMs and assignments.
+    pub digin: bool,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { blink: true, jump: true, seconds: 300, ai: true, code: true, ops: true, docker: true }
+        Alerts { blink: true, jump: true, seconds: 300, ai: true, code: true, ops: true, docker: true, digin: true }
     }
 }
 
@@ -258,6 +288,7 @@ pub struct Ring {
     pub code: String,
     pub settings: String,
     pub dash: String,
+    pub digin: String,
     /// Breathe in this color while a Claude session needs you.
     pub alert: bool,
     pub alert_color: String,
@@ -368,7 +399,7 @@ impl Default for Config {
             idle_home: true,
             menu_bar: true,
             session_idle_minutes: 5,
-            pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
+            pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Digin, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
             ring: Ring::default(),
             touch: Touch::default(),
             shortcuts: vec![
@@ -388,6 +419,7 @@ impl Default for Config {
             code: Code::default(),
             alerts: Alerts::default(),
             ask: AskSettings::default(),
+            digin: Digin::default(),
             sync: SyncSettings::default(),
             device: DeviceSettings::default(),
         }
@@ -409,6 +441,7 @@ impl Default for Ring {
             code: "#A371F7".into(),
             settings: "#D0D0D8".into(),
             dash: "#64D2FF".into(),
+            digin: "#E879F9".into(),
             alert: true,
             alert_color: "#F2B705".into(),
         }
@@ -444,6 +477,7 @@ impl Ring {
             PageId::Code => &self.code,
             PageId::Settings => &self.settings,
             PageId::Dash => &self.dash,
+            PageId::Digin => &self.digin,
         }
     }
 }
@@ -534,7 +568,7 @@ mod tests {
         assert!(!partial.buzzer);
         assert_eq!(partial.ring.ai, "#112233");
         assert_eq!(partial.ring.music, Ring::default().music);
-        assert_eq!(partial.pages.len(), 10);
+        assert_eq!(partial.pages.len(), 11);
     }
 
     #[test]

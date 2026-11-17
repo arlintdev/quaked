@@ -88,7 +88,7 @@ const QUERY: &str = r#"query {
 }"#;
 
 /// ISO-8601 "2026-11-16T17:23:45Z" -> unix ms.
-fn iso_ms(s: &str) -> u64 {
+pub fn iso_ms(s: &str) -> u64 {
     let b = s.as_bytes();
     if b.len() < 19 {
         return 0;

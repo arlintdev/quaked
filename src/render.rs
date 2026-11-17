@@ -6,7 +6,7 @@
 
 use crate::audio;
 use crate::config::{Action, PageId, Shortcut};
-use crate::{docker, github, league, ops};
+use crate::{digin, docker, github, league, ops};
 use crate::music::Track;
 use crate::status::{Session, State, Step, StepStatus};
 use crate::symbols::Symbols;
@@ -68,6 +68,8 @@ pub enum Hit {
     Pane(Page),
     /// A card in Claude's question (options, then Done for multi-select, then "Answer in Claude").
     AskCard(usize),
+    /// A Digin row: issues, then inbox, then pages (one index across the three lists).
+    DiginItem(usize),
 }
 
 /// Claude's current question on the board.
@@ -136,6 +138,7 @@ pub struct View<'a> {
     /// your PRs, then review requests.
     pub ops: &'a ops::Status,
     pub code: &'a github::Status,
+    pub digin: &'a digin::Status,
     pub settings: SettingsView,
     /// Page colors, for the dashboard tiles.
     pub ring: &'a crate::config::Ring,
@@ -651,6 +654,7 @@ fn tab_width(p: Page) -> f32 {
         Page::Docker => 108.0,
         Page::Ops => 80.0,
         Page::Code => 92.0,
+        Page::Digin => 96.0,
         Page::Settings => 56.0, // a gear, not a word
         Page::Dash => 56.0,     // a grid
     }
@@ -783,8 +787,9 @@ fn pr_lists(g: &github::Status, tile: usize) -> [(R, usize, usize, usize); 2] {
 }
 
 // Dashboard: a tile per page (all but itself and Settings), in page order, two rows.
+/// Shortcuts has no live status, so it gets no tile (Digin takes its place).
 pub fn dash_pages(pages: &[Page]) -> Vec<Page> {
-    pages.iter().copied().filter(|p| *p != Page::Dash && *p != Page::Settings).collect()
+    pages.iter().copied().filter(|p| !matches!(p, Page::Dash | Page::Settings | Page::Shortcuts)).collect()
 }
 fn dash_rect(i: usize, n: usize) -> R {
     let cols = n.div_ceil(2).max(1);
@@ -804,6 +809,7 @@ pub fn page_symbol(p: Page) -> &'static str {
         Page::Docker => "shippingbox.fill",
         Page::Ops => "server.rack",
         Page::Code => "arrow.triangle.pull",
+        Page::Digin => "bubble.left.and.text.bubble.right.fill",
         Page::Settings => "gearshape.fill",
     }
 }
@@ -839,6 +845,43 @@ pub fn idle_index(secs: u64) -> usize {
 }
 pub fn setting_name(i: usize) -> &'static str {
     ["Screen brightness", "Ring brightness", "Idle after", "Home when idle", "Ring light", "Alert pulse", "Blink on new", "Jump to new", "Buzzer", "Quake mic", "Auto-accept", "Snap to League"].get(i).copied().unwrap_or("")
+}
+
+// Digin: accounts and chat summary on a strip, then issues | inbox | pages.
+const DG_STRIP_H: f32 = 44.0;
+const DG_TOP: f32 = CY + DG_STRIP_H + 6.0;
+const DG_ROW_H: f32 = 44.0;
+pub const DG_ROWS: usize = ((CY + CH - DG_TOP - 44.0) / DG_ROW_H) as usize;
+fn digin_cols() -> [R; 3] {
+    let total = W - 2.0 * M - 2.0 * G;
+    let (a, b) = (total * 0.38, total * 0.36);
+    let h = CY + CH - DG_TOP;
+    [(M, DG_TOP, a, h), (M + a + G, DG_TOP, b, h), (M + a + b + 2.0 * G, DG_TOP, total - a - b, h)]
+}
+fn digin_row(col: R, slot: usize) -> R {
+    (col.0 + 8.0, col.1 + 40.0 + slot as f32 * DG_ROW_H, col.2 - 16.0, DG_ROW_H)
+}
+/// (column, first visible row, offset into the one index, length) for each list.
+fn digin_lists(d: &digin::Status, tile: usize) -> [(R, usize, usize, usize); 3] {
+    let [ci, cn, cp] = digin_cols();
+    let (ni, nn, np) = (d.issues.len(), d.inbox.len(), d.pages.len());
+    let local = |offset: usize, n: usize| tile.saturating_sub(offset).min(n.saturating_sub(1));
+    [
+        (ci, list_window(ni, local(0, ni), DG_ROWS), 0, ni),
+        (cn, list_window(nn, local(ni, nn), DG_ROWS), ni, nn),
+        (cp, list_window(np, local(ni + nn, np), DG_ROWS), ni + nn, np),
+    ]
+}
+/// The link for a Digin row in the one index.
+pub fn digin_url(d: &digin::Status, i: usize) -> Option<String> {
+    let (ni, nn) = (d.issues.len(), d.inbox.len());
+    if i < ni {
+        d.issues.get(i).map(|x| x.url.clone())
+    } else if i < ni + nn {
+        d.inbox.get(i - ni).map(|x| x.url.clone())
+    } else {
+        d.pages.get(i - ni - nn).map(|x| x.url.clone())
+    }
 }
 
 /// First row of a scrolling list so that `sel` stays visible.
@@ -981,6 +1024,9 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
         (Page::Code, _) => pr_lists(v.code, v.tile).into_iter().find_map(|(panel, first, offset, n)| {
             (0..PR_ROWS).find(|&s| inside(pr_rect(panel, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::Pr(offset + i))
         }),
+        (Page::Digin, _) => digin_lists(v.digin, v.tile).into_iter().find_map(|(col, first, offset, n)| {
+            (0..DG_ROWS).find(|&s| inside(digin_row(col, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::DiginItem(offset + i))
+        }),
         (Page::Dash, _) => {
             let tiles = dash_pages(v.pages);
             (0..tiles.len()).find(|&i| inside(dash_rect(i, tiles.len()), x, y)).map(|i| Hit::Pane(tiles[i]))
@@ -1061,6 +1107,10 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
             pr_rect(panel, (i - offset).checked_sub(first)?)
         }
         Hit::Setting(i, _) => setting_rect(i),
+        Hit::DiginItem(i) => {
+            let (col, first, offset, _) = digin_lists(v.digin, v.tile).into_iter().find(|(_, _, off, n)| i >= *off && i < off + n)?;
+            digin_row(col, (i - offset).checked_sub(first)?)
+        }
         Hit::AskCard(i) => {
             let a = v.ask.as_ref()?;
             ask_card_rect(i, ask_cards(a.options.len(), a.multi))
@@ -1113,6 +1163,7 @@ pub fn draw(c: &mut Canvas, v: &View) {
         (Page::Code, _) => code_page(c, v),
         (Page::Settings, _) => settings_page(c, v),
         (Page::Dash, _) => dash_page(c, v),
+        (Page::Digin, _) => digin_page(c, v),
     }
     if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
         c.rrect(r, 14.0, 0xFFFFFF, 0.22);
@@ -1139,6 +1190,8 @@ fn hints(v: &View) -> &'static str {
         (Page::Ops, _) => "turn  choose   ·   press  open / toggle   ·   double-click  back",
         (Page::Code, Level::Top) => "turn  switch page   ·   press  pick a pull request   ·   tap  open",
         (Page::Code, _) => "turn  choose   ·   press  open in browser   ·   double-click  back",
+        (Page::Digin, Level::Top) => "turn  switch page   ·   press  pick an item   ·   tap  open",
+        (Page::Digin, _) => "turn  choose   ·   press  open in Digin   ·   double-click  back",
         (Page::Dash, Level::Top) => "turn  switch page   ·   press  pick a pane   ·   tap  open",
         (Page::Dash, _) => "turn  choose   ·   press  open   ·   double-click  back",
         (Page::Settings, Level::Top) => "turn  switch page   ·   press  change settings",
@@ -1187,6 +1240,17 @@ fn top_bar(c: &mut Canvas, v: &View) {
         (Page::Ops, Level::Focus) => ops_item_name(v.ops, v.tile).map(|n| format!("›  {n}")),
         (Page::Code, Level::Focus) => v.code.all().get(v.tile).map(|p| format!("›  {}", pr_ref(p))),
         (Page::Dash, Level::Focus) => dash_pages(v.pages).get(v.tile).map(|p| format!("›  {}", p.label())),
+        (Page::Digin, Level::Focus) => {
+            let d = v.digin;
+            let (ni, nn) = (d.issues.len(), d.inbox.len());
+            if v.tile < ni {
+                d.issues.get(v.tile).map(|x| format!("›  {}", x.key))
+            } else if v.tile < ni + nn {
+                Some("›  inbox".to_string())
+            } else {
+                d.pages.get(v.tile - ni - nn).map(|p| format!("›  {}", p.title))
+            }
+        }
         (Page::Settings, Level::Focus) => Some(format!("›  {}", setting_name(v.tile))),
         (Page::Settings, Level::Detail(_)) => Some(format!("›  {}", setting_name(v.tile))),
         _ => None,
@@ -2343,6 +2407,25 @@ fn brief(v: &View, p: Page, accent: u32) -> Brief {
                 _ => b,
             }
         }
+        Page::Digin => {
+            let d = v.digin;
+            if d.accounts.is_empty() {
+                return Brief::new("Add a Digin server", FAINT).dot(FAINT);
+            }
+            if !d.signed_in() {
+                return Brief::new("Not signed in", FAINT).dot(FAINT);
+            }
+            let mentions = d.inbox.iter().filter(|n| n.kind == "mentioned").count() as u32 + d.chat_mentions;
+            if mentions > 0 {
+                Brief::new(format!("{mentions} mention{}", if mentions == 1 { "" } else { "s" }), accent).dot(accent)
+            } else if !d.inbox.is_empty() {
+                Brief::new(format!("{} new", d.inbox.len()), accent).dot(accent)
+            } else if !d.issues.is_empty() {
+                Brief::new(plural(d.issues.len(), "issue open", "issues open"), TEXT).dot(GREEN)
+            } else {
+                Brief::new("All caught up", GREEN).dot(GREEN)
+            }
+        }
         Page::Dash | Page::Settings => Brief::new("", TEXT),
     }
 }
@@ -2384,6 +2467,7 @@ fn dash_page(c: &mut Canvas, v: &View) {
             Page::Docker => dash_docker(c, v, inner, color, &b),
             Page::Ops => dash_ops(c, v, inner, &b),
             Page::Code => dash_code(c, v, inner, color, &b),
+            Page::Digin => dash_digin(c, v, inner, color, &b),
             Page::Dash | Page::Settings => {}
         }
         if v.level != &Level::Top && v.tile == i {
@@ -2787,6 +2871,172 @@ fn dash_code(c: &mut Canvas, v: &View, r: R, accent: u32, b: &Brief) {
         (format!("{} approved", g.mine.iter().filter(|p| p.review == "APPROVED").count()), MUTED)
     };
     c.clip(F::Medium, &foot.0, 14.0, w, x, y + h - 6.0, foot.1);
+}
+
+// ---------------------------------------------------------------- DIGIN
+
+fn status_style(status: &str) -> (u32, u32) {
+    match status {
+        "in_progress" => (0x3A2C08, AMBER),
+        "waiting" => (0x1A2A44, 0x8AB4F8),
+        "todo" => (0x2A2A31, TEXT_2),
+        "backlog" => (0x1E1E24, MUTED),
+        _ => (0x2A2A31, MUTED),
+    }
+}
+
+/// Priority as Digin draws it: urgent is a red mark, then three, two, one bars.
+fn priority_glyph(c: &mut Canvas, x: f32, cy: f32, p: u8) {
+    if p == 1 {
+        c.rrect((x, cy - 8.0, 16.0, 16.0), 4.0, RED, 1.0);
+        c.text(F::Bold, "!", 13.0, x + 8.0, cy + 5.0, 0xFFFFFF, Align::Center);
+        return;
+    }
+    let lit = match p {
+        2 => 3,
+        3 => 2,
+        4 => 1,
+        _ => 0,
+    };
+    for k in 0..3 {
+        let h = 5.0 + k as f32 * 4.0;
+        c.rrect((x + k as f32 * 6.0, cy + 7.0 - h, 4.0, h), 1.0, if k < lit { TEXT_2 } else { 0x3A3A42 }, 1.0);
+    }
+}
+
+fn note_symbol(kind: &str) -> &'static str {
+    match kind {
+        "mentioned" => "at",
+        "message" => "bubble.left.fill",
+        "assigned" => "person.crop.circle.badge.checkmark",
+        "commented" => "text.bubble.fill",
+        "status" => "arrow.triangle.2.circlepath",
+        "due" => "calendar.badge.exclamationmark",
+        "call_missed" => "phone.down.fill",
+        _ => "bell.fill",
+    }
+}
+
+fn digin_page(c: &mut Canvas, v: &View) {
+    let d = v.digin;
+    let focus = v.level != &Level::Top;
+    if d.accounts.is_empty() {
+        c.rrect((M, CY, W - 2.0 * M, CH), 16.0, PANEL_DEEP, 1.0);
+        c.symbol(page_symbol(Page::Digin), 46.0, W / 2.0, CY + CH / 2.0 - 60.0, v.accent);
+        c.text(F::Medium, "No Digin servers yet", 34.0, W / 2.0, CY + CH / 2.0 + 10.0, TEXT_2, Align::Center);
+        c.text(F::Regular, "Add one in Quaked Settings → Digin: sign in with your email and a code.", 20.0, W / 2.0, CY + CH / 2.0 + 50.0, FAINT, Align::Center);
+        return;
+    }
+    // Strip: one chip per account, chat summary on the right.
+    let mut x = M;
+    for a in &d.accounts {
+        let (dot, fg) = match (a.signed_in, &a.error) {
+            (true, None) => (GREEN, TEXT),
+            (true, Some(_)) => (AMBER, TEXT_2),
+            (false, _) => (FAINT, MUTED),
+        };
+        let who = if a.handle.is_empty() { a.label.clone() } else { format!("{}  @{}", a.label, a.handle) };
+        x += chip(c, x, CY + 8.0, dot, &who, 0x22222A, fg, 360.0) + 10.0;
+        if let Some(e) = &a.error {
+            x += c.fit(F::Medium, e, 14.0, 300.0, x, CY + 25.0, AMBER, Align::Left) + 16.0;
+        }
+    }
+    if d.signed_in() {
+        let chat = if d.chat_unread == 0 && d.chat_mentions == 0 {
+            "chat: all read".to_string()
+        } else {
+            format!("chat: {} unread in {}{}", d.chat_unread, plural(d.chat_channels as usize, "channel", "channels"), if d.chat_mentions > 0 { format!("  ·  {} @", d.chat_mentions) } else { String::new() })
+        };
+        c.text(F::Medium, &chat, 17.0, W - M, CY + 26.0, if d.chat_mentions > 0 { v.accent } else { TEXT_2 }, Align::Right);
+    }
+    let multi = d.accounts.len() > 1;
+    let titles = ["MY ISSUES", "INBOX", "PAGES"];
+    let empty = ["Nothing assigned to you", "Inbox zero", "No pages"];
+    for (k, (col, first, offset, n)) in digin_lists(d, v.tile).into_iter().enumerate() {
+        let (cx, cy, cw, ch) = col;
+        c.rrect(col, 14.0, PANEL_DEEP, 1.0);
+        c.text(F::Bold, titles[k], 12.0, cx + 22.0, cy + 26.0, FAINT, Align::Left);
+        let count = if n > DG_ROWS { format!("{}–{} of {n}", first + 1, (first + DG_ROWS).min(n)) } else { n.to_string() };
+        c.text(F::Bold, &count, 12.0, cx + cw - 22.0, cy + 26.0, FAINT, Align::Right);
+        if n == 0 {
+            c.text(F::Medium, if d.signed_in() { empty[k] } else { "" }, 19.0, cx + cw / 2.0, cy + ch / 2.0 + 10.0, FAINT, Align::Center);
+            continue;
+        }
+        for slot in 0..DG_ROWS {
+            let i = first + slot;
+            if i >= n {
+                break;
+            }
+            let r = digin_row(col, slot);
+            let (rx, ry, rw, rh) = r;
+            let mid = ry + rh / 2.0;
+            if focus && v.tile == offset + i {
+                c.rrect(r, 10.0, 0x22222A, 1.0);
+                c.outline(r, 10.0, TEXT, 2.0);
+            } else if slot > 0 {
+                c.rect((rx + 14.0, ry, rw - 28.0, 1.0), LINE, 0.7);
+            }
+            let host = |acct: usize| if multi { d.accounts.get(acct).map(|a| a.label.split('.').next().unwrap_or("").to_string()).unwrap_or_default() } else { String::new() };
+            match k {
+                0 => {
+                    let x = &d.issues[i];
+                    priority_glyph(c, rx + 12.0, mid, x.priority);
+                    c.clip(F::Mono, &x.key, 14.0, 92.0, rx + 40.0, mid + 5.0, MUTED);
+                    let label = if x.status_name.is_empty() { x.status.replace('_', " ") } else { x.status_name.clone() };
+                    let (bg, fg) = status_style(&x.status);
+                    let pw = c.measure(F::Bold, &label.to_uppercase(), 11.0) + 11.0 * 1.4;
+                    c.pill(rx + rw - 12.0 - pw, mid - 10.0, &label.to_uppercase(), 11.0, bg, fg);
+                    c.clip(F::Medium, &x.title, 17.0, rw - 150.0 - pw, rx + 136.0, mid + 6.0, TEXT);
+                }
+                1 => {
+                    let nt = &d.inbox[i];
+                    let col = if nt.kind == "mentioned" { v.accent } else { TEXT_2 };
+                    c.symbol(note_symbol(&nt.kind), 16.0, rx + 20.0, mid, col);
+                    let age = age(v.now_ms.saturating_sub(nt.created));
+                    let aw = c.text(F::Medium, &age, 13.0, rx + rw - 12.0, mid + 5.0, FAINT, Align::Right);
+                    let h = host(nt.account);
+                    let hw = if h.is_empty() { 0.0 } else { c.text(F::Medium, &h, 11.0, rx + rw - 22.0 - aw, mid + 5.0, FAINT, Align::Right) + 10.0 };
+                    let room = rw - 54.0 - aw - hw - 14.0;
+                    let tw = c.clip(F::Bold, &nt.title, 15.0, (room * 0.45).max(60.0), rx + 40.0, mid + 5.0, TEXT);
+                    c.clip(F::Medium, &nt.body, 14.0, (room - tw - 10.0).max(0.0), rx + 50.0 + tw, mid + 5.0, MUTED);
+                }
+                _ => {
+                    let pg = &d.pages[i];
+                    c.symbol("doc.text.fill", 15.0, rx + 18.0, mid, if pg.changed { v.accent } else { MUTED });
+                    let meta = format!("{}  ·  {}", pg.project, age(v.now_ms.saturating_sub(pg.updated)));
+                    let mw = c.text(F::Medium, &meta, 13.0, rx + rw - 12.0, mid + 5.0, FAINT, Align::Right);
+                    c.clip(F::Medium, &pg.title, 16.0, rw - 60.0 - mw, rx + 36.0, mid + 6.0, if pg.changed { TEXT } else { TEXT_2 });
+                }
+            }
+        }
+    }
+}
+
+fn dash_digin(c: &mut Canvas, v: &View, r: R, accent: u32, b: &Brief) {
+    let (x, y, w, h) = r;
+    let d = v.digin;
+    c.fit(F::Bold, &b.big, 26.0, w, x, y + 26.0, b.big_color, Align::Left);
+    if !d.signed_in() {
+        c.clip(F::Medium, "Sign in from Quaked Settings → Digin", 14.0, w, x, y + 54.0, FAINT);
+        return;
+    }
+    // Three counts side by side.
+    let stats = [
+        (d.issues.len().to_string(), "issues", TEXT),
+        (d.inbox.len().to_string(), "inbox", if d.inbox.is_empty() { TEXT } else { accent }),
+        (d.chat_unread.to_string(), if d.chat_mentions > 0 { "chat · @" } else { "chat" }, if d.chat_mentions > 0 { accent } else { TEXT }),
+    ];
+    let sw = w / 3.0;
+    for (k, (n, label, col)) in stats.iter().enumerate() {
+        let sx = x + k as f32 * sw;
+        c.text(F::Bold, n, 26.0, sx, y + 70.0, *col, Align::Left);
+        c.text(F::Medium, label, 12.0, sx, y + 88.0, FAINT, Align::Left);
+    }
+    let foot = d.inbox.first().map(|n| (format!("{}  {}", n.title, n.body), note_symbol(&n.kind))).or_else(|| d.issues.first().map(|i| (format!("{}  {}", i.key, i.title), "circle.dashed")));
+    if let Some((text, sym)) = foot {
+        c.symbol(sym, 13.0, x + 7.0, y + h - 11.0, MUTED);
+        c.clip(F::Medium, &text, 14.0, w - 22.0, x + 20.0, y + h - 6.0, TEXT_2);
+    }
 }
 
 // ---------------------------------------------------------------- Claude's questions

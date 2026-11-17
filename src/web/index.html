@@ -125,12 +125,14 @@ const PAGES = [
   ["docker", "Docker", "shippingbox.fill", "Containers on Kiri or Docker, with logs"],
   ["ops", "Ops", "server.rack", "WARP, your servers and your sites"],
   ["code", "Code", "arrow.triangle.pull", "GitHub PRs and GitLab merge requests"],
+  ["digin", "Digin", "bubble.left.and.text.bubble.right.fill", "Your issues, inbox, chat and pages from Digin"],
   ["settings", "Settings", "gearshape.fill", "Brightness and switches, right on the board"],
 ];
 const PAGE = Object.fromEntries(PAGES.map(([id, label, sym, blurb]) => [id, { id, label, sym, blurb }]));
 const TABS = [
   ["live", "Live", "display"], ["panes", "Panes", "rectangle.3.group"], ["shortcuts", "Shortcuts", "square.grid.3x3"],
   ["soundboard", "Soundboard", "waveform"], ["lighting", "Lighting", "light.max"], ["general", "General", "gearshape"],
+  ["digin", "Digin", "bubble.left.and.text.bubble.right"],
   ["sync", "Macs", "laptopcomputer.and.iphone"],
 ];
 const SYMBOLS = ["star.fill", "bolt.fill", "camera.viewfinder", "rectangle.dashed", "lock.fill", "moon.fill", "sun.max.fill", "speaker.slash.fill", "mic.slash.fill", "music.note", "playpause.fill", "forward.fill", "backward.fill", "terminal.fill", "safari.fill", "globe", "folder.fill", "doc.text.fill", "envelope.fill", "message.fill", "phone.fill", "video.fill", "calendar", "clock.fill", "timer", "bell.fill", "gearshape.fill", "hammer.fill", "wrench.and.screwdriver.fill", "sparkles", "brain.head.profile", "chevron.left.forwardslash.chevron.right", "server.rack", "shippingbox.fill", "cloud.fill", "network", "wifi", "lightbulb.fill", "house.fill", "gamecontroller.fill", "headphones", "megaphone.fill", "hand.thumbsup.fill", "heart.fill", "flame.fill", "trash.fill", "arrow.clockwise", "square.and.arrow.up", "rectangle.split.2x1.fill", "macwindow", "display", "keyboard", "command", "eye.fill", "magnifyingglass", "paperplane.fill", "cart.fill", "creditcard.fill", "person.fill", "figure.walk"];
@@ -245,7 +247,7 @@ function render() {
   const main = $("#main");
   main.replaceChildren(h("div", { id: "banner" }));
   renderBanner();
-  const views = { live: viewLive, panes: viewPanes, shortcuts: viewShortcuts, soundboard: viewSoundboard, lighting: viewLighting, general: viewGeneral, sync: viewSync };
+  const views = { live: viewLive, panes: viewPanes, shortcuts: viewShortcuts, soundboard: viewSoundboard, lighting: viewLighting, general: viewGeneral, digin: viewDigin, sync: viewSync };
   (views[tab] || viewLive)(main);
 }
 
@@ -485,7 +487,8 @@ function viewGeneral(main) {
     toggle("Blink the ring", "alerts.blink"), toggle("Jump to the pane that has it", "alerts.jump"),
     choice("Stop blinking after", "alerts.seconds", [[60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [1800, "30 min"]], null, true),
     toggle("Claude sessions waiting on you", "alerts.ai"), toggle("Review requests, failing CI, approvals, conflicts", "alerts.code"),
-    toggle("Hosts going down, sites failing", "alerts.ops"), toggle("Containers stopping", "alerts.docker")));
+    toggle("Hosts going down, sites failing", "alerts.ops"), toggle("Containers stopping", "alerts.docker"),
+    toggle("Digin mentions, messages and assignments", "alerts.digin")));
   main.append(card("Claude's questions and permissions", "When Claude asks you to choose or needs permission, the prompt shows on the Quake next to Claude's own: turn to an option and press, or answer on the Mac. Whichever you answer first applies, and the other clears.",
     toggle("Answer Claude's questions on the Quake", "ask.enabled"),
     toggle("Permission prompts on the Quake too", "ask.permissions", "Allow, Always allow (when Claude Code offers a rule) or Deny with the knob"),
@@ -500,6 +503,82 @@ function viewGeneral(main) {
     toggle("Include GitLab merge requests", "code.gitlab"),
     choice("Refresh every", "code.refreshSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], "Twice as often while the pane is showing", true)));
   main.append(card("Docker", null, text("Engine socket", "docker.socket", "Automatic (Kiri first)", "Empty finds Kiri's, then Docker's")));
+}
+
+// ---------------------------------------------------------------- Digin
+let dg = { step: "url", url: "digin.work", email: "", code: "", token: "", notice: null, busy: false, error: "", providers: null };
+async function diginStep(body) {
+  dg.busy = true; dg.error = ""; render();
+  try {
+    const r = await api("/api/digin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (r && r.error) throw new Error(r.error);
+    return r;
+  } catch (e) { dg.error = String(e.message || e); return null; }
+  finally { dg.busy = false; render(); }
+}
+function viewDigin(main) {
+  const status = state.status?.digin || {};
+  const accounts = status.accounts || [];
+  const where = state.route?.kind === "remote" ? state.route.name : "this Mac";
+  main.append(h("h1", {}, "Digin"), h("p", { class: "sub" }, `Your issues, inbox, chat and pages on the Quake. Sign-ins are read-only and stay in the Keychain on ${where} (the Mac with the Quake).`));
+  main.append(card("Servers", accounts.length ? null : "Add a server below.", ...(accounts.length ? accounts.map((a) => {
+    const pill = a.signedIn && !a.error ? h("span", { class: "pill green" }, "Signed in") : a.signedIn ? h("span", { class: "pill amber" }, a.error || "Problem") : h("span", { class: "pill" }, "Not signed in");
+    return h("div", { class: "row" },
+      h("div", { class: "icon", style: { width: "30px", display: "grid", placeItems: "center" } }, sym("bubble.left.and.text.bubble.right.fill", 18, cfg.ring?.digin || "var(--accent)")),
+      h("div", { class: "label" }, h("b", {}, a.label || a.url), h("small", {}, [a.name, a.handle ? "@" + a.handle : "", a.email].filter(Boolean).join("  ·  ") || a.url)),
+      pill,
+      !a.signedIn || a.error ? h("button", { class: "btn small", onclick: () => { Object.assign(dg, { step: "url", url: a.url, email: a.email || "", error: "" }); render(); } }, "Sign in") : null,
+      a.signedIn ? h("button", { class: "btn small", onclick: async () => { await diginStep({ step: "sign-out", url: a.url }); toast("Signed out"); poll(); } }, "Sign out") : null,
+      h("button", { class: "btn small danger", onclick: async () => {
+        await diginStep({ step: "sign-out", url: a.url });
+        cfg.digin.accounts = (cfg.digin.accounts || []).filter((x) => x.url.replace(/\/$/, "") !== a.url.replace(/\/$/, ""));
+        changed(); render();
+      } }, "Remove"));
+  }) : [h("div", { class: "empty" }, "No Digin servers yet.")])));
+
+  // Sign-in: server -> email -> code (or a token from Digin's Settings → Access).
+  const rows = [];
+  const input = (key, ph, opts = {}) => h("input", { type: opts.type || "text", value: dg[key] || "", placeholder: ph, class: opts.mono ? "mono" : "", autocomplete: opts.ac || "off", style: { width: opts.width || "280px" }, oninput: (e) => (dg[key] = e.target.value) });
+  const go = (label, fn, primary = true) => h("button", { class: "btn" + (primary ? " primary" : ""), disabled: dg.busy, onclick: fn }, dg.busy && primary ? "Working…" : label);
+  if (dg.step === "url") {
+    rows.push(h("div", { class: "row" }, h("div", { class: "label" }, "Server", h("small", {}, "digin.work, or your own server's address")), input("url", "digin.work"),
+      go("Continue", async () => {
+        const p = await diginStep({ step: "providers", url: dg.url });
+        if (!p) return;
+        dg.providers = p;
+        const email = (p.providers || []).some((x) => x.kind === "email");
+        dg.step = p.gate ? "token" : email ? "email" : "token";
+        if (!email && !p.gate) dg.error = "This server doesn't offer email sign-in; paste a token instead.";
+        if (p.gate) dg.error = "This server signs people in through a gateway; paste a token instead.";
+        render();
+      })));
+  } else if (dg.step === "email") {
+    rows.push(h("div", { class: "row" }, h("div", { class: "label" }, `Email for ${dg.url}`, h("small", {}, "Digin emails you a 6-digit code")), input("email", "you@example.com", { type: "email", ac: "email" }),
+      go("Email me a code", async () => { if (await diginStep({ step: "email-start", url: dg.url, email: dg.email })) { dg.step = "code"; render(); } })));
+  } else if (dg.step === "code" || dg.step === "notice") {
+    if (dg.step === "notice" && dg.notice) rows.push(h("div", { class: "row", style: { display: "block" } }, h("b", {}, "Your organisation asks you to accept this first:"), h("div", { style: { whiteSpace: "pre-wrap", marginTop: "8px", color: "var(--muted)" } }, dg.notice.text || "")));
+    rows.push(h("div", { class: "row" }, h("div", { class: "label" }, "Code", h("small", {}, `Sent to ${dg.email}. It works once, for 10 minutes.`)), input("code", "123456", { mono: true, width: "120px", ac: "one-time-code" }),
+      go(dg.step === "notice" ? "Accept and sign in" : "Sign in", async () => {
+        const r = await diginStep({ step: "email-token", url: dg.url, email: dg.email, code: dg.code.trim(), notice: dg.step === "notice" ? dg.notice?.version : null });
+        if (!r) return;
+        if (r.notice) { dg.notice = r.notice; dg.step = "notice"; render(); return; }
+        toast(`Signed in${r.name ? " as " + r.name : ""}`);
+        Object.assign(dg, { step: "url", code: "", notice: null, url: "digin.work" }); cfg = null; poll();
+      }),
+      h("button", { class: "btn small", disabled: dg.busy, onclick: async () => { if (await diginStep({ step: "email-start", url: dg.url, email: dg.email })) toast("Sent a new code"); } }, "Send again")));
+  }
+  if (dg.step === "token") {
+    rows.push(h("div", { class: "row" }, h("div", { class: "label" }, `Token for ${dg.url}`, h("small", {}, "Make one in Digin: Settings → Access (read access to issues, pages, chat, profile)")), input("token", "digin_…", { mono: true, width: "300px" }),
+      go("Sign in", async () => {
+        const r = await diginStep({ step: "token", url: dg.url, token: dg.token.trim() });
+        if (r && r.ok) { toast("Signed in"); Object.assign(dg, { step: "url", token: "", url: "digin.work" }); cfg = null; poll(); }
+      })));
+  }
+  const back = dg.step !== "url" ? h("button", { class: "btn small", onclick: () => { Object.assign(dg, { step: "url", error: "", notice: null }); render(); } }, "Start over") : null;
+  const tokenLink = dg.step === "email" || dg.step === "code" ? h("button", { class: "btn small", onclick: () => { dg.step = "token"; dg.error = ""; render(); } }, "Use a token instead") : null;
+  main.append(card("Add or sign in to a server", "quaked asks for read access only. Tokens last 90 days; sign in again when one runs out.", ...rows,
+    (dg.error || back || tokenLink) ? h("div", { class: "row" }, h("span", { style: { flex: 1, color: "var(--red)", fontSize: "13px" } }, dg.error), tokenLink, back) : null));
+  main.append(card("Refresh", null, choice("Check every", "digin.refreshSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], "Three times as often while the Digin pane is showing", true)));
 }
 
 // ---------------------------------------------------------------- Macs (sync)

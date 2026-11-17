@@ -18,6 +18,7 @@ mod app;
 mod audio;
 mod config;
 mod device;
+mod digin;
 mod docker;
 mod github;
 mod http;
@@ -28,6 +29,7 @@ mod music;
 mod ops;
 mod proto;
 mod render;
+mod secret;
 mod status;
 mod symbols;
 mod sync;
@@ -213,6 +215,28 @@ fn preview(dir: &str) {
         gitlab_error: None,
     };
     let settings = render::SettingsView { screen: 200, ring: 169, idle: 45, idle_home: true, ring_on: true, alert: true, buzzer: true, mic: false, auto_accept: true, snap: true, blink: true, jump: true };
+    let dg = digin::Status {
+        accounts: vec![digin::Account { url: "https://digin.work".into(), label: "digin.work".into(), signed_in: true, handle: "austin".into(), name: "Austin".into(), ..Default::default() }],
+        issues: vec![
+            digin::Issue { key: "DIG-612".into(), title: "Runner pool drains when the API restarts".into(), status: "in_progress".into(), status_name: "In progress".into(), priority: 1, url: String::new(), ..Default::default() },
+            digin::Issue { key: "DIG-598".into(), title: "Bot kinds: per-kind rate limits".into(), status: "todo".into(), status_name: "Todo".into(), priority: 2, ..Default::default() },
+            digin::Issue { key: "KES-41".into(), title: "Wiki: drag pages between projects".into(), status: "waiting".into(), status_name: "Waiting".into(), priority: 3, ..Default::default() },
+            digin::Issue { key: "DIG-577".into(), title: "Calendar invites show the wrong time zone".into(), status: "backlog".into(), status_name: "Backlog".into(), priority: 4, ..Default::default() },
+        ],
+        inbox: vec![
+            digin::Note { id: 1, kind: "mentioned".into(), title: "Sam in #release".into(), body: "@austin can you sign off on 0.47 before 5?".into(), created: now - 4 * 60_000, ..Default::default() },
+            digin::Note { id: 2, kind: "message".into(), title: "Priya".into(), body: "pushed the fix for the runner drain, take a look".into(), created: now - 22 * 60_000, ..Default::default() },
+            digin::Note { id: 3, kind: "assigned".into(), title: "DIG-612 assigned to you".into(), body: "Runner pool drains when the API restarts".into(), created: now - 70 * 60_000, ..Default::default() },
+        ],
+        pages: vec![
+            digin::DocPage { title: "Release checklist 0.47".into(), project: "DIG".into(), updated: now - 9 * 60_000, changed: true, ..Default::default() },
+            digin::DocPage { title: "Runner architecture".into(), project: "DIG".into(), updated: now - 3 * 3_600_000, changed: false, ..Default::default() },
+            digin::DocPage { title: "Onboarding".into(), project: "KES".into(), updated: now - 26 * 3_600_000, changed: false, ..Default::default() },
+        ],
+        chat_unread: 14,
+        chat_mentions: 1,
+        chat_channels: 3,
+    };
     let mut history = render::History::default();
     for i in 0..34u32 {
         render::History::push(&mut history.ai_steps, [0.0, 2.0, 5.0, 9.0, 4.0, 0.0, 0.0, 3.0, 12.0, 7.0, 6.0, 1.0][(i % 12) as usize]);
@@ -231,7 +255,7 @@ fn preview(dir: &str) {
         ("Always allow".to_string(), "don't ask again for Bash(./deploy.sh:*)".to_string()),
         ("Deny".to_string(), "tell Claude no".to_string()),
     ];
-    let shots: [(&str, Page, Level, usize, usize, usize); 18] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 19] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -249,6 +273,7 @@ fn preview(dir: &str) {
         ("0-dash", Page::Dash, Level::Top, 0, 0, 0),
         ("17-ask", Page::Ai, Level::Top, 0, 0, 0),
         ("18-permit", Page::Ai, Level::Top, 0, 0, 0),
+        ("19-digin", Page::Digin, Level::Focus, 0, 0, 4),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
@@ -267,6 +292,7 @@ fn preview(dir: &str) {
             docker: &dk,
             ops: &opsd,
             code: &code,
+            digin: &dg,
             settings,
             ring: &cfg.ring,
             history: &history,

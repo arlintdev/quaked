@@ -1,12 +1,12 @@
 # quaked
 
-Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Ten pages (turn them on
+Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Eleven pages (turn them on
 and off and reorder them on the settings page's Panes tab), each with its own color on the
 knob's light ring:
 
 - **Dashboard** (the grid icon, first by default): a tile per pane, each drawn for what
   matters there: Claude session chips and a 20-minute activity histogram; album art with
-  progress; your shortcut icons; ON AIR / OFF AIR with the call app and clip chips; the
+  progress; Digin mentions, inbox and chat counts; ON AIR / OFF AIR with the call app and clip chips; the
   League phase as a Lobby → Queue → Found → Pick → Game stepper with the timer; a CPU
   sparkline per container; WARP, host dots and a latency sparkline per site with TLS
   days; a stacked CI bar across your PRs and the review waiting on you. Each has a health
@@ -41,6 +41,11 @@ knob's light ring:
 - **Code**: your open GitHub pull requests (CI, review, conflicts, drafts) and the reviews
   waiting on you, through `gh`; GitLab merge requests too, through `glab`, for every host
   it is signed in to. Tap one to open it.
+- **Digin**: your open issues (priority, key, status), inbox (mentions, DMs, assignments,
+  comments) and recently changed pages from one or more Digin servers, with unread chat
+  counts on top. Tap or press a row to open it in Digin. Sign in on the settings page's
+  Digin tab with your email and a code (or a token from Digin's Settings → Access): quaked
+  asks for read access only and keeps the token in the Keychain of the Mac with the Quake.
 - **Settings** (the gear): screen brightness, ring brightness, idle timeout, and switches
   for the ring, the alert pulse, blink / jump on new stuff, buzzer, the Quake's mic,
   League auto-accept and snap.

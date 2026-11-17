@@ -179,7 +179,11 @@ fn board_of(state: &Value) -> Board {
 fn on_board(ctl: &Ctl, board: &Board, line: &str) -> Result<Vec<u8>, String> {
     match board {
         Board::Local | Board::None => Ok(ctl(line)),
-        Board::Remote { host, port, key, name } => sync::request(host, *port, key, &format!("ctl {line}")).map_err(|e| format!("{name}: {e}")),
+        Board::Remote { host, port, key, name } => {
+            // Digin sign-in talks to the Digin server from there: allow it longer.
+            let wait = if line.starts_with("digin-auth ") { Duration::from_secs(40) } else { Duration::from_secs(8) };
+            sync::request_long(host, *port, key, &format!("ctl {line}"), wait).map_err(|e| format!("{name}: {e}"))
+        }
     }
 }
 
@@ -245,6 +249,15 @@ fn route(req: &Request, ctl: &Ctl) -> Response {
                 ok("image/png", png)
             } else {
                 fail(404, "unknown symbol")
+            }
+        }
+        ("POST", "/api/digin") => {
+            // Sign-in steps run on the Mac with the Quake, so its Keychain keeps the token.
+            let Ok(v) = serde_json::from_slice::<Value>(&req.body) else { return fail(400, "not JSON") };
+            let Some(state) = local_state(ctl) else { return fail(500, "quaked didn't answer") };
+            match on_board(ctl, &board_of(&state), &format!("digin-auth {v}")) {
+                Ok(r) => ok("application/json", r),
+                Err(e) => fail(502, e),
             }
         }
         ("POST", "/api/pair-answer") => {

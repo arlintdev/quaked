@@ -11,7 +11,7 @@
 use crate::audio::{self, Audio};
 use crate::config::{self, Action, Config, PageId};
 use crate::device::{self, Command, Input};
-use crate::{docker, github, league, ops, sync};
+use crate::{digin, docker, github, league, ops, sync};
 use crate::keys;
 use crate::music::{self, MusicCmd, MusicEvent, Track};
 use crate::proto;
@@ -75,6 +75,10 @@ pub enum Event {
     Ops(ops::Status),
     Code(github::Status),
     Sync(sync::Status),
+    Digin(digin::Status),
+    /// Signed in to a Digin server: add it to the settings.
+    DiginAdded(config::DiginAccount),
+    DiginRefresh,
     /// A paired Mac has newer settings: (its name, its config JSON).
     PeerConfig(String, String),
     /// A Mac asks to pair; answer true to give it the key.
@@ -151,6 +155,9 @@ struct App {
     code_cmd: Sender<github::Cmd>,
     code: github::Status,
     code_fast: Arc<AtomicBool>,
+    digin_cmd: Sender<digin::Cmd>,
+    digin: digin::Status,
+    digin_fast: Arc<AtomicBool>,
     sync_cmd: Sender<sync::Cmd>,
     peers: sync::Status,
     /// Poll the other Macs only while the Quake is attached here.
@@ -336,6 +343,7 @@ impl App {
             docker: &self.docker,
             ops: &self.ops,
             code: &self.code,
+            digin: &self.digin,
             settings: render::SettingsView {
                 screen: self.undim_to.unwrap_or(self.luminance),
                 ring: self.cfg.ring.brightness,
@@ -478,6 +486,9 @@ impl App {
             if cfg.code != self.cfg.code || force {
                 let _ = self.code_cmd.send(github::Cmd::Configure(cfg.code.clone()));
             }
+            if cfg.digin != self.cfg.digin || force {
+                let _ = self.digin_cmd.send(digin::Cmd::Configure(cfg.digin.clone()));
+            }
             if cfg.sync != self.cfg.sync || force {
                 let _ = self.sync_cmd.send(sync::Cmd::Configure(cfg.sync.clone()));
             }
@@ -610,6 +621,7 @@ impl App {
             PageId::Code => a.code,
             PageId::Ops => a.ops,
             PageId::Docker => a.docker,
+            PageId::Digin => a.digin,
             _ => true,
         };
         if !wanted || !self.cfg.pages.contains(&page) {
@@ -996,6 +1008,7 @@ impl App {
         self.docker_fast.store(p == PageId::Docker, Ordering::Relaxed);
         self.ops_fast.store(p == PageId::Ops, Ordering::Relaxed);
         self.code_fast.store(p == PageId::Code, Ordering::Relaxed);
+        self.digin_fast.store(p == PageId::Digin, Ordering::Relaxed);
         if p == PageId::Code {
             let _ = self.code_cmd.send(github::Cmd::Refresh);
         }
@@ -1222,6 +1235,7 @@ impl App {
             PageId::Code => self.code.mine.len() + self.code.reviews.len(),
             PageId::Settings => render::SETTING_COUNT,
             PageId::Dash => render::dash_pages(&self.cfg.pages).len(),
+            PageId::Digin => self.digin.issues.len() + self.digin.inbox.len() + self.digin.pages.len(),
             _ => 0,
         }
     }
@@ -1261,7 +1275,7 @@ impl App {
                 self.scroll = (self.scroll as i32 - d).max(0) as usize;
             }
             (PageId::Settings, Level::Detail(_)) => self.adjust_setting(self.tile, d),
-            (PageId::Shortcuts | PageId::Soundboard | PageId::Docker | PageId::Ops | PageId::Code | PageId::Settings | PageId::Dash, _) => {
+            (PageId::Shortcuts | PageId::Soundboard | PageId::Docker | PageId::Ops | PageId::Code | PageId::Settings | PageId::Dash | PageId::Digin, _) => {
                 let n = self.tile_count() as i32;
                 if n > 0 {
                     self.tile = (self.tile as i32 + d).clamp(0, n - 1) as usize;
@@ -1332,6 +1346,11 @@ impl App {
                 (PageId::Soundboard, _) => self.toggle_clip(self.tile),
                 (PageId::Ops, _) => self.ops_activate(self.tile),
                 (PageId::Code, _) => self.open_pr(self.tile),
+                (PageId::Digin, _) => {
+                    if let Some(url) = render::digin_url(&self.digin, self.tile) {
+                        open_target(&url);
+                    }
+                }
                 (PageId::Dash, _) => {
                     if let Some(p) = render::dash_pages(&self.cfg.pages).get(self.tile).copied() {
                         self.set_page(p);
@@ -1519,6 +1538,12 @@ impl App {
                 self.open_pr(i);
             }
             Hit::Pane(p) => self.set_page(p),
+            Hit::DiginItem(i) => {
+                self.tile = i;
+                if let Some(url) = render::digin_url(&self.digin, i) {
+                    open_target(&url);
+                }
+            }
             Hit::AskCard(i) => {
                 if let Some(a) = self.asks.front_mut() {
                     a.sel = i;
@@ -1623,6 +1648,13 @@ impl App {
                 "name": self.peers.name,
                 "port": self.peers.port,
                 "peers": self.peers.peers.iter().map(|p| serde_json::json!({"name": p.name, "host": p.host, "ok": p.ok, "error": p.error, "sessions": p.sessions.len()})).collect::<Vec<_>>(),
+            },
+            "digin": {
+                "accounts": self.digin.accounts.iter().map(|a| serde_json::json!({"url": a.url, "label": a.label, "email": a.email, "signedIn": a.signed_in, "handle": a.handle, "name": a.name, "error": a.error})).collect::<Vec<_>>(),
+                "issues": self.digin.issues.len(),
+                "inbox": self.digin.inbox.len(),
+                "chatUnread": self.digin.chat_unread,
+                "chatMentions": self.digin.chat_mentions,
             },
             "code": {
                 "ok": self.code.ok,
@@ -1859,6 +1891,37 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             Event::Menu(action) => self.on_menu(action),
+            Event::Digin(st) => {
+                // New in the inbox since last time (not on the first load or after signing in).
+                let known: std::collections::HashSet<(usize, i64)> = self.digin.inbox.iter().map(|n| (n.account, n.id)).collect();
+                let was_in: Vec<bool> = self.digin.accounts.iter().map(|a| a.signed_in && a.error.is_none()).collect();
+                let news: Vec<String> = st
+                    .inbox
+                    .iter()
+                    .filter(|n| was_in.get(n.account).copied().unwrap_or(false) && !known.contains(&(n.account, n.id)))
+                    .filter(|n| matches!(n.kind.as_str(), "mentioned" | "message" | "assigned" | "commented" | "due"))
+                    .map(|n| if n.body.is_empty() { n.title.clone() } else { format!("{}: {}", n.title, n.body) })
+                    .collect();
+                self.digin = st;
+                self.tile = self.tile.min(self.tile_count().saturating_sub(1));
+                if let Some(r) = Self::summarize(news) {
+                    self.alert(PageId::Digin, r, true);
+                }
+                if self.page == PageId::Digin || self.page == PageId::Dash {
+                    self.redraw();
+                }
+            }
+            Event::DiginAdded(acct) => {
+                match self.cfg.digin.accounts.iter_mut().find(|a| digin::normalize(&a.url) == digin::normalize(&acct.url)) {
+                    Some(a) => a.email = acct.email,
+                    None => self.cfg.digin.accounts.push(acct),
+                }
+                self.save_config();
+                let _ = self.digin_cmd.send(digin::Cmd::Configure(self.cfg.digin.clone()));
+            }
+            Event::DiginRefresh => {
+                let _ = self.digin_cmd.send(digin::Cmd::Refresh);
+            }
             Event::Ctl(line, reply) if line.starts_with("ask ") => self.start_ask(&line[4..], reply),
             Event::Ctl(line, reply) => {
                 let out = self.on_ctl(&line);
@@ -2053,6 +2116,17 @@ fn ctl_caller(proxy: winit::event_loop::EventLoopProxy<Event>, audio: Sender<aud
     let proxy = Mutex::new(proxy);
     let audio = Mutex::new(audio);
     Arc::new(move |line: &str| {
+        // Digin sign-in talks to the server: do it here, not on the main thread.
+        if let Some(json) = line.strip_prefix("digin-auth ") {
+            let (reply, added) = crate::digin::auth(json);
+            let proxy = proxy.lock().unwrap();
+            if let Some(a) = added {
+                let _ = proxy.send_event(Event::DiginAdded(a));
+            } else if json.contains("\"sign-out\"") {
+                let _ = proxy.send_event(Event::DiginRefresh);
+            }
+            return (reply.to_string() + "\n").into_bytes();
+        }
         if line == "audio-devices" {
             let (tx, rx) = std::sync::mpsc::channel();
             let _ = audio.lock().unwrap().send(audio::Cmd::Devices(tx));
@@ -2131,6 +2205,11 @@ pub fn run() {
     let docker_cmd = docker::spawn(cfg.docker.clone(), docker_fast.clone(), move |st| {
         let _ = p6.send_event(Event::Docker(st));
     });
+    let digin_fast = Arc::new(AtomicBool::new(false));
+    let p11 = proxy.clone();
+    let digin_cmd = digin::spawn(cfg.digin.clone(), digin_fast.clone(), move |st| {
+        let _ = p11.send_event(Event::Digin(st));
+    });
     let ops_fast = Arc::new(AtomicBool::new(false));
     let p7 = proxy.clone();
     let ops_cmd = ops::spawn(cfg.ops.clone(), ops_fast.clone(), move |st| {
@@ -2187,6 +2266,9 @@ pub fn run() {
         code_cmd,
         code: github::Status::default(),
         code_fast,
+        digin_cmd,
+        digin: digin::Status::default(),
+        digin_fast,
         sync_cmd,
         peers: sync::Status::default(),
         sync_want,
