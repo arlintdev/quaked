@@ -16,16 +16,23 @@
 
 mod app;
 mod audio;
+mod calendar;
+mod call;
+mod clipboard;
 mod config;
+mod deploy;
 mod device;
 mod digin;
 mod docker;
+mod focus;
 mod github;
+mod health;
 mod http;
 mod keys;
 mod league;
 mod menubar;
 mod music;
+mod night;
 mod ops;
 mod proto;
 mod render;
@@ -33,7 +40,9 @@ mod secret;
 mod status;
 mod symbols;
 mod sync;
+mod viz;
 mod web;
+mod windows;
 
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -306,7 +315,11 @@ fn preview(dir: &str) {
         ("Always allow".to_string(), "don't ask again for Bash(./deploy.sh:*)".to_string()),
         ("Deny".to_string(), "tell Claude no".to_string()),
     ];
-    let shots: [(&str, Page, Level, usize, usize, usize); 22] = [
+    // Features: each module's sample(); the call / night overlays only on their own shots.
+    let (call_on, call_off) = (call::sample(), call::Status::default());
+    let (night_on, night_off) = (night::sample(), night::Status::default());
+    let (focus_s, deploy_s, paste_s, windows_s, calendar_s, health_s, viz_s) = (focus::sample(), deploy::sample(), clipboard::sample(), windows::sample(), calendar::sample(), health::sample(), viz::sample());
+    let shots: [(&str, Page, Level, usize, usize, usize); 31] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -328,6 +341,15 @@ fn preview(dir: &str) {
         ("20-league-live", Page::League, Level::Top, 0, 0, 0),
         ("21-league-dead", Page::League, Level::Top, 0, 0, 0),
         ("22-league-aram", Page::League, Level::Top, 0, 0, 0),
+        ("30-focus", Page::Focus, Level::Focus, 0, 0, 0),
+        ("31-deploy", Page::Deploy, Level::Focus, 0, 0, 0),
+        ("32-paste", Page::Paste, Level::Focus, 0, 0, 0),
+        ("33-windows", Page::Windows, Level::Focus, 0, 0, 0),
+        ("34-calendar", Page::Calendar, Level::Focus, 0, 0, 0),
+        ("35-health", Page::Health, Level::Focus, 0, 0, 0),
+        ("36-call", Page::Ai, Level::Top, 0, 0, 0),
+        ("37-night", Page::Dash, Level::Top, 0, 0, 0),
+        ("38-music-viz", Page::Music, Level::Top, 0, 0, 0),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
@@ -349,6 +371,15 @@ fn preview(dir: &str) {
             digin: &dg,
             settings,
             ring: &cfg.ring,
+            call: if name == "36-call" { &call_on } else { &call_off },
+            night: if name == "37-night" { &night_on } else { &night_off },
+            focus: &focus_s,
+            deploy: &deploy_s,
+            paste: &paste_s,
+            windows: &windows_s,
+            calendar: &calendar_s,
+            health: &health_s,
+            viz: &viz_s,
             history: &history,
             ask: (name == "17-ask").then(|| render::AskView {
                 session: "quaked",

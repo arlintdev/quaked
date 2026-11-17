@@ -26,6 +26,12 @@
   <array>
     <string>_quaked._tcp</string>
   </array>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Quaked shows your next meetings on the Quake and lets you join them from the knob.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Quaked shows your next meetings on the Quake and lets you join them from the knob.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Quaked draws a visualizer of the music you're playing on the Quake.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Quaked shows what Spotify or Music is playing and controls playback from the knob.</string>
   <!-- Background app: no Dock icon, no menu bar. -->

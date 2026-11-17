@@ -15,6 +15,17 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use tiny_skia::{Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 
+// One file per feature (each draws its own page / overlay; they share this module's helpers).
+mod calendar;
+mod call;
+mod deploy;
+mod focus;
+mod health;
+mod night;
+mod paste;
+mod viz;
+mod windows;
+
 pub const W: f32 = 1920.0;
 pub const H: f32 = 480.0;
 const M: f32 = 12.0; // outer margin
@@ -70,6 +81,8 @@ pub enum Hit {
     AskCard(usize),
     /// A Digin row: issues, then inbox, then pages (one index across the three lists).
     DiginItem(usize),
+    /// Item `usize` on a feature's page (or overlay: Page::Dash for call / night).
+    Feature(Page, usize),
 }
 
 /// Claude's current question on the board.
@@ -146,6 +159,16 @@ pub struct View<'a> {
     pub history: &'a History,
     /// A question from Claude, shown over everything.
     pub ask: Option<AskView<'a>>,
+    // Features (see render/<feature>.rs and app/<feature>.rs).
+    pub call: &'a crate::call::Status,
+    pub focus: &'a crate::focus::Status,
+    pub deploy: &'a crate::deploy::Status,
+    pub paste: &'a crate::clipboard::Status,
+    pub windows: &'a crate::windows::Status,
+    pub calendar: &'a crate::calendar::Status,
+    pub health: &'a crate::health::Status,
+    pub night: &'a crate::night::Status,
+    pub viz: &'a crate::viz::Status,
     pub level: &'a Level,
     pub sessions: &'a [Session],
     pub sel: usize,
@@ -655,6 +678,7 @@ fn tab_width(p: Page) -> f32 {
         Page::Ops => 80.0,
         Page::Code => 92.0,
         Page::Digin => 96.0,
+        Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health => 56.0, // icons
         Page::Settings => 56.0, // a gear, not a word
         Page::Dash => 56.0,     // a grid
     }
@@ -794,7 +818,7 @@ fn pr_lists(g: &github::Status, tile: usize) -> [(R, usize, usize, usize); 2] {
 // Dashboard: a tile per page (all but itself and Settings), in page order, two rows.
 /// Shortcuts has no live status, so it gets no tile (Digin takes its place).
 pub fn dash_pages(pages: &[Page]) -> Vec<Page> {
-    pages.iter().copied().filter(|p| !matches!(p, Page::Dash | Page::Settings | Page::Shortcuts)).collect()
+    pages.iter().copied().filter(|p| !matches!(p, Page::Dash | Page::Settings | Page::Shortcuts | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health)).collect()
 }
 fn dash_rect(i: usize, n: usize) -> R {
     let cols = n.div_ceil(2).max(1);
@@ -815,6 +839,12 @@ pub fn page_symbol(p: Page) -> &'static str {
         Page::Ops => "server.rack",
         Page::Code => "arrow.triangle.pull",
         Page::Digin => "bubble.left.and.text.bubble.right.fill",
+        Page::Focus => "timer",
+        Page::Deploy => "paperplane.fill",
+        Page::Paste => "doc.on.clipboard.fill",
+        Page::Windows => "macwindow.on.rectangle",
+        Page::Calendar => "calendar",
+        Page::Health => "waveform.path.ecg",
         Page::Settings => "gearshape.fill",
     }
 }
@@ -983,6 +1013,12 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
         let n = ask_cards(a.options.len(), a.multi);
         return (0..n).find(|&i| inside(ask_card_rect(i, n), x, y)).map(Hit::AskCard);
     }
+    if v.call.active {
+        return call::hit(v, x, y);
+    }
+    if v.night.active {
+        return night::hit(v, x, y);
+    }
     for p in v.pages {
         if inside(tab_rect(v.pages, *p), x, y) {
             return Some(Hit::Tab(*p));
@@ -1029,6 +1065,12 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
         (Page::Code, _) => pr_lists(v.code, v.tile).into_iter().find_map(|(panel, first, offset, n)| {
             (0..PR_ROWS).find(|&s| inside(pr_rect(panel, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::Pr(offset + i))
         }),
+        (Page::Focus, _) => focus::hit(v, x, y),
+        (Page::Deploy, _) => deploy::hit(v, x, y),
+        (Page::Paste, _) => paste::hit(v, x, y),
+        (Page::Windows, _) => windows::hit(v, x, y),
+        (Page::Calendar, _) => calendar::hit(v, x, y),
+        (Page::Health, _) => health::hit(v, x, y),
         (Page::Digin, _) => digin_lists(v.digin, v.tile).into_iter().find_map(|(col, first, offset, n)| {
             (0..DG_ROWS).find(|&s| inside(digin_row(col, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::DiginItem(offset + i))
         }),
@@ -1112,6 +1154,7 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
             pr_rect(panel, (i - offset).checked_sub(first)?)
         }
         Hit::Setting(i, _) => setting_rect(i),
+        Hit::Feature(p, i) => return feature_rect(v, p, i),
         Hit::DiginItem(i) => {
             let (col, first, offset, _) = digin_lists(v.digin, v.tile).into_iter().find(|(_, _, off, n)| i >= *off && i < off + n)?;
             digin_row(col, (i - offset).checked_sub(first)?)
@@ -1137,6 +1180,25 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
     })
 }
 
+/// Where a feature's item is (for the tap flash).
+fn feature_rect(v: &View, p: Page, i: usize) -> Option<R> {
+    if v.call.active {
+        return call::rect(v, i);
+    }
+    if v.night.active {
+        return night::rect(v, i);
+    }
+    match p {
+        Page::Focus => focus::rect(v, i),
+        Page::Deploy => deploy::rect(v, i),
+        Page::Paste => paste::rect(v, i),
+        Page::Windows => windows::rect(v, i),
+        Page::Calendar => calendar::rect(v, i),
+        Page::Health => health::rect(v, i),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------- drawing
 
 pub fn draw(c: &mut Canvas, v: &View) {
@@ -1146,6 +1208,17 @@ pub fn draw(c: &mut Canvas, v: &View) {
         if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
             c.rrect(r, 16.0, 0xFFFFFF, 0.22);
         }
+        return;
+    }
+    if v.call.active {
+        call::draw(c, v);
+        if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
+            c.rrect(r, 16.0, 0xFFFFFF, 0.22);
+        }
+        return;
+    }
+    if v.night.active {
+        night::draw(c, v);
         return;
     }
     top_bar(c, v);
@@ -1169,6 +1242,12 @@ pub fn draw(c: &mut Canvas, v: &View) {
         (Page::Settings, _) => settings_page(c, v),
         (Page::Dash, _) => dash_page(c, v),
         (Page::Digin, _) => digin_page(c, v),
+        (Page::Focus, _) => focus::draw(c, v),
+        (Page::Deploy, _) => deploy::draw(c, v),
+        (Page::Paste, _) => paste::draw(c, v),
+        (Page::Windows, _) => windows::draw(c, v),
+        (Page::Calendar, _) => calendar::draw(c, v),
+        (Page::Health, _) => health::draw(c, v),
     }
     if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
         c.rrect(r, 14.0, 0xFFFFFF, 0.22);
@@ -1195,6 +1274,12 @@ fn hints(v: &View) -> &'static str {
         (Page::Ops, _) => "turn  choose   ·   press  open / toggle   ·   double-click  back",
         (Page::Code, Level::Top) => "turn  switch page   ·   press  pick a pull request   ·   tap  open",
         (Page::Code, _) => "turn  choose   ·   press  open in browser   ·   double-click  back",
+        (Page::Focus, l) => focus::hints(l),
+        (Page::Deploy, l) => deploy::hints(l),
+        (Page::Paste, l) => paste::hints(l),
+        (Page::Windows, l) => windows::hints(l),
+        (Page::Calendar, l) => calendar::hints(l),
+        (Page::Health, l) => health::hints(l),
         (Page::Digin, Level::Top) => "turn  switch page   ·   press  pick an item   ·   tap  open",
         (Page::Digin, _) => "turn  choose   ·   press  open in Digin   ·   double-click  back",
         (Page::Dash, Level::Top) => "turn  switch page   ·   press  pick a pane   ·   tap  open",
@@ -1213,7 +1298,7 @@ fn top_bar(c: &mut Canvas, v: &View) {
         let active = v.page == p;
         c.rrect(r, 17.0, if active { TEXT } else { 0x1C1C21 }, 1.0);
         let fg = if active { 0x111114 } else { MUTED };
-        if p == Page::Settings || p == Page::Dash {
+        if matches!(p, Page::Settings | Page::Dash | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health) {
             c.symbol(page_symbol(p), 18.0, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, fg);
         } else {
             c.text(F::Bold, p.label(), 16.0, r.0 + r.2 / 2.0, r.1 + 23.0, fg, Align::Center);
@@ -1256,6 +1341,12 @@ fn top_bar(c: &mut Canvas, v: &View) {
                 d.pages.get(v.tile - ni - nn).map(|p| format!("›  {}", p.title))
             }
         }
+        (Page::Focus, _) => focus::crumb(v),
+        (Page::Deploy, _) => deploy::crumb(v),
+        (Page::Paste, _) => paste::crumb(v),
+        (Page::Windows, _) => windows::crumb(v),
+        (Page::Calendar, _) => calendar::crumb(v),
+        (Page::Health, _) => health::crumb(v),
         (Page::Settings, Level::Focus) => Some(format!("›  {}", setting_name(v.tile))),
         (Page::Settings, Level::Detail(_)) => Some(format!("›  {}", setting_name(v.tile))),
         _ => None,
@@ -1507,6 +1598,7 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
 }
 
 fn music(c: &mut Canvas, v: &View) {
+    viz::draw_behind(c, v, (M, CY, W - 2.0 * M, CH));
     let focus = v.level == &Level::Focus;
     match v.art {
         Some(img) => c.image(img, ART, 14.0),
@@ -2741,7 +2833,7 @@ fn brief(v: &View, p: Page, accent: u32) -> Brief {
                 Brief::new("All caught up", GREEN).dot(GREEN)
             }
         }
-        Page::Dash | Page::Settings => Brief::new("", TEXT),
+        Page::Dash | Page::Settings | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health => Brief::new("", TEXT),
     }
 }
 
@@ -2783,7 +2875,7 @@ fn dash_page(c: &mut Canvas, v: &View) {
             Page::Ops => dash_ops(c, v, inner, &b),
             Page::Code => dash_code(c, v, inner, color, &b),
             Page::Digin => dash_digin(c, v, inner, color, &b),
-            Page::Dash | Page::Settings => {}
+            Page::Dash | Page::Settings | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health => {}
         }
         if v.level != &Level::Top && v.tile == i {
             c.outline(r, 16.0, TEXT, 3.0);

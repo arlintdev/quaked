@@ -38,6 +38,12 @@ pub enum PageId {
     Ops,
     Code,
     Digin,
+    Focus,
+    Deploy,
+    Paste,
+    Windows,
+    Calendar,
+    Health,
     Settings,
 }
 
@@ -55,6 +61,12 @@ impl PageId {
             PageId::Ops => "Ops",
             PageId::Code => "Code",
             PageId::Digin => "Digin",
+            PageId::Focus => "Focus",
+            PageId::Deploy => "Deploy",
+            PageId::Paste => "Clipboard",
+            PageId::Windows => "Windows",
+            PageId::Calendar => "Calendar",
+            PageId::Health => "Health",
             PageId::Settings => "Settings",
         }
     }
@@ -71,6 +83,12 @@ impl PageId {
             PageId::Ops => "OPS",
             PageId::Code => "CODE",
             PageId::Digin => "DIGIN",
+            PageId::Focus => "FOCUS",
+            PageId::Deploy => "SHIP",
+            PageId::Paste => "PASTE",
+            PageId::Windows => "WINDOWS",
+            PageId::Calendar => "CAL",
+            PageId::Health => "HEALTH",
             PageId::Settings => "SETTINGS",
         }
     }
@@ -107,6 +125,15 @@ pub struct Config {
     pub alerts: Alerts,
     pub ask: AskSettings,
     pub digin: Digin,
+    pub call: CallSettings,
+    pub focus: FocusSettings,
+    pub deploy: DeploySettings,
+    pub paste: PasteSettings,
+    pub windows: WindowsSettings,
+    pub calendar: CalendarSettings,
+    pub health: HealthSettings,
+    pub night: NightSettings,
+    pub viz: VizSettings,
     pub sync: SyncSettings,
     pub device: DeviceSettings,
 }
@@ -147,6 +174,140 @@ pub struct Code {
 impl Default for Code {
     fn default() -> Self {
         Code { refresh_seconds: 60, gitlab: true, gitlab_hosts: Vec::new() }
+    }
+}
+
+// ---------------------------------------------------------------- feature settings
+// One section per feature; each feature's agent may add fields to its own section.
+
+/// Call mode: the call screen while you're on a call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CallSettings {
+    pub enabled: bool,
+}
+impl Default for CallSettings {
+    fn default() -> Self {
+        CallSettings { enabled: true }
+    }
+}
+
+/// Focus timer on the knob and ring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FocusSettings {
+    pub minutes: u64,
+    /// macOS Shortcuts run when a focus block starts / ends (e.g. turning Do Not Disturb on / off).
+    pub start_shortcut: String,
+    pub end_shortcut: String,
+}
+impl Default for FocusSettings {
+    fn default() -> Self {
+        FocusSettings { minutes: 25, start_shortcut: String::new(), end_shortcut: String::new() }
+    }
+}
+
+/// Deploy and CI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DeploySettings {
+    pub projects: Vec<DeployProject>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DeployProject {
+    pub name: String,
+    /// The project folder ("~/ArlintDev/plcplayground").
+    pub path: String,
+    /// What deploys it, run in `path` ("./deploy.sh").
+    pub command: String,
+    /// GitHub repo for CI status ("arlintdev/plcplayground"); empty = from the folder's git remote.
+    pub repo: String,
+}
+
+/// Clipboard picker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PasteSettings {
+    pub enabled: bool,
+    /// How many recent copies to keep (in memory only).
+    pub history: usize,
+}
+impl Default for PasteSettings {
+    fn default() -> Self {
+        PasteSettings { enabled: true, history: 20 }
+    }
+}
+
+/// Window switcher.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WindowsSettings {
+    pub enabled: bool,
+}
+impl Default for WindowsSettings {
+    fn default() -> Self {
+        WindowsSettings { enabled: true }
+    }
+}
+
+/// Calendar.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CalendarSettings {
+    pub enabled: bool,
+    /// Calendar names to show; empty = all.
+    pub calendars: Vec<String>,
+}
+impl Default for CalendarSettings {
+    fn default() -> Self {
+        CalendarSettings { enabled: true, calendars: Vec::new() }
+    }
+}
+
+/// Mac health (this Mac and paired ones).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HealthSettings {
+    pub enabled: bool,
+}
+impl Default for HealthSettings {
+    fn default() -> Self {
+        HealthSettings { enabled: true }
+    }
+}
+
+/// Night mode: the ambient screen when idle at night.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NightSettings {
+    pub enabled: bool,
+    /// Night runs from start_hour to end_hour (local time, 0-23).
+    pub start_hour: u32,
+    pub end_hour: u32,
+    /// Minutes without input before it comes on.
+    pub idle_minutes: u64,
+    /// For the weather; unset = estimated from the network.
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+}
+impl Default for NightSettings {
+    fn default() -> Self {
+        NightSettings { enabled: true, start_hour: 22, end_hour: 7, idle_minutes: 10, latitude: None, longitude: None }
+    }
+}
+
+/// Music visualizer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VizSettings {
+    pub enabled: bool,
+    /// Pulse the ring on the beat.
+    pub ring: bool,
+}
+impl Default for VizSettings {
+    fn default() -> Self {
+        VizSettings { enabled: true, ring: true }
     }
 }
 
@@ -289,6 +450,12 @@ pub struct Ring {
     pub settings: String,
     pub dash: String,
     pub digin: String,
+    pub focus: String,
+    pub deploy: String,
+    pub paste: String,
+    pub windows: String,
+    pub calendar: String,
+    pub health: String,
     /// Breathe in this color while a Claude session needs you.
     pub alert: bool,
     pub alert_color: String,
@@ -399,7 +566,7 @@ impl Default for Config {
             idle_home: true,
             menu_bar: true,
             session_idle_minutes: 5,
-            pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Digin, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
+            pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Digin, PageId::Calendar, PageId::Focus, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
             ring: Ring::default(),
             touch: Touch::default(),
             shortcuts: vec![
@@ -420,6 +587,15 @@ impl Default for Config {
             alerts: Alerts::default(),
             ask: AskSettings::default(),
             digin: Digin::default(),
+            call: CallSettings::default(),
+            focus: FocusSettings::default(),
+            deploy: DeploySettings::default(),
+            paste: PasteSettings::default(),
+            windows: WindowsSettings::default(),
+            calendar: CalendarSettings::default(),
+            health: HealthSettings::default(),
+            night: NightSettings::default(),
+            viz: VizSettings::default(),
             sync: SyncSettings::default(),
             device: DeviceSettings::default(),
         }
@@ -442,6 +618,12 @@ impl Default for Ring {
             settings: "#D0D0D8".into(),
             dash: "#64D2FF".into(),
             digin: "#E879F9".into(),
+            focus: "#FF9F0A".into(),
+            deploy: "#30D158".into(),
+            paste: "#5AC8FA".into(),
+            windows: "#BF5AF2".into(),
+            calendar: "#FF453A".into(),
+            health: "#66D4CF".into(),
             alert: true,
             alert_color: "#F2B705".into(),
         }
@@ -478,6 +660,12 @@ impl Ring {
             PageId::Settings => &self.settings,
             PageId::Dash => &self.dash,
             PageId::Digin => &self.digin,
+            PageId::Focus => &self.focus,
+            PageId::Deploy => &self.deploy,
+            PageId::Paste => &self.paste,
+            PageId::Windows => &self.windows,
+            PageId::Calendar => &self.calendar,
+            PageId::Health => &self.health,
         }
     }
 }
@@ -568,7 +756,7 @@ mod tests {
         assert!(!partial.buzzer);
         assert_eq!(partial.ring.ai, "#112233");
         assert_eq!(partial.ring.music, Ring::default().music);
-        assert_eq!(partial.pages.len(), 11);
+        assert_eq!(partial.pages.len(), 13);
     }
 
     #[test]

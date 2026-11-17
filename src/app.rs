@@ -8,6 +8,17 @@
 //!   Detail  (AI) turn scrolls the steps, press opens Claude
 //!   double-click goes back one level, hold goes back to Top; idle returns to Top.
 
+// One file per feature: its knob / touch / ring / timer handling (see app/<feature>.rs).
+mod calendar;
+mod call;
+mod deploy;
+mod focus;
+mod health;
+mod night;
+mod paste;
+mod viz;
+mod windows;
+
 use crate::audio::{self, Audio};
 use crate::config::{self, Action, Config, PageId};
 use crate::device::{self, Command, Input};
@@ -85,8 +96,22 @@ pub enum Event {
     PairRequest(String, Sender<bool>),
     /// Chosen from the menu bar icon's menu.
     Menu(crate::menubar::Action),
+    /// From a feature's background thread.
+    Feature(FeatureEvent),
     /// A control-socket request and where to send the reply.
     Ctl(String, Sender<Vec<u8>>),
+}
+
+pub enum FeatureEvent {
+    Call(crate::call::Update),
+    Focus(crate::focus::Update),
+    Deploy(crate::deploy::Update),
+    Paste(crate::clipboard::Update),
+    Windows(crate::windows::Update),
+    Calendar(crate::calendar::Update),
+    Health(crate::health::Update),
+    Night(crate::night::Update),
+    Viz(crate::viz::Update),
 }
 
 /// A multiple-choice question from Claude, shown over everything until you answer.
@@ -172,6 +197,25 @@ struct App {
     menubar: Option<crate::menubar::MenuBar>,
     proxy: winit::event_loop::EventLoopProxy<Event>,
     asks: std::collections::VecDeque<Ask>,
+    // Features
+    call: crate::call::Status,
+    call_cmd: Sender<crate::call::Cmd>,
+    focus: crate::focus::Status,
+    focus_cmd: Sender<crate::focus::Cmd>,
+    deploy: crate::deploy::Status,
+    deploy_cmd: Sender<crate::deploy::Cmd>,
+    paste: crate::clipboard::Status,
+    paste_cmd: Sender<crate::clipboard::Cmd>,
+    windows: crate::windows::Status,
+    windows_cmd: Sender<crate::windows::Cmd>,
+    calendar: crate::calendar::Status,
+    calendar_cmd: Sender<crate::calendar::Cmd>,
+    health: crate::health::Status,
+    health_cmd: Sender<crate::health::Cmd>,
+    night: crate::night::Status,
+    night_cmd: Sender<crate::night::Cmd>,
+    viz: crate::viz::Status,
+    viz_cmd: Sender<crate::viz::Cmd>,
     // AI
     sessions: Vec<Session>,
     states: HashMap<String, State>,
@@ -378,6 +422,15 @@ impl App {
                     detail: a.perm.as_ref().map(|(t, w, d)| (t.as_str(), w.as_str(), d.as_str())),
                 })
             }),
+            call: &self.call,
+            focus: &self.focus,
+            deploy: &self.deploy,
+            paste: &self.paste,
+            windows: &self.windows,
+            calendar: &self.calendar,
+            health: &self.health,
+            night: &self.night,
+            viz: &self.viz,
             level: &self.level,
             sessions: &self.sessions,
             sel: self.sel,
@@ -426,6 +479,7 @@ impl App {
         match (self.page, &self.level) {
             (PageId::Music, _) => self.track.as_ref().is_some_and(|t| t.playing),
             _ if !self.asks.is_empty() => true, // the countdown
+            _ if self.feature_animating() => true,
             (PageId::Dash, _) => self.track.as_ref().is_some_and(|t| t.playing) || self.sessions.iter().any(|s| s.state == State::Working),
             (PageId::Ai, Level::Detail(_)) => true,
             (PageId::Ai, _) => self.sessions.iter().any(|s| s.steps.last().is_some_and(|st| st.status == status::StepStatus::Running)),
@@ -489,6 +543,33 @@ impl App {
             if cfg.digin != self.cfg.digin || force {
                 let _ = self.digin_cmd.send(digin::Cmd::Configure(cfg.digin.clone()));
             }
+            if cfg.call != self.cfg.call || force {
+                let _ = self.call_cmd.send(crate::call::Cmd::Configure(cfg.call.clone()));
+            }
+            if cfg.focus != self.cfg.focus || force {
+                let _ = self.focus_cmd.send(crate::focus::Cmd::Configure(cfg.focus.clone()));
+            }
+            if cfg.deploy != self.cfg.deploy || force {
+                let _ = self.deploy_cmd.send(crate::deploy::Cmd::Configure(cfg.deploy.clone()));
+            }
+            if cfg.paste != self.cfg.paste || force {
+                let _ = self.paste_cmd.send(crate::clipboard::Cmd::Configure(cfg.paste.clone()));
+            }
+            if cfg.windows != self.cfg.windows || force {
+                let _ = self.windows_cmd.send(crate::windows::Cmd::Configure(cfg.windows.clone()));
+            }
+            if cfg.calendar != self.cfg.calendar || force {
+                let _ = self.calendar_cmd.send(crate::calendar::Cmd::Configure(cfg.calendar.clone()));
+            }
+            if cfg.health != self.cfg.health || force {
+                let _ = self.health_cmd.send(crate::health::Cmd::Configure(cfg.health.clone()));
+            }
+            if cfg.night != self.cfg.night || force {
+                let _ = self.night_cmd.send(crate::night::Cmd::Configure(cfg.night.clone()));
+            }
+            if cfg.viz != self.cfg.viz || force {
+                let _ = self.viz_cmd.send(crate::viz::Cmd::Configure(cfg.viz.clone()));
+            }
             if cfg.sync != self.cfg.sync || force {
                 let _ = self.sync_cmd.send(sync::Cmd::Configure(cfg.sync.clone()));
             }
@@ -528,6 +609,8 @@ impl App {
             let (hue, sat) = config::hue_sat(config::hex(r.color_for(a.page), 0xF2B705));
             let brightness = if self.blink_on { r.brightness.max(160) } else { 0 };
             Command::Ring { effect: proto::EFFECT_SOLID, hue, sat, brightness, speed: 128 }
+        } else if let Some(cmd) = self.feature_ring() {
+            cmd
         } else if r.alert && self.sessions.iter().any(|s| s.state == State::Waiting) {
             let (hue, sat) = config::hue_sat(config::hex(&r.alert_color, 0xF2B705));
             Command::Ring { effect: proto::EFFECT_BREATHING, hue, sat, brightness: r.brightness, speed: 170 }
@@ -651,6 +734,78 @@ impl App {
             1 => news.pop(),
             _ => Some(format!("{}  (+{} more)", news[0], n - 1)),
         }
+    }
+
+    // ------------------------------------------------------------ features (dispatch)
+
+    fn on_feature(&mut self, f: FeatureEvent) {
+        match f {
+            FeatureEvent::Call(u) => self.on_call(u),
+            FeatureEvent::Focus(u) => self.on_focus(u),
+            FeatureEvent::Deploy(u) => self.on_deploy(u),
+            FeatureEvent::Paste(u) => self.on_paste(u),
+            FeatureEvent::Windows(u) => self.on_windows(u),
+            FeatureEvent::Calendar(u) => self.on_calendar(u),
+            FeatureEvent::Health(u) => self.on_health(u),
+            FeatureEvent::Night(u) => self.on_night(u),
+            FeatureEvent::Viz(u) => self.on_viz(u),
+        }
+        self.update_ring();
+    }
+
+    /// The first feature that wants the ring (call, focus, deploy, visualizer).
+    fn feature_ring(&self) -> Option<Command> {
+        self.call_ring().or_else(|| self.focus_ring()).or_else(|| self.deploy_ring()).or_else(|| self.viz_ring())
+    }
+
+    fn feature_tick(&mut self, now: Instant) -> Option<Instant> {
+        [self.call_tick(now), self.focus_tick(now), self.deploy_tick(now), self.paste_tick(now), self.windows_tick(now), self.calendar_tick(now), self.health_tick(now), self.night_tick(now), self.viz_tick(now)].into_iter().flatten().min()
+    }
+
+    fn feature_animating(&self) -> bool {
+        self.call_animating() || self.focus_animating() || self.deploy_animating() || self.paste_animating() || self.windows_animating() || self.calendar_animating() || self.health_animating() || self.night_animating() || self.viz_animating()
+    }
+
+    /// A hold on a feature's page, if it wants it.
+    fn feature_hold(&mut self) -> bool {
+        match self.page {
+            PageId::Focus => self.focus_hold(),
+            PageId::Deploy => self.deploy_hold(),
+            PageId::Paste => self.paste_hold(),
+            PageId::Windows => self.windows_hold(),
+            PageId::Calendar => self.calendar_hold(),
+            PageId::Health => self.health_hold(),
+            _ => false,
+        }
+    }
+
+    fn feature_tap(&mut self, p: PageId, i: usize) {
+        if self.call_active() {
+            return self.call_tap(i);
+        }
+        match p {
+            PageId::Focus => self.focus_tap(i),
+            PageId::Deploy => self.deploy_tap(i),
+            PageId::Paste => self.paste_tap(i),
+            PageId::Windows => self.windows_tap(i),
+            PageId::Calendar => self.calendar_tap(i),
+            PageId::Health => self.health_tap(i),
+            _ => {}
+        }
+    }
+
+    fn features_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "call": self.call_json(),
+            "focus": self.focus_json(),
+            "deploy": self.deploy_json(),
+            "paste": self.paste_json(),
+            "windows": self.windows_json(),
+            "calendar": self.calendar_json(),
+            "health": self.health_json(),
+            "night": self.night_json(),
+            "viz": self.viz_json(),
+        })
     }
 
     // ------------------------------------------------------------ menu bar
@@ -1009,6 +1164,12 @@ impl App {
         self.ops_fast.store(p == PageId::Ops, Ordering::Relaxed);
         self.code_fast.store(p == PageId::Code, Ordering::Relaxed);
         self.digin_fast.store(p == PageId::Digin, Ordering::Relaxed);
+        self.focus_page_shown(p == PageId::Focus);
+        self.deploy_page_shown(p == PageId::Deploy);
+        self.paste_page_shown(p == PageId::Paste);
+        self.windows_page_shown(p == PageId::Windows);
+        self.calendar_page_shown(p == PageId::Calendar);
+        self.health_page_shown(p == PageId::Health);
         if p == PageId::Code {
             let _ = self.code_cmd.send(github::Cmd::Refresh);
         }
@@ -1247,6 +1408,9 @@ impl App {
             a.sel = (a.sel as i32 + d).clamp(0, n - 1) as usize;
             return;
         }
+        if self.call_active() {
+            return self.call_turn(d);
+        }
         match (self.page, &self.level) {
             (_, Level::Top) => {
                 let pages = &self.cfg.pages;
@@ -1282,6 +1446,12 @@ impl App {
                 }
             }
             (PageId::League, _) => {}
+            (PageId::Focus, _) => self.focus_turn(d),
+            (PageId::Deploy, _) => self.deploy_turn(d),
+            (PageId::Paste, _) => self.paste_turn(d),
+            (PageId::Windows, _) => self.windows_turn(d),
+            (PageId::Calendar, _) => self.calendar_turn(d),
+            (PageId::Health, _) => self.health_turn(d),
         }
     }
 
@@ -1304,6 +1474,9 @@ impl App {
                 _ => {}
             }
             return;
+        }
+        if self.call_active() {
+            return self.call_press(code);
         }
         // A Mac waiting to pair: press allows, double-click refuses.
         if self.pair_ask.is_some() && (code == KNOB_PRESS || code == KNOB_DOUBLE) {
@@ -1356,6 +1529,12 @@ impl App {
                         self.set_page(p);
                     }
                 }
+                (PageId::Focus, _) => self.focus_press(),
+                (PageId::Deploy, _) => self.deploy_press(),
+                (PageId::Paste, _) => self.paste_press(),
+                (PageId::Windows, _) => self.windows_press(),
+                (PageId::Calendar, _) => self.calendar_press(),
+                (PageId::Health, _) => self.health_press(),
                 (PageId::Settings, Level::Detail(_)) => self.level = Level::Focus,
                 (PageId::Settings, _) => {
                     if self.tile < render::SETTING_SLIDERS {
@@ -1367,6 +1546,9 @@ impl App {
             },
             KNOB_DOUBLE => self.back(),
             KNOB_HOLD => {
+                if self.feature_hold() {
+                    return;
+                }
                 if self.level == Level::Top {
                     match self.undim_to.take() {
                         Some(prev) => self.set_luminance(prev),
@@ -1538,6 +1720,7 @@ impl App {
                 self.open_pr(i);
             }
             Hit::Pane(p) => self.set_page(p),
+            Hit::Feature(p, i) => self.feature_tap(p, i),
             Hit::DiginItem(i) => {
                 self.tile = i;
                 if let Some(url) = render::digin_url(&self.digin, i) {
@@ -1568,6 +1751,12 @@ impl App {
     }
 
     fn on_device(&mut self, input: Input) {
+        // The night screen wakes on any input and eats it.
+        if matches!(input, Input::Tap { .. } | Input::KnobTurn(_) | Input::KnobPress(_)) && self.night_swallow() {
+            self.last_input = Instant::now();
+            self.redraw();
+            return;
+        }
         if matches!(input, Input::Tap { .. } | Input::KnobTurn(_) | Input::KnobPress(_)) {
             self.last_input = Instant::now();
             self.clear_attention();
@@ -1649,6 +1838,7 @@ impl App {
                 "port": self.peers.port,
                 "peers": self.peers.peers.iter().map(|p| serde_json::json!({"name": p.name, "host": p.host, "ok": p.ok, "error": p.error, "sessions": p.sessions.len()})).collect::<Vec<_>>(),
             },
+            "features": self.features_json(),
             "digin": {
                 "accounts": self.digin.accounts.iter().map(|a| serde_json::json!({"url": a.url, "label": a.label, "email": a.email, "signedIn": a.signed_in, "handle": a.handle, "name": a.name, "error": a.error})).collect::<Vec<_>>(),
                 "issues": self.digin.issues.len(),
@@ -1715,6 +1905,7 @@ impl App {
         match parts.as_slice() {
             ["status"] => (self.status_json() + "\n").into_bytes(),
             ["state"] => self.state_json().into_bytes(),
+            ["health"] => (self.health_peer_json() + "\n").into_bytes(),
             ["config"] => (serde_json::to_string(&self.cfg).unwrap_or_default() + "\n").into_bytes(),
             ["pair-answer", a] => {
                 self.answer_pair(*a == "yes");
@@ -1869,6 +2060,7 @@ impl ApplicationHandler<Event> for App {
             }
             Event::Sync(st) => {
                 self.peers = st;
+                self.health_peers_changed();
                 self.poll_status();
                 self.redraw();
             }
@@ -1891,6 +2083,7 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             Event::Menu(action) => self.on_menu(action),
+            Event::Feature(f) => self.on_feature(f),
             Event::Digin(st) => {
                 // New in the inbox since last time (not on the first load or after signing in).
                 let known: std::collections::HashSet<(usize, i64)> = self.digin.inbox.iter().map(|n| (n.account, n.id)).collect();
@@ -2006,6 +2199,9 @@ impl ApplicationHandler<Event> for App {
                 }
                 wake = wake.min(self.next_blink);
             }
+        }
+        if let Some(t) = self.feature_tick(now) {
+            wake = wake.min(t);
         }
         if let Some((_, at)) = self.flash {
             if at.elapsed() >= FLASH {
@@ -2205,6 +2401,43 @@ pub fn run() {
     let docker_cmd = docker::spawn(cfg.docker.clone(), docker_fast.clone(), move |st| {
         let _ = p6.send_event(Event::Docker(st));
     });
+    // Features: each starts its own background work and reports through Event::Feature.
+    let pf = proxy.clone();
+    let call_cmd = crate::call::spawn(cfg.call.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Call(u)));
+    });
+    let pf = proxy.clone();
+    let focus_cmd = crate::focus::spawn(cfg.focus.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Focus(u)));
+    });
+    let pf = proxy.clone();
+    let deploy_cmd = crate::deploy::spawn(cfg.deploy.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Deploy(u)));
+    });
+    let pf = proxy.clone();
+    let paste_cmd = crate::clipboard::spawn(cfg.paste.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Paste(u)));
+    });
+    let pf = proxy.clone();
+    let windows_cmd = crate::windows::spawn(cfg.windows.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Windows(u)));
+    });
+    let pf = proxy.clone();
+    let calendar_cmd = crate::calendar::spawn(cfg.calendar.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Calendar(u)));
+    });
+    let pf = proxy.clone();
+    let health_cmd = crate::health::spawn(cfg.health.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Health(u)));
+    });
+    let pf = proxy.clone();
+    let night_cmd = crate::night::spawn(cfg.night.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Night(u)));
+    });
+    let pf = proxy.clone();
+    let viz_cmd = crate::viz::spawn(cfg.viz.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Viz(u)));
+    });
     let digin_fast = Arc::new(AtomicBool::new(false));
     let p11 = proxy.clone();
     let digin_cmd = digin::spawn(cfg.digin.clone(), digin_fast.clone(), move |st| {
@@ -2280,6 +2513,24 @@ pub fn run() {
         menubar: None,
         proxy: proxy.clone(),
         asks: std::collections::VecDeque::new(),
+        call: crate::call::Status::default(),
+        call_cmd,
+        focus: crate::focus::Status::default(),
+        focus_cmd,
+        deploy: crate::deploy::Status::default(),
+        deploy_cmd,
+        paste: crate::clipboard::Status::default(),
+        paste_cmd,
+        windows: crate::windows::Status::default(),
+        windows_cmd,
+        calendar: crate::calendar::Status::default(),
+        calendar_cmd,
+        health: crate::health::Status::default(),
+        health_cmd,
+        night: crate::night::Status::default(),
+        night_cmd,
+        viz: crate::viz::Status::default(),
+        viz_cmd,
         sessions: Vec::new(),
         states: HashMap::new(),
         loaded_once: false,
