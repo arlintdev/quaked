@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds quaked, wraps it in ~/Applications/Quaked.app (so macOS privacy settings show it by
 # name), signs it with your Developer ID so permission grants survive rebuilds, links
-# ~/.local/bin/quaked to it for the Claude Code hooks, and (re)starts the LaunchAgent.
+# ~/.local/bin/quaked to it, adds the Claude Code hooks, and (re)starts the LaunchAgent.
 set -e
 cd "$(dirname "$0")"
 cargo build --release
@@ -17,6 +17,8 @@ else
   codesign --force --sign - --identifier dev.arlint.quaked "$APP"
 fi
 ln -sf "$APP/Contents/MacOS/quaked" "$HOME/.local/bin/quaked"
+# Claude Code reports sessions through hooks in ~/.claude/settings.json.
+"$HOME/.local/bin/quaked" hooks
 cp launchd/dev.arlint.quaked.plist "$HOME/Library/LaunchAgents/"
 launchctl bootout "gui/$(id -u)/dev.arlint.quaked" 2>/dev/null || true
 # bootout returns before the old instance has exited; bootstrap fails until it has.

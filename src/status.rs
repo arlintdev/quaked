@@ -470,8 +470,88 @@ pub fn hook() {
     drop(lock);
 }
 
+/// The Claude Code events quaked listens to, and whether the entry takes a tool matcher.
+const HOOK_EVENTS: [(&str, bool); 8] = [
+    ("SessionStart", false),
+    ("UserPromptSubmit", false),
+    ("PreToolUse", true),
+    ("PostToolUse", true),
+    ("PostToolUseFailure", true),
+    ("Notification", false),
+    ("Stop", false),
+    ("SessionEnd", false),
+];
+
+/// Adds `quaked hook` to each event in `settings` that doesn't run it yet. Returns the
+/// events it added. Everything else in the file is left as it is.
+fn merge_hooks(settings: &mut serde_json::Value, command: &str) -> Result<Vec<&'static str>, String> {
+    use serde_json::{json, Value};
+    let root = settings.as_object_mut().ok_or("settings.json isn't a JSON object")?;
+    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+    let hooks = hooks.as_object_mut().ok_or("\"hooks\" in settings.json isn't an object")?;
+    let mut added = Vec::new();
+    for (event, matcher) in HOOK_EVENTS {
+        let groups = hooks.entry(event).or_insert_with(|| json!([]));
+        let groups = groups.as_array_mut().ok_or(format!("hooks.{event} isn't a list"))?;
+        let present = groups.iter().any(|g| {
+            g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| c.contains("quaked hook"))))
+        });
+        if present {
+            continue;
+        }
+        let entry = json!({"type": "command", "command": command, "timeout": 5});
+        groups.push(if matcher { json!({"matcher": "*", "hooks": [entry]}) } else { json!({"hooks": [entry]}) });
+        added.push(event);
+    }
+    Ok(added)
+}
+
+/// `quaked hooks`: makes Claude Code report sessions to quaked on this Mac.
+pub fn install_hooks() -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME isn't set")?;
+    let path = Path::new(&home).join(".claude").join("settings.json");
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+        Err(e) => return Err(format!("can't read {}: {e}", path.display())),
+    };
+    // Never rewrite a file we can't parse.
+    let mut settings: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{} isn't valid JSON ({e}); left it alone", path.display()))?;
+    let command = format!("{home}/.local/bin/quaked hook");
+    let added = merge_hooks(&mut settings, &command)?;
+    if added.is_empty() {
+        return Ok(format!("Claude Code hooks already in {}", path.display()));
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    if path.exists() {
+        let backup = path.with_extension("json.before-quaked");
+        if !backup.exists() {
+            fs::copy(&path, &backup).map_err(|e| format!("can't back up settings.json: {e}"))?;
+        }
+    }
+    let tmp = path.with_extension("json.quaked-tmp");
+    let out = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())? + "\n";
+    fs::write(&tmp, out).and_then(|_| fs::rename(&tmp, &path)).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    Ok(format!("Added Claude Code hooks to {} ({})", path.display(), added.join(", ")))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merging_hooks_keeps_everything_else_and_is_idempotent() {
+        let mut v: serde_json::Value = serde_json::from_str(r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#).unwrap();
+        let added = merge_hooks(&mut v, "/h/.local/bin/quaked hook").unwrap();
+        assert_eq!(added.len(), 8);
+        assert_eq!(v["model"], "opus");
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2, "kept the existing Stop hook");
+        assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "*");
+        assert!(merge_hooks(&mut v, "/h/.local/bin/quaked hook").unwrap().is_empty());
+        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["model", "hooks"], "key order preserved");
+    }
+
     use super::*;
     use serde_json::json;
 

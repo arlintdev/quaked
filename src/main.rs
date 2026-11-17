@@ -3,6 +3,7 @@
 //!   quaked [run]                 the board (what the LaunchAgent runs); settings live in
 //!                                ~/Library/Application Support/Quaked/config.json
 //!   quaked hook                  Claude Code hook: records session state from stdin
+//!   quaked hooks                 adds those hooks to ~/.claude/settings.json (install.sh runs it)
 //!   quaked ctl <cmd>             drive the running board: turn 1|-1, press, double, hold, tap X Y;
 //!                                status, frame [page] (PNG on stdout), alert <page> [why]
 //!   quaked probe [secs]          prints raw HID traffic from the device
@@ -304,6 +305,13 @@ fn main() {
     let sub = args.first().map(String::as_str).unwrap_or("run");
     match sub {
         "hook" => status::hook(),
+        "hooks" => match status::install_hooks() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("quaked hooks: {e}");
+                std::process::exit(1);
+            }
+        },
         "ctl" => ctl(&args[1..]),
         "via" => device::via_probe(),
         "symbol" => {
