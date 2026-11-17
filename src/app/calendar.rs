@@ -26,6 +26,12 @@ fn can_open(url: &str) -> bool {
 }
 
 impl App {
+    /// The paired Macs changed (self.peers): tell the calendar thread whose events to fetch.
+    pub(super) fn calendar_peers_changed(&mut self) {
+        let peers = self.peers.peers.iter().filter(|p| p.ok).map(|p| (p.name.clone(), p.host.clone(), p.port)).collect();
+        let _ = self.calendar_cmd.send(cal::Cmd::Peers(peers, self.cfg.sync.key.clone()));
+    }
+
     /// An update from crate::calendar's thread.
     pub(super) fn on_calendar(&mut self, u: crate::calendar::Update) {
         match u {

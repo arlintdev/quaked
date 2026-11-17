@@ -1907,6 +1907,7 @@ impl App {
             ["status"] => (self.status_json() + "\n").into_bytes(),
             ["state"] => self.state_json().into_bytes(),
             ["health"] => (self.health_peer_json() + "\n").into_bytes(),
+            ["calendar"] => (crate::calendar::peer_json(&self.calendar, self.cfg.calendar.enabled) + "\n").into_bytes(),
             ["config"] => (serde_json::to_string(&self.cfg).unwrap_or_default() + "\n").into_bytes(),
             ["pair-answer", a] => {
                 self.answer_pair(*a == "yes");
@@ -2062,6 +2063,7 @@ impl ApplicationHandler<Event> for App {
             Event::Sync(st) => {
                 self.peers = st;
                 self.health_peers_changed();
+                self.calendar_peers_changed();
                 self.poll_status();
                 self.redraw();
             }

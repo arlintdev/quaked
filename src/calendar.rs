@@ -7,12 +7,15 @@
 //! "starts in 2 minutes" alerts.
 
 use crate::config::CalendarSettings as Cfg;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One calendar event. Other features (call mode, night mode) read these fields: keep
 /// them, add more as needed.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Event {
     /// Stable for one occurrence (EventKit's id plus the start, since repeats share an id).
     pub id: String,
@@ -27,6 +30,9 @@ pub struct Event {
     pub calendar: String,
     /// "#RRGGBB" of its calendar.
     pub color: String,
+    /// The paired Mac it came from ("" = this Mac). Events both Macs have (iCloud) show once,
+    /// as this Mac's.
+    pub machine: String,
 }
 
 /// What the board shows.
@@ -40,6 +46,8 @@ pub struct Status {
     /// use `upcoming` / `next` for what's still to come).
     pub events: Vec<Event>,
     pub error: Option<String>,
+    /// A paired Mac whose calendar couldn't be read ("AustinM5Max: ...").
+    pub peer_note: Option<String>,
     /// App side: the event picked with the knob (its `id`); "" = the featured one.
     pub selected: String,
     /// App side: events already announced before they start (ids).
@@ -384,6 +392,10 @@ pub enum Cmd {
     Configure(Cfg),
     /// Read the calendar again now (the page was shown, or the database changed).
     Refresh,
+    /// The paired Macs to ask for their events (name, host, port) and the shared key.
+    Peers(Vec<(String, String, u16)>, String),
+    /// (internal) A paired Mac answered `ctl calendar`, or didn't.
+    PeerReply(String, Result<Vec<Event>, String>),
 }
 
 /// What the module's thread sends the app (handled in app/calendar.rs on the main thread).
@@ -405,34 +417,157 @@ pub fn spawn(cfg: Cfg, emit: impl Fn(Update) + Send + 'static) -> Sender<Cmd> {
     tx
 }
 
+/// A paired Mac's events stay up for this long after it stops answering.
+const PEER_STALE: Duration = Duration::from_secs(10 * 60);
+
 fn run(mut cfg: Cfg, me: Sender<Cmd>, rx: Receiver<Cmd>, emit: impl Fn(Update)) {
     let mut store: Option<ek::Store> = None;
     let mut last: Option<Status> = None;
+    let mut local = Status::default();
+    let mut peers: Vec<(String, String, u16)> = Vec::new();
+    let mut key = String::new();
+    // Each paired Mac's last good answer (and when), and its latest error.
+    let mut good: HashMap<String, (Vec<Event>, Instant)> = HashMap::new();
+    let mut errors: HashMap<String, String> = HashMap::new();
+    let mut asking: HashSet<String> = HashSet::new();
+    let mut next_read = Instant::now();
+    let mut next_peers = Instant::now();
     loop {
-        let st = if cfg.enabled { read(&cfg, &mut store, &me) } else { Status { loaded: true, error: Some("Calendar is off in Quaked Settings".into()), ..Default::default() } };
+        let now = Instant::now();
+        if now >= next_read {
+            local = if cfg.enabled { read(&cfg, &mut store, &me) } else { Status { loaded: true, error: Some("Calendar is off in Quaked Settings".into()), ..Default::default() } };
+            next_read = now + if cfg.enabled { REFRESH } else { Duration::from_secs(3600) };
+        }
+        if cfg.enabled && now >= next_peers {
+            for (name, host, port) in &peers {
+                if key.is_empty() || !asking.insert(name.clone()) {
+                    continue;
+                }
+                let (name, host, port, key, back) = (name.clone(), host.clone(), *port, key.clone(), me.clone());
+                std::thread::Builder::new()
+                    .name("calendar-peer".into())
+                    .spawn(move || {
+                        let reply = crate::sync::request(&host, port, &key, "ctl calendar").and_then(|r| parse_peer(&r));
+                        let _ = back.send(Cmd::PeerReply(name, reply));
+                    })
+                    .ok();
+            }
+            next_peers = now + REFRESH;
+        }
+        let shared: Vec<(&str, &[Event])> = if cfg.enabled {
+            peers.iter().filter_map(|(n, _, _)| good.get(n).filter(|(_, at)| at.elapsed() < PEER_STALE).map(|(ev, _)| (n.as_str(), ev.as_slice()))).collect()
+        } else {
+            Vec::new()
+        };
+        let mut st = local.clone();
+        st.events = merge(&local.events, &shared);
+        // This Mac without calendar access still shows the other Mac's events.
+        if !st.authorized && !shared.is_empty() {
+            st.authorized = true;
+        }
+        st.peer_note = if cfg.enabled { peers.iter().find_map(|(n, _, _)| errors.get(n).map(|e| format!("{n}: {e}"))) } else { None };
         if last.as_ref() != Some(&st) {
             emit(Update::Status(st.clone()));
             last = Some(st);
         }
-        let wait = if cfg.enabled { REFRESH } else { Duration::from_secs(3600) };
-        let mut apply = |cmd: Cmd| {
-            if let Cmd::Configure(c) = cmd {
-                cfg = c;
-            }
+        let wake = if cfg.enabled { next_read.min(next_peers) } else { next_read };
+        let first = match rx.recv_timeout(wake.saturating_duration_since(Instant::now())) {
+            Ok(cmd) => cmd,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
         };
-        match rx.recv_timeout(wait) {
-            Ok(cmd) => {
-                apply(cmd);
+        let mut cmds = vec![first];
+        while let Ok(cmd) = rx.try_recv() {
+            cmds.push(cmd);
+        }
+        for cmd in cmds {
+            match cmd {
+                Cmd::Configure(c) => {
+                    cfg = c;
+                    next_read = Instant::now();
+                    next_peers = Instant::now();
+                }
                 // Changes come in bursts (a sync touches many events): read once after them.
-                std::thread::sleep(Duration::from_millis(300));
-                while let Ok(cmd) = rx.try_recv() {
-                    apply(cmd);
+                Cmd::Refresh => next_read = next_read.min(Instant::now() + Duration::from_millis(300)),
+                Cmd::Peers(p, k) => {
+                    if p != peers || k != key {
+                        good.retain(|n, _| p.iter().any(|(m, _, _)| m == n));
+                        errors.retain(|n, _| p.iter().any(|(m, _, _)| m == n));
+                        peers = p;
+                        key = k;
+                        next_peers = Instant::now();
+                    }
+                }
+                Cmd::PeerReply(name, reply) => {
+                    asking.remove(&name);
+                    if !peers.iter().any(|(n, _, _)| *n == name) {
+                        continue;
+                    }
+                    match reply {
+                        Ok(events) => {
+                            errors.remove(&name);
+                            good.insert(name, (events, Instant::now()));
+                        }
+                        Err(e) => {
+                            if errors.get(&name) != Some(&e) {
+                                crate::device::log(format!("calendar: {name}: {e}"));
+                            }
+                            errors.insert(name, e);
+                        }
+                    }
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
         }
     }
+}
+
+/// This Mac's events plus the paired Macs', soonest first. An event a paired Mac also has
+/// (same title, start and end: a shared or iCloud calendar on both) shows once, as this
+/// Mac's; the others get the Mac's name in `machine` and an id of their own.
+pub fn merge(local: &[Event], peers: &[(&str, &[Event])]) -> Vec<Event> {
+    let key = |e: &Event| (e.title.trim().to_lowercase(), e.start_ms, e.end_ms, e.all_day);
+    let mut seen: HashSet<(String, u64, u64, bool)> = local.iter().map(key).collect();
+    let mut out: Vec<Event> = local.to_vec();
+    for (name, events) in peers {
+        for e in events.iter().filter(|e| e.machine.is_empty()) {
+            if seen.insert(key(e)) {
+                out.push(Event { id: format!("{name}/{}", e.id), machine: name.to_string(), ..e.clone() });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.start_ms.cmp(&b.start_ms).then(a.end_ms.cmp(&b.end_ms)).then(a.title.cmp(&b.title)));
+    out.truncate(MAX_EVENTS);
+    out
+}
+
+/// What this Mac answers a paired Mac's `ctl calendar`: its own events only (never the
+/// ones it got from other Macs, so nothing echoes back and forth).
+pub fn peer_json(st: &Status, enabled: bool) -> String {
+    if !enabled {
+        return "error: Calendar is off there".into();
+    }
+    if !st.loaded {
+        return "error: not read yet".into();
+    }
+    if !st.authorized || (st.events.iter().all(|e| !e.machine.is_empty()) && st.error.is_some()) {
+        return format!("error: {}", st.error.as_deref().unwrap_or("no calendar access there"));
+    }
+    let own: Vec<&Event> = st.events.iter().filter(|e| e.machine.is_empty()).collect();
+    serde_json::json!({ "events": own }).to_string()
+}
+
+/// A paired Mac's answer to `ctl calendar`.
+pub fn parse_peer(reply: &[u8]) -> Result<Vec<Event>, String> {
+    let text = String::from_utf8_lossy(reply);
+    let text = text.trim();
+    if let Some(e) = text.strip_prefix("error:") {
+        return Err(if e.contains("unknown command") { "its quaked is older; update it".into() } else { e.trim().to_string() });
+    }
+    #[derive(Deserialize)]
+    struct Reply {
+        events: Vec<Event>,
+    }
+    serde_json::from_str::<Reply>(text).map(|r| r.events).map_err(|_| "unexpected reply".to_string())
 }
 
 fn read(cfg: &Cfg, store: &mut Option<ek::Store>, me: &Sender<Cmd>) -> Status {
@@ -671,6 +806,7 @@ mod ek {
             location: location.trim().to_string(),
             calendar,
             color: color(cal),
+            machine: String::new(),
         })
     }
 }
@@ -690,6 +826,7 @@ pub fn sample() -> Status {
         join_url: join.into(),
         calendar: cal.into(),
         color: color.into(),
+        machine: String::new(),
     };
     let day = now - now % (24 * HOUR);
     let events = vec![
@@ -709,6 +846,35 @@ pub fn sample() -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ev(title: &str, start: u64, machine: &str) -> Event {
+        Event { id: format!("id-{title}"), title: title.into(), start_ms: start, end_ms: start + 1_800_000, machine: machine.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn merges_both_macs_once() {
+        let local = vec![ev("Standup", 1_000, ""), ev("Piano lesson", 9_000, "")];
+        let theirs = vec![ev("standup ", 1_000, ""), ev("Design review", 5_000, ""), ev("Echo", 7_000, "Mac mini")];
+        let all = merge(&local, &[("AustinM5Max", &theirs)]);
+        let titles: Vec<&str> = all.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["Standup", "Design review", "Piano lesson"]);
+        assert_eq!(all[0].machine, "");
+        assert_eq!(all[1].machine, "AustinM5Max");
+        assert_eq!(all[1].id, "AustinM5Max/id-Design review");
+    }
+
+    #[test]
+    fn answers_peers_with_own_events_only() {
+        let st = Status { loaded: true, authorized: true, events: vec![ev("Mine", 1, ""), ev("Theirs", 2, "AustinM5Max")], ..Default::default() };
+        let back = parse_peer(peer_json(&st, true).as_bytes()).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].title, "Mine");
+        assert_eq!(parse_peer(b"error: unknown command \"calendar\"\n"), Err("its quaked is older; update it".into()));
+        assert!(peer_json(&st, false).starts_with("error:"));
+        let denied = Status { loaded: true, error: Some("Allow Quaked".into()), ..Default::default() };
+        assert_eq!(peer_json(&denied, true), "error: Allow Quaked");
+    }
+
 
     #[test]
     fn finds_join_links() {

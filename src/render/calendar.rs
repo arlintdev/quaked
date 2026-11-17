@@ -190,7 +190,12 @@ fn card(c: &mut Canvas, v: &View, l: &Layout) {
         "LATER"
     };
     let pw = c.pill(x + 30.0, y + 22.0, tag, 14.0, if running { v.accent } else { col }, 0x101013);
-    let meta = if e.calendar.is_empty() { cal::span(e.start_ms, e.end_ms) } else { format!("{}   ·   {}", cal::span(e.start_ms, e.end_ms), e.calendar) };
+    let mut meta = cal::span(e.start_ms, e.end_ms);
+    for part in [&e.calendar, &e.machine] {
+        if !part.is_empty() {
+            meta = format!("{meta}   ·   {part}");
+        }
+    }
     c.fit(F::Medium, &meta, 18.0, w - pw - 80.0, x + 44.0 + pw, y + 41.0, TEXT_2, Align::Left);
     c.fit(F::Bold, &e.title, 46.0, w - 60.0, x + 30.0, y + 106.0, TEXT, Align::Left);
     // Where: the meeting app, and the place unless it's just the link again.
@@ -238,7 +243,7 @@ fn list(c: &mut Canvas, v: &View, l: &Layout) {
     if n > ROWS {
         rx -= c.text(F::Bold, &format!("{}–{} of {n}", l.first + 1, (l.first + ROWS).min(n)), 12.0, rx, y + 27.0, FAINT, Align::Right) + 18.0;
     }
-    if let Some(err) = &s.error {
+    if let Some(err) = s.error.as_ref().or(s.peer_note.as_ref()) {
         c.fit(F::Medium, err, 14.0, rx - x - tw - 50.0, rx, y + 27.0, AMBER, Align::Right);
     } else {
         let room = rx - (x + 22.0 + tw + 24.0);
