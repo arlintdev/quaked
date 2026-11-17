@@ -1692,8 +1692,25 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
         c.fit(F::Medium, &label, 17.0, r.2 - 16.0, r.0 + r.2 / 2.0, r.1 + 25.0, fg, Align::Center);
     }
 
-    // Timeline
-    let rr = detail_right();
+    // Claude's task list (when it has one) beside the timeline.
+    let full = detail_right();
+    let rr = if s.todos.is_empty() {
+        full
+    } else {
+        let tw = 470.0;
+        let tr = (full.0, full.1, tw, full.3);
+        c.rrect(tr, 14.0, PANEL_DEEP, 1.0);
+        let done = s.todos.iter().filter(|t| t.state == crate::status::TodoState::Completed).count();
+        c.text(F::Bold, "TASKS", 12.0, tr.0 + 24.0, tr.1 + 28.0, FAINT, Align::Left);
+        c.text(F::Medium, &format!("{done} of {}", s.todos.len()), 13.0, tr.0 + tw - 24.0, tr.1 + 28.0, FAINT, Align::Right);
+        let rows = ((tr.3 - 60.0) / 30.0).floor().max(1.0) as usize;
+        let first_open = s.todos.iter().position(|t| t.state != crate::status::TodoState::Completed).unwrap_or(s.todos.len());
+        let start = first_open.saturating_sub(2).min(s.todos.len().saturating_sub(rows));
+        for (k, t) in s.todos.iter().skip(start).take(rows).enumerate() {
+            todo_line(c, t, tr.0 + 22.0, tr.1 + 66.0 + k as f32 * 30.0, tw - 44.0, s.state == State::Working);
+        }
+        (full.0 + tw + G, full.1, full.2 - tw - G, full.3)
+    };
     let (rx, ry, rw, rh) = rr;
     c.rrect(rr, 14.0, PANEL_DEEP, 1.0);
     c.text(F::Bold, "STEPS", 12.0, rx + 24.0, ry + 28.0, FAINT, Align::Left);
