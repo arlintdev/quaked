@@ -516,12 +516,16 @@ function viewGeneral(main) {
 function viewExtras(main) {
   main.append(h("h1", {}, "Extras"), h("p", { class: "sub" }, "Call mode, night mode, the focus timer, deploys, calendar, clipboard, windows, health and the music visualizer."));
   main.append(card("Call mode", "While you're on a call the bar shows mute state, a call timer, your clips and the next meeting. Double-click dismisses it until the call ends.",
-    toggle("Show the call screen during calls", "call.enabled")));
+    toggle("Show the call screen during calls", "call.enabled"),
+    toggle("Count calls in a browser (Meet, Zoom web)", "call.browsers", "A browser using the mic counts as a call"),
+    lines("More call apps", "call.apps", "Bundle ids, one per line (e.g. com.example.Meetings)"),
+    toggle("Press sends the app's own mute shortcut", "call.muteShortcut", "When the soundboard isn't carrying your mic: brings the call app forward and types its mute key (Zoom Cmd+Shift+A, Teams Cmd+Shift+M). Off by default.")));
   main.append(card("Night mode", "After you've been away for a while at night the bar dims to a clock with the weather and your first meeting tomorrow. Any touch or knob turn wakes it.",
     toggle("Night mode", "night.enabled"),
     choice("Starts at", "night.startHour", [...Array(24).keys()].map((hh) => [hh, `${(hh % 12) || 12} ${hh < 12 ? "AM" : "PM"}`]), null, true),
     choice("Ends at", "night.endHour", [...Array(24).keys()].map((hh) => [hh, `${(hh % 12) || 12} ${hh < 12 ? "AM" : "PM"}`]), null, true),
     choice("After idle for", "night.idleMinutes", [[2, "2 min"], [5, "5 min"], [10, "10 min"], [20, "20 min"], [30, "30 min"]], null, true),
+    slider("Screen brightness at night", "night.brightness", 4, 80, 1, (v) => `${Math.round(v / 255 * 100)}%`),
     h("div", { class: "row" }, h("div", { class: "label" }, "Weather location", h("small", {}, "Latitude, longitude. Empty = estimated from your network (no location lookup services).")),
       h("input", { type: "text", style: { width: "220px" }, placeholder: "40.76, -111.89", value: cfg.night?.latitude != null ? `${cfg.night.latitude}, ${cfg.night.longitude}` : "",
         oninput: (e) => { const m = e.target.value.split(",").map((x) => parseFloat(x)); if (m.length === 2 && m.every((x) => !isNaN(x))) { cfg.night.latitude = m[0]; cfg.night.longitude = m[1]; } else { cfg.night.latitude = null; cfg.night.longitude = null; } changed(); } }))));
@@ -530,7 +534,8 @@ function viewExtras(main) {
     text("Shortcut when a block starts", "focus.startShortcut", "e.g. Focus On", "A macOS Shortcut (for example one that turns on Do Not Disturb)"),
     text("Shortcut when it ends", "focus.endShortcut", "e.g. Focus Off")));
   const projects = cfg.deploy.projects || (cfg.deploy.projects = []);
-  main.append(card("Deploy", projects.length ? "Press a project on the bar to arm it, press again within 4 seconds to deploy." : "Empty = quaked finds folders with a deploy.sh in ~/ArlintDev.",
+  main.append(card("Deploy", projects.length ? "Press a project on the bar to arm it, press again within 4 seconds to deploy." : "No projects listed: quaked shows folders with a deploy.sh in the folder below.",
+    text("Find projects in", "deploy.scan", "~/ArlintDev", "Used only when no projects are listed; empty turns discovery off"),
     ...projects.map((p, i) => h("div", { class: "row" },
       h("input", { type: "text", value: p.name, placeholder: "name", style: { width: "140px" }, oninput: (e) => { p.name = e.target.value; changed(); } }),
       h("input", { type: "text", value: p.path, placeholder: "~/ArlintDev/project", class: "mono", style: { width: "220px" }, oninput: (e) => { p.path = e.target.value; changed(); } }),
@@ -540,11 +545,15 @@ function viewExtras(main) {
     h("div", { class: "row" }, h("button", { class: "btn small", onclick: () => { projects.push({ name: "", path: "", command: "./deploy.sh", repo: "" }); changed(); render(); } }, sym("plus", 12), "Add a project"))));
   main.append(card("Calendar", "Uses the calendars in macOS Calendar (macOS asks once for access).",
     toggle("Calendar", "calendar.enabled"),
-    lines("Only these calendars", "calendar.calendars", "One name per line; empty = all")));
+    lines("Only these calendars", "calendar.calendars", "One name per line; empty = all"),
+    choice("Heads-up before meetings with a link", "calendar.alertMinutes", [[0, "Off"], [1, "1 min"], [2, "2 min"], [5, "5 min"], [10, "10 min"]], "Blinks the ring and jumps to the calendar", true)));
   main.append(card("Clipboard and windows", "Copies from password managers are never kept; the history lives in memory only.",
     toggle("Clipboard picker", "paste.enabled"),
     choice("Remember", "paste.history", [[10, "10 copies"], [20, "20 copies"], [40, "40 copies"]], null, true),
-    toggle("Window switcher", "windows.enabled")));
+    toggle("Skip things that look like keys or tokens", "paste.skipSecrets"),
+    lines("Never keep copies made in", "paste.ignoreApps", "App names, one per line"),
+    toggle("Window switcher", "windows.enabled"),
+    lines("Leave out of the window switcher", "windows.exclude", "App names or bundle ids, one per line")));
   main.append(card("Health and visualizer", null,
     toggle("Mac health", "health.enabled", "This Mac and your paired Macs"),
     toggle("Music visualizer", "viz.enabled", "macOS asks once to let Quaked hear system audio"),
