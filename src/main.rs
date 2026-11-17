@@ -212,6 +212,44 @@ fn preview(dir: &str) {
         ..lg_dead.clone()
     };
     let lg_pop = league::Status { phase: "ReadyCheck".into(), ready: Some(league::ReadyCheck { state: "InProgress".into(), response: "Accepted".into(), timer: 3.0 }), accepted_by_quaked: true, ..lg_lobby.clone() };
+    let lg_pick = league::Status {
+        phase: "ChampSelect".into(),
+        queue: Some("ARAM: Mayhem".into()),
+        champ: Some(league::ChampSelect { phase: "BAN_PICK".into(), time_left_ms: 41_200.0, position: String::new(), champion: "Yone".into(), champion_id: 777 }),
+        champ_record: Some(league::ChampRecord { champion: "Yone".into(), mode: (7, 3), all: (9, 5), recent: vec![true, true, false, true, true], last: now - 2 * 86_400_000 }),
+        session_games: vec![true, false, true, true],
+        live: None,
+        ..lg_dead.clone()
+    };
+    let lg_post = league::Status {
+        phase: "EndOfGame".into(),
+        live: None,
+        with_now: Vec::new(),
+        mode_record: (21, 15),
+        session: (4, 1),
+        session_games: vec![true, false, true, true, true],
+        streak: 3,
+        post_game: Some(league::PostGame {
+            game_id: 1, win: true, champion: "Yone".into(), mode: league::Mode::Mayhem, mode_name: "ARAM: Mayhem".into(), duration: 1143.0,
+            kills: 16, deaths: 6, assists: 23, team_kills: 69, damage: 41_358, damage_rank: 1, gold: 19_780, cs: 43, level: 18,
+            mode_record: (21, 15), champ_record: (8, 3), mates: vec![duo("Sam", 31, 19, true), duo("Priya", 22, 10, true)], ..Default::default()
+        }),
+        ..lg_dead.clone()
+    };
+    let lg_postlobby = league::Status {
+        phase: "Lobby".into(),
+        mode: league::Mode::Rift,
+        mode_record: (14, 13),
+        session: (3, 2),
+        session_games: vec![true, false, true, true, false],
+        streak: -1,
+        post_game: Some(league::PostGame {
+            game_id: 2, win: false, champion: "Ahri".into(), mode: league::Mode::Rift, mode_name: "Ranked Solo/Duo".into(), duration: 1865.0,
+            kills: 4, deaths: 6, assists: 7, team_kills: 24, damage: 21_304, damage_rank: 3, gold: 11_870, cs: 198, vision: 27, level: 16,
+            mode_record: (14, 13), champ_record: (5, 4), mates: vec![duo("Sam", 31, 19, true), duo("Dmitri", 4, 1, false)], ..Default::default()
+        }),
+        ..lg_post.clone()
+    };
     let dk = docker::Status {
         ok: true,
         socket: "~/.kiri/run/docker.sock".into(),
@@ -319,7 +357,7 @@ fn preview(dir: &str) {
     let (call_on, call_off) = (call::sample(), call::Status::default());
     let (night_on, night_off) = (night::sample(), night::Status::default());
     let (focus_s, deploy_s, paste_s, windows_s, calendar_s, health_s, viz_s) = (focus::sample(), deploy::sample(), clipboard::sample(), windows::sample(), calendar::sample(), health::sample(), viz::sample());
-    let shots: [(&str, Page, Level, usize, usize, usize); 31] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 34] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -351,6 +389,9 @@ fn preview(dir: &str) {
         ("37-night", Page::Dash, Level::Top, 0, 0, 0),
         ("38-music-viz", Page::Music, Level::Top, 0, 0, 0),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
+        ("23-league-champselect", Page::League, Level::Top, 0, 0, 0),
+        ("24-league-postgame", Page::League, Level::Top, 0, 0, 0),
+        ("25-league-postlobby", Page::League, Level::Focus, 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
     let empty = audio::Status::default();
@@ -363,7 +404,7 @@ fn preview(dir: &str) {
             shortcuts: &cfg.shortcuts,
             sounds: if name.ends_with("empty") { &empty } else { &sounds },
             tile,
-            league: if name.contains("pop") { &lg_pop } else if name.contains("live") { &lg_live } else if name.contains("dead") { &lg_dead } else if name.contains("aram") { &lg_aram } else { &lg_lobby },
+            league: if name.contains("pop") { &lg_pop } else if name.contains("live") { &lg_live } else if name.contains("dead") { &lg_dead } else if name.contains("aram") { &lg_aram } else if name.contains("champselect") { &lg_pick } else if name.contains("postgame") { &lg_post } else if name.contains("postlobby") { &lg_postlobby } else { &lg_lobby },
             league_cfg: &cfg.league,
             docker: &dk,
             ops: &opsd,

@@ -1902,6 +1902,10 @@ fn league_page(c: &mut Canvas, v: &View) {
     if let Some(g) = &l.live {
         return live_game(c, v, g, mr, accent);
     }
+    // After a game: how it went, until you queue again.
+    if let Some(p) = l.post_game.as_ref().filter(|_| !matches!(l.phase.as_str(), "Matchmaking" | "ReadyCheck" | "ChampSelect")) {
+        return post_game_card(c, v, p, mr, focus);
+    }
     session_line(c, l, tx, my + mh - 24.0, mw - 64.0);
     match l.phase.as_str() {
         "Lobby" => {
@@ -1955,20 +1959,20 @@ fn league_page(c: &mut Canvas, v: &View) {
                 "GAME_STARTING" => "STARTING",
                 other => other,
             };
-            c.text(F::Bold, &format!("CHAMP SELECT  ·  {phase}"), 18.0, tx, my + 46.0, accent, Align::Left);
-            let secs = (ch.time_left_ms / 1000.0).max(0.0).ceil();
-            c.text(F::Bold, &format!("{secs:.0}s"), 110.0, tx, my + 160.0, TEXT, Align::Left);
+            let hw = c.text(F::Bold, &format!("CHAMP SELECT  ·  {phase}"), 18.0, tx, my + 46.0, accent, Align::Left);
+            // Your position and the queue, top right.
             let mut line = Vec::new();
             if !ch.position.is_empty() {
                 line.push(position_name(&ch.position).to_string());
             }
-            if !ch.champion.is_empty() {
-                line.push(ch.champion.clone());
-            }
             if !queue.is_empty() {
                 line.push(queue.clone());
             }
-            c.fit(F::Medium, &line.join("   ·   "), 26.0, mw - 64.0, tx, my + 206.0, TEXT_2, Align::Left);
+            c.fit(F::Medium, &line.join("  ·  "), 18.0, mw - 64.0 - hw - 32.0, mx + mw - 32.0, my + 46.0, MUTED, Align::Right);
+            // The countdown on the left, your record on the champion beside it.
+            let secs = (ch.time_left_ms / 1000.0).max(0.0).ceil();
+            c.fit(F::Bold, &format!("{secs:.0}s"), 120.0, 200.0, tx, my + 226.0, TEXT, Align::Left);
+            champ_card(c, v, &ch, (tx + 222.0, my + 68.0, mw - 64.0 - 222.0, 232.0), accent);
         }
         "InProgress" | "GameStart" | "Reconnect" => {
             c.text(F::Bold, "IN GAME", 18.0, tx, my + 46.0, accent, Align::Left);
@@ -2011,20 +2015,275 @@ fn dragon_color(kind: &str) -> u32 {
     }
 }
 
-/// "This session 3W 2L · won 2 in a row"
+/// "This session 3W 2L ●●○●● · won 2 in a row" (a dot per game, oldest first).
 fn session_line(c: &mut Canvas, l: &league::Status, x: f32, y: f32, w: f32) {
     let (sw, sl) = l.session;
-    let mut parts = Vec::new();
+    let col = if l.streak <= -2 { LOSS } else { MUTED };
+    let mut cx = x;
     if sw + sl > 0 {
-        parts.push(format!("This session {sw}W {sl}L"));
+        cx += c.clip(F::Medium, &format!("This session {sw}W {sl}L"), 17.0, w, cx, y, col) + 12.0;
+        let games = &l.session_games[l.session_games.len().saturating_sub(12)..];
+        if !games.is_empty() && cx + games.len() as f32 * 14.0 <= x + w {
+            for (i, win) in games.iter().enumerate() {
+                c.circle(cx + 5.0 + i as f32 * 14.0, y - 6.0, 5.0, if *win { GREEN } else { LOSS }, 1.0);
+            }
+            cx += games.len() as f32 * 14.0 + 8.0;
+        }
     }
-    match l.streak {
-        n if n >= 2 => parts.push(format!("won {n} in a row")),
-        n if n <= -2 => parts.push(format!("lost {} in a row", -n)),
-        _ => {}
+    let streak = match l.streak {
+        n if n >= 2 => format!("won {n} in a row"),
+        n if n <= -2 => format!("lost {} in a row", -n),
+        _ => String::new(),
+    };
+    if !streak.is_empty() && x + w - cx > 40.0 {
+        let text = if cx > x { format!("·  {streak}") } else { streak };
+        c.clip(F::Medium, &text, 17.0, x + w - cx, cx, y, col);
     }
-    if !parts.is_empty() {
-        c.clip(F::Medium, &parts.join("  ·  "), 17.0, w, x, y, if l.streak <= -2 { 0xE5534B } else { MUTED });
+}
+
+const LOSS: u32 = 0xE5534B;
+
+/// "ARAM" for records (Mayhem counts with ARAM).
+fn family_name(m: league::Mode) -> &'static str {
+    match m.family() {
+        league::Mode::Aram | league::Mode::Mayhem => "ARAM",
+        league::Mode::Rift => "Rift",
+        league::Mode::Arena => "Arena",
+        league::Mode::Other => "this mode",
+        league::Mode::None => "all modes",
+    }
+}
+
+/// 38450 -> "38,450"
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+fn rate_color((w, l): (u32, u32)) -> u32 {
+    if w >= l { GREEN } else { LOSS }
+}
+
+/// "ARAM 21W 15L ▬▬ 58%" on one line; `bar_w` 0 leaves the bar out. Returns its width;
+/// with `draw` false it only measures.
+#[allow(clippy::too_many_arguments)]
+fn record_seg(c: &mut Canvas, x: f32, y: f32, label: &str, rec: (u32, u32), label_col: u32, bar_w: f32, draw: bool) -> f32 {
+    let (w_, l_) = rec;
+    let value = format!("{w_}W {l_}L");
+    let rate = if w_ + l_ > 0 { w_ as f32 / (w_ + l_) as f32 } else { 0.0 };
+    let pct = format!("{:.0}%", rate * 100.0);
+    let lw = c.measure(F::Bold, label, 14.0) + 10.0;
+    let vw = c.measure(F::Bold, &value, 20.0) + 12.0;
+    let bw = if bar_w > 0.0 { bar_w + 10.0 } else { 0.0 };
+    let pw = c.measure(F::Bold, &pct, 15.0);
+    if draw {
+        c.text(F::Bold, label, 14.0, x, y, label_col, Align::Left);
+        c.text(F::Bold, &value, 20.0, x + lw, y, TEXT, Align::Left);
+        if bar_w > 0.0 {
+            bar(c, x + lw + vw, y - 10.0, bar_w, rate, rate_color(rec));
+        }
+        c.text(F::Bold, &pct, 15.0, x + lw + vw + bw, y, rate_color(rec), Align::Left);
+    }
+    lw + vw + bw + pw
+}
+
+/// Champ select: your record on the champion you're showing (or a nudge to pick one).
+fn champ_card(c: &mut Canvas, v: &View, ch: &league::ChampSelect, r: R, accent: u32) {
+    let l = v.league;
+    let (x, y, w, _h) = r;
+    let ix = x + 26.0;
+    let iw = w - 52.0;
+    if ch.champion.is_empty() {
+        c.outline(r, 14.0, LINE, 2.0);
+        c.text(F::Bold, "Pick a champion", 38.0, ix, y + 76.0, TEXT_2, Align::Left);
+        c.paragraph(F::Medium, "Hover or lock one in and your record on it shows here.", 19.0, ix, y + 118.0, iw, 2, 26.0, FAINT);
+        return;
+    }
+    c.rrect(r, 14.0, 0x1A1A20, 1.0);
+    let rec = l.champ_record.clone().unwrap_or_default();
+    let games = rec.games();
+    let mut meta_w = 0.0;
+    if games > 0 {
+        let last = if rec.last > 0 && v.now_ms > rec.last {
+            let m = (v.now_ms - rec.last) / 60_000;
+            let when = if m < 60 { format!("{}m", m.max(1)) } else if m < 48 * 60 { format!("{}h", m / 60) } else { format!("{}d", m / 1440) };
+            format!("  ·  last {when} ago")
+        } else {
+            String::new()
+        };
+        meta_w = c.text(F::Medium, &format!("{} on it{last}", plural(games as usize, "game", "games")), 17.0, x + w - 26.0, y + 54.0, MUTED, Align::Right) + 24.0;
+    }
+    c.fit(F::Bold, &ch.champion, 50.0, iw - meta_w, ix, y + 70.0, TEXT, Align::Left);
+    if games == 0 {
+        c.symbol("sparkles", 24.0, ix + 13.0, y + 125.0, accent);
+        c.fit(F::Bold, &format!("First game on {}", ch.champion), 30.0, iw - 38.0, ix + 38.0, y + 136.0, accent, Align::Left);
+        c.text(F::Medium, "win or lose, this one starts your record", 18.0, ix, y + 180.0, FAINT, Align::Left);
+        return;
+    }
+    // This kind of game, every mode, and the last few games on it.
+    let known_mode = !matches!(l.mode, league::Mode::None | league::Mode::Other);
+    let kind = family_name(l.mode).to_uppercase();
+    let mut cols: Vec<(String, (u32, u32), u32, u32)> = Vec::new();
+    if known_mode {
+        cols.push((format!("IN {kind}"), rec.mode, accent, TEXT));
+    }
+    cols.push(("ALL MODES".to_string(), rec.all, FAINT, if known_mode { TEXT_2 } else { TEXT }));
+    let colw = iw / 3.0;
+    for (k, (label, wl, label_col, value_col)) in cols.iter().enumerate() {
+        let bx = ix + k as f32 * colw;
+        c.text(F::Bold, label, 14.0, bx, y + 124.0, *label_col, Align::Left);
+        if wl.0 + wl.1 == 0 {
+            c.text(F::Medium, "no games yet", 22.0, bx, y + 166.0, FAINT, Align::Left);
+            continue;
+        }
+        c.fit(F::Bold, &format!("{}W {}L", wl.0, wl.1), 40.0, colw - 20.0, bx, y + 170.0, *value_col, Align::Left);
+        let rate = wl.0 as f32 / (wl.0 + wl.1) as f32;
+        bar(c, bx, y + 188.0, colw - 84.0, rate, rate_color(*wl));
+        c.text(F::Bold, &format!("{:.0}%", rate * 100.0), 17.0, bx + colw - 28.0, y + 197.0, rate_color(*wl), Align::Right);
+    }
+    let bx = ix + cols.len() as f32 * colw;
+    if cols.len() < 3 && !rec.recent.is_empty() {
+        let label = if known_mode { format!("LAST {} IN {kind}", rec.recent.len()) } else { format!("LAST {}", rec.recent.len()) };
+        c.text(F::Bold, &label, 14.0, bx, y + 124.0, FAINT, Align::Left);
+        for (i, win) in rec.recent.iter().enumerate() {
+            let cx = bx + 13.0 + i as f32 * 32.0;
+            c.circle(cx, y + 156.0, 13.0, if *win { GREEN } else { LOSS }, 1.0);
+            c.text(F::Bold, if *win { "W" } else { "L" }, 13.0, cx, y + 160.5, 0xFFFFFF, Align::Center);
+        }
+    }
+}
+
+/// The middle of the pane after a game: how it went, then your records with it counted.
+/// In the lobby the Find match button stays where it always is.
+fn post_game_card(c: &mut Canvas, v: &View, p: &league::PostGame, r: R, focus: bool) {
+    let l = v.league;
+    let (x, y, w, _h) = r;
+    let accent = mode_theme(p.mode).1;
+    let lobby = l.phase == "Lobby";
+    let over = matches!(l.phase.as_str(), "WaitingForStats" | "PreEndOfGame" | "EndOfGame");
+    let (result, col) = if p.remake {
+        ("REMAKE".to_string(), TEXT_2)
+    } else if p.placement > 0 {
+        (format!("{} PLACE", ordinal(p.placement).to_uppercase()), if p.win { GREEN } else { LOSS })
+    } else if p.win {
+        ("VICTORY".to_string(), GREEN)
+    } else {
+        ("DEFEAT".to_string(), LOSS)
+    };
+    c.rrect(r, 14.0, col, 0.07);
+    c.outline(r, 14.0, if p.remake { LINE } else if p.win { 0x1F4A33 } else { 0x5A2328 }, 2.0);
+    let tx = x + 32.0;
+    let tw = w - 64.0;
+    let rx = x + w - 32.0;
+    let name = if p.mode_name.is_empty() { mode_theme(p.mode).0.to_string() } else { p.mode_name.to_uppercase() };
+    c.fit(F::Bold, &format!("{}  ·  {name}  ·  {}", if over { "GAME OVER" } else { "LAST GAME" }, mmss(p.duration)), 18.0, tw, tx, y + 46.0, accent, Align::Left);
+    // The result and your champion; K/D/A on the right, like the score in game.
+    let kda_w = c.text(F::Bold, &format!("{} / {} / {}", p.kills, p.deaths, p.assists), 58.0, rx, y + 112.0, TEXT, Align::Right);
+    let ratio = if p.deaths == 0 { "perfect kda".to_string() } else { format!("{:.1} kda", (p.kills + p.assists) as f32 / p.deaths as f32) };
+    let kp = (p.team_kills > 0).then(|| format!("{:.0}%", ((p.kills + p.assists) as f32 / p.team_kills as f32 * 100.0).min(100.0)));
+    let rift = p.mode.family() == league::Mode::Rift;
+    let kda_label = match (&kp, rift) {
+        (Some(kp), true) => format!("k / d / a  ·  {ratio}  ·  {kp} kill participation"),
+        _ => format!("k / d / a  ·  {ratio}"),
+    };
+    c.text(F::Medium, &kda_label, 14.0, rx, y + 136.0, FAINT, Align::Right);
+    c.fit(F::Bold, &result, 72.0, tw - kda_w - 32.0, tx, y + 120.0, col, Align::Left);
+    let champ_w = c.fit(F::Bold, &p.champion, 28.0, tw / 2.0, tx, y + 162.0, TEXT, Align::Left);
+    if p.level > 0 {
+        c.text(F::Medium, &format!("level {}", p.level), 20.0, tx + champ_w + 14.0, y + 162.0, MUTED, Align::Left);
+    }
+    // Your numbers: what matters in this mode.
+    let dmg_note = match p.damage_rank {
+        0 => String::new(),
+        1 => "most on your team".to_string(),
+        n => format!("{} on your team", ordinal(n)),
+    };
+    let mut stats: Vec<(String, String, String)> = vec![(thousands(p.damage), "damage to champions".into(), dmg_note), (thousands(p.gold), "gold".into(), String::new())];
+    if rift {
+        let per_min = if p.duration > 60.0 { format!("  ·  {:.1} / min", p.cs as f64 / (p.duration / 60.0)) } else { String::new() };
+        stats.push((p.cs.to_string(), format!("cs{per_min}"), String::new()));
+        stats.push((p.vision.to_string(), "vision".into(), String::new()));
+    } else if let Some(kp) = kp {
+        stats.push((kp, "kill participation".into(), String::new()));
+    }
+    stats.push((p.level.to_string(), "level".into(), String::new()));
+    let sw = tw / stats.len() as f32;
+    for (k, (val, label, note)) in stats.iter().enumerate() {
+        let sx = tx + k as f32 * sw;
+        c.fit(F::Bold, val, 34.0, sw - 16.0, sx, y + 216.0, TEXT, Align::Left);
+        c.clip(F::Medium, label, 14.0, sw - 12.0, sx, y + 238.0, FAINT);
+        if !note.is_empty() {
+            c.clip(F::Bold, note, 13.0, sw - 12.0, sx, y + 257.0, accent);
+        }
+    }
+    c.rect((tx, y + 274.0, tw, 1.0), LINE, 1.0);
+    // Your records now: this kind of game and the champion, the session, the people.
+    let (lx, lw) = if lobby { (tx + 300.0, tw - 300.0) } else { (tx, tw) };
+    if lobby {
+        button(c, league_primary(), "Find match", accent, 0x1A1408, "magnifyingglass");
+        if focus {
+            c.outline(league_primary(), 14.0, TEXT, 3.0);
+        }
+    }
+    let mut ly = y + 308.0;
+    let kind = family_name(p.mode).to_uppercase();
+    let champ_label = if p.champion.is_empty() { String::new() } else { format!("{} IN {kind}", p.champion.to_uppercase()) };
+    let gap = 30.0;
+    let full = record_seg(c, 0.0, 0.0, &kind, p.mode_record, accent, 70.0, false) + if champ_label.is_empty() { 0.0 } else { gap + record_seg(c, 0.0, 0.0, &champ_label, p.champ_record, accent, 70.0, false) };
+    let bar_w = if full <= lw { 70.0 } else { 0.0 };
+    let mw_ = record_seg(c, lx, ly, &kind, p.mode_record, accent, bar_w, true);
+    if !champ_label.is_empty() && p.champ_record.0 + p.champ_record.1 > 0 {
+        let cw = record_seg(c, 0.0, 0.0, &champ_label, p.champ_record, accent, bar_w, false);
+        if mw_ + gap + cw <= lw {
+            record_seg(c, lx + mw_ + gap, ly, &champ_label, p.champ_record, accent, bar_w, true);
+        }
+    }
+    ly += 34.0;
+    if l.session.0 + l.session.1 > 0 || l.streak.abs() >= 2 {
+        session_line(c, l, lx, ly, lw);
+        ly += 34.0;
+    }
+    // "with Sam now 20–12  ·  Priya now 11–12"
+    if !p.mates.is_empty() {
+        let mut cx = lx + c.text(F::Medium, "with", 17.0, lx, ly, MUTED, Align::Left) + 10.0;
+        for (i, d) in p.mates.iter().enumerate() {
+            let rec = (d.wins, d.games - d.wins);
+            let name = if d.name.is_empty() { "teammate" } else { d.name.as_str() };
+            let need = c.measure(F::Bold, name, 18.0) + c.measure(F::Medium, " now ", 17.0) + c.measure(F::Bold, "00–00", 18.0) + if i > 0 { 28.0 } else { 0.0 } + if d.friend { 22.0 } else { 0.0 };
+            if cx + need > lx + lw {
+                let more = p.mates.len() - i;
+                c.text(F::Medium, &format!("+{more}"), 17.0, cx, ly, MUTED, Align::Left);
+                break;
+            }
+            if i > 0 {
+                cx += c.text(F::Medium, "  ·  ", 17.0, cx, ly, FAINT, Align::Left);
+            }
+            if d.friend {
+                c.symbol("person.2.fill", 12.0, cx + 9.0, ly - 6.0, GOLD);
+                cx += 22.0;
+            }
+            cx += c.text(F::Bold, name, 18.0, cx, ly, TEXT, Align::Left);
+            cx += c.text(F::Medium, " now ", 17.0, cx, ly, MUTED, Align::Left);
+            cx += c.text(F::Bold, &format!("{}–{}", rec.0, rec.1), 18.0, cx, ly, rate_color(rec), Align::Left);
+        }
     }
 }
 
@@ -3134,6 +3393,10 @@ fn dash_league(c: &mut Canvas, v: &View, r: R) {
         (format!("{}  ·  {}/{}/{}", mmss(g.time), g.kills, g.deaths, g.assists), TEXT, format!("{}  ·  {} – {}  ·  {}", if l.mode_name.is_empty() { g.mode.clone() } else { l.mode_name.clone() }, g.ally_kills, g.enemy_kills, g.champion))
     } else if !l.running {
         ("Client closed".to_string(), FAINT, String::new())
+    } else if let Some(p) = l.post_game.as_ref().filter(|_| !matches!(l.phase.as_str(), "Matchmaking" | "ReadyCheck" | "ChampSelect")) {
+        let result = if p.remake { "Remake" } else if p.win { "Victory" } else { "Defeat" };
+        let rec = format!("{} {}W {}L", family_name(p.mode), p.mode_record.0, p.mode_record.1);
+        (format!("{result}  ·  {}/{}/{}", p.kills, p.deaths, p.assists), if p.remake { TEXT_2 } else if p.win { GREEN } else { LOSS }, [p.champion.as_str(), rec.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("  ·  "))
     } else {
         match l.phase.as_str() {
             "Matchmaking" => {
@@ -3143,7 +3406,14 @@ fn dash_league(c: &mut Canvas, v: &View, r: R) {
             "ReadyCheck" => ("Match found".to_string(), accent, queue.clone()),
             "ChampSelect" => {
                 let left = l.champ.as_ref().map(|c| (c.time_left_ms / 1000.0).max(0.0).ceil()).unwrap_or(0.0);
-                (format!("{left:.0}s to pick"), accent, l.champ.as_ref().map(|c| c.champion.clone()).unwrap_or_default())
+                let champ = l.champ.as_ref().map(|c| c.champion.clone()).unwrap_or_default();
+                // Your record on it: "Yone  ·  ARAM 7W 3L"
+                let sub = match &l.champ_record {
+                    Some(r) if !champ.is_empty() && r.games() == 0 => format!("first game on {champ}"),
+                    Some(r) if !champ.is_empty() => format!("{champ}  ·  {} {}W {}L", family_name(l.mode), r.mode.0, r.mode.1),
+                    _ => champ,
+                };
+                (format!("{left:.0}s to pick"), accent, sub)
             }
             "Lobby" => ("In lobby".to_string(), TEXT, queue.clone()),
             "InProgress" | "GameStart" => ("In game".to_string(), TEXT, queue.clone()),
