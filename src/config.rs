@@ -320,10 +320,12 @@ pub struct NightSettings {
     /// For the weather; unset = estimated from the network.
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Screen luminance while the night screen shows (never brighter than it was).
+    pub brightness: u8,
 }
 impl Default for NightSettings {
     fn default() -> Self {
-        NightSettings { enabled: true, start_hour: 22, end_hour: 7, idle_minutes: 10, latitude: None, longitude: None }
+        NightSettings { enabled: true, start_hour: 22, end_hour: 7, idle_minutes: 10, latitude: None, longitude: None, brightness: 16 }
     }
 }
 
