@@ -73,8 +73,9 @@ knob's light ring:
   keeps the token in the Keychain of the Mac with the Quake.
 - **Calendar** (calendar icon): the next 24 hours from macOS Calendar as a timeline, the
   next meeting big with its time, place and a Join button for Zoom / Meet / Teams /
-  FaceTime / Webex links, and the list coming up. Two minutes before a meeting the board
-  jumps here (set the lead time in Extras).
+  FaceTime / Webex links, and the list coming up, merged from both Macs' calendars. The
+  board jumps here 15, 10 and 5 minutes before each meeting and as it starts (set the
+  marks in Extras).
 - **Focus** (timer icon): a countdown you set on the knob (25 minutes by default), shown
   in the ring wherever the board is, with today's blocks, the week, and whether a block
   fits before your next meeting. Optional macOS Shortcuts run when a block starts and ends
@@ -118,10 +119,21 @@ Three things appear over the pages on their own:
 The Extras tab of the settings page holds their options.
 
 **New stuff**: when a session starts waiting on you, a review is requested, CI fails, a PR
-is approved / gets changes requested / conflicts, a host goes down, a site starts failing
-or a container stops, the ring blinks in that page's color, the top bar says what
-happened, and the board jumps to the page (unless you used it in the last 15 seconds).
-Touching the board stops the blinking. `quaked ctl alert code "test"` tries it.
+is approved / gets changes requested / conflicts, a host goes down, a site starts failing,
+a container stops, a deploy finishes, a Mac runs low on disk or memory, or a meeting is
+15, 10 or 5 minutes away or starting, the ring blinks in that page's color, the top bar
+says what happened, and the board jumps to the page. Touching the board stops the
+blinking. `quaked ctl alert code "test"` tries it.
+
+**What matters wins**: each alert has an urgency (a meeting 5 minutes out or starting is
+critical; something waiting on you is high; a container stopping or a deploy passing is
+normal). Nothing jumps while you're using the board; something urgent jumps once you've
+left it for 15 seconds. A League game, a focus block or a meeting that's starting only
+give way to critical things, and a page the board just jumped to only gives way to
+something more urgent for a minute. Left alone, the board goes to what's going on (Go to
+what matters): your game, a meeting about to start or just started, a Claude session
+waiting on you, a meeting in the next 15 minutes, a running deploy, a focus block, and
+otherwise the dashboard.
 
 ## Claude's questions and permissions on the Quake
 
