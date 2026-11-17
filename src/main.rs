@@ -434,7 +434,13 @@ fn preview(dir: &str) {
     let (night_on, night_off) = (night::sample(), night::Status::default());
     let (focus_s, deploy_s, paste_s, windows_s, calendar_s, health_s, viz_s) = (focus::sample(), deploy::sample(), clipboard::sample(), windows::sample(), calendar::sample(), health::sample(), viz::sample());
     let stocks_s = stocks::sample();
-    let shots: [(&str, Page, Level, usize, usize, usize); 40] = [
+    let stocks_n = |n: usize| {
+        let mut s = stocks::sample();
+        s.quotes.truncate(n);
+        s
+    };
+    let (stocks_two, stocks_four) = (stocks_n(2), stocks_n(4));
+    let shots: [(&str, Page, Level, usize, usize, usize); 42] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -475,6 +481,8 @@ fn preview(dir: &str) {
         ("39-stocks", Page::Stocks, Level::Focus, 0, 0, 1),
         ("40-stocks-detail", Page::Stocks, Level::Detail("NVDA".into()), 0, 1, 0),
         ("41-stocks-expanded", Page::Stocks, Level::Detail("NVDA@1Y".into()), 0, 0, 0),
+        ("42-stocks-two", Page::Stocks, Level::Top, 0, 0, 0),
+        ("43-stocks-four", Page::Stocks, Level::Top, 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
     let empty = audio::Status::default();
@@ -508,7 +516,11 @@ fn preview(dir: &str) {
             windows: &windows_s,
             calendar: &calendar_s,
             health: &health_s,
-            stocks: &stocks_s,
+            stocks: match name {
+                "42-stocks-two" => &stocks_two,
+                "43-stocks-four" => &stocks_four,
+                _ => &stocks_s,
+            },
             viz: &viz_s,
             history: &history,
             ask: (name == "17-ask").then(|| render::AskView {

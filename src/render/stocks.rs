@@ -8,7 +8,7 @@
 //! Level::Detail("NVDA") is the four panes (v.scroll = the pane picked);
 //! Level::Detail("NVDA@1Y") is one expanded.
 use super::*;
-use crate::stocks::{Chart, Quote, Range, Series};
+use crate::stocks::{Quote, Range, Series};
 
 /// Tiles on screen at once; the knob pages through more.
 const PER_SCREEN: usize = 8;
@@ -260,24 +260,26 @@ pub(super) fn draw(c: &mut Canvas, v: &View) {
     }
 }
 
-/// "5D +1.2%  1M +3.4%  YTD +12.1%  1Y +45.2%", each colored by its sign; returns its width.
-fn strip(c: &mut Canvas, q: &Quote, extra: &[Chart], now: u64, x: f32, y: f32, max_w: f32) -> f32 {
-    let mut cx = x;
-    for r in [Range::Week, Range::Month, Range::Ytd, Range::Year] {
-        let Some(p) = q.change_over(r, extra, now) else { continue };
-        let lw = c.measure(F::Bold, r.label(), 12.0);
-        let vtext = format!("{:+.1}%", p);
-        let vw = c.measure(F::Bold, &vtext, 13.0);
-        if cx + lw + 5.0 + vw > x + max_w {
-            break;
-        }
-        c.text(F::Bold, r.label(), 12.0, cx, y, FAINT, Align::Left);
-        c.text(F::Bold, &vtext, 13.0, cx + lw + 5.0, y, up_color(p), Align::Left);
-        cx += lw + 5.0 + vw + 16.0;
+/// One of a card's four mini charts: its scale, its change, and the line against where the
+/// scale started.
+fn mini(c: &mut Canvas, v: &View, q: &Quote, range: Range, r: R) {
+    let (x, y, w, h) = r;
+    c.rrect(r, 10.0, 0x18181C, 1.0);
+    let now = v.now_ms / 1000;
+    let (points, base) = q.over(range, &v.stocks.extra, now);
+    let moved = q.change_over(range, &v.stocks.extra, now);
+    let col = moved.map_or(MUTED, up_color);
+    c.text(F::Bold, range.label(), 12.0, x + 10.0, y + 18.0, FAINT, Align::Left);
+    if let Some(p) = moved {
+        c.text(F::Bold, &format!("{:+.1}%", p), 13.0, x + w - 10.0, y + 18.0, col, Align::Right);
     }
-    cx - x
+    if h > 40.0 {
+        spark(c, (x + 10.0, y + 28.0, w - 20.0, h - 38.0), &points, base, col);
+    }
 }
 
+/// A card: symbol and name, price and today's change, (with room) the day and 52-week
+/// ranges and volume, then 1D / 5D / 1M / 1Y side by side, or 2 x 2 on a narrow card.
 fn tile(c: &mut Canvas, v: &View, q: &Quote, r: R, tall: bool) {
     let (x, y, w, h) = r;
     c.rrect(r, 14.0, PANEL, 1.0);
@@ -291,29 +293,42 @@ fn tile(c: &mut Canvas, v: &View, q: &Quote, r: R, tall: bool) {
     }
     let col = up_color(q.change());
     c.rrect((x, y, 5.0, h), 2.5, col, 1.0);
-    let state_w = if q.open { 0.0 } else { c.pill(x + w - 20.0 - (c.measure(F::Bold, "CLOSED", 11.0) + 11.0 * 1.4), y + 18.0, "CLOSED", 11.0, 0x2A2A31, MUTED) + 10.0 };
-    c.fit(F::Bold, &q.symbol, 22.0, iw - state_w, ix, y + 36.0, TEXT, Align::Left);
-    c.clip(F::Medium, &q.name, 14.0, iw, ix, y + 58.0, MUTED);
-    let (py, cy) = if tall { (y + 118.0, y + 150.0) } else { (y + 100.0, y + 126.0) };
-    let pw = c.fit(F::Bold, &price(q.price), if tall { 44.0 } else { 32.0 }, iw, ix, py, TEXT, Align::Left);
-    if !q.currency.is_empty() && q.currency != "USD" {
-        c.text(F::Medium, &q.currency, 14.0, ix + pw + 8.0, py, MUTED, Align::Left);
+    // Price and today's change on the right; symbol and name on the left get the rest.
+    let (price_px, change_px) = if tall { (34.0, 17.0) } else { (24.0, 15.0) };
+    let pw = c.text(F::Bold, &price(q.price), price_px, x + w - 20.0, y + 40.0, TEXT, Align::Right);
+    let change = change_text(q);
+    let cw = c.text(F::Bold, &change, change_px, x + w - 20.0, y + 64.0, col, Align::Right);
+    arrow(c, q.change() >= 0.0, x + w - 20.0 - cw - 12.0, y + 64.0 - change_px * 0.36, change_px * 0.75, col);
+    let left_w = (iw - pw.max(cw + 22.0) - 16.0).max(60.0);
+    let sw = c.fit(F::Bold, &q.symbol, 22.0, left_w, ix, y + 36.0, TEXT, Align::Left);
+    if !q.open && sw + 80.0 < left_w {
+        c.pill(ix + sw + 10.0, y + 18.0, "CLOSED", 11.0, 0x2A2A31, MUTED);
     }
-    arrow(c, q.change() >= 0.0, ix + 7.0, cy - 6.0, 13.0, col);
-    let cw = c.fit(F::Bold, &change_text(q), 17.0, iw - 20.0, ix + 20.0, cy, col, Align::Left);
-    let now = v.now_ms / 1000;
-    // The longer view: beside today's change when there's room, else under it.
-    let beside = ix + 20.0 + cw + 22.0;
-    let top = if x + w - 20.0 - beside > 260.0 {
-        strip(c, q, &v.stocks.extra, now, beside, cy, x + w - 20.0 - beside);
-        cy + 14.0
-    } else {
-        strip(c, q, &v.stocks.extra, now, ix, cy + 22.0, iw);
-        cy + 32.0
-    };
-    let bottom = y + h - 14.0;
-    if bottom - top > 24.0 {
-        spark(c, (ix, top, iw, bottom - top), &q.series, q.prev_close, col);
+    c.clip(F::Medium, &q.name, 14.0, left_w, ix, y + 60.0, MUTED);
+    let mut top = y + 78.0;
+    if tall {
+        let mut parts: Vec<String> = Vec::new();
+        if q.day_low > 0.0 && q.day_high > 0.0 {
+            parts.push(format!("Day {} – {}", price(q.day_low), price(q.day_high)));
+        }
+        if q.low_52w > 0.0 && q.high_52w > 0.0 {
+            parts.push(format!("52w {} – {}", price(q.low_52w), price(q.high_52w)));
+        }
+        if q.volume > 0 {
+            parts.push(format!("Vol {}", volume(q.volume)));
+        }
+        c.clip(F::Medium, &parts.join("   ·   "), 13.0, iw, ix, y + 92.0, FAINT);
+        top = y + 106.0;
+    }
+    // The four scales.
+    let area = (ix - 6.0, top, iw + 12.0, y + h - 10.0 - top);
+    let cols = if area.2 / area.3 > 2.4 { 4 } else { 2 };
+    let rows = 4 / cols;
+    let mw = (area.2 - (cols as f32 - 1.0) * 8.0) / cols as f32;
+    let mh = (area.3 - (rows as f32 - 1.0) * 8.0) / rows as f32;
+    for (k, range) in Range::PANES.into_iter().enumerate() {
+        let (row, colk) = (k / cols, k % cols);
+        mini(c, v, q, range, (area.0 + colk as f32 * (mw + 8.0), area.1 + row as f32 * (mh + 8.0), mw, mh));
     }
 }
 

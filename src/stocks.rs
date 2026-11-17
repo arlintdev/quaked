@@ -231,6 +231,11 @@ fn run(mut cfg: Cfg, rx: Receiver<Cmd>, emit: impl Fn(Update)) {
                     })
                     .collect();
                 st.extra.retain(|c| st.quotes.iter().any(|q| q.symbol == c.symbol));
+                // 5D for every card's mini chart (the opened stock also gets 5Y).
+                let syms: Vec<String> = st.quotes.iter().filter(|q| q.error.is_none()).map(|q| q.symbol.clone()).collect();
+                for sym in syms {
+                    refresh_extra(&mut st, &sym, Range::Week);
+                }
                 st.loaded = true;
                 st.updated_ms = now_ms;
             } else {
@@ -241,22 +246,15 @@ fn run(mut cfg: Cfg, rx: Receiver<Cmd>, emit: impl Fn(Update)) {
         }
         if let Some(symbol) = open.take() {
             for range in [Range::Week, Range::FiveYear] {
-                let Some((r, i, fresh)) = range.own_fetch() else { continue };
-                let now_ms = crate::status::now_ms();
-                let have = st.extra.iter().any(|c| c.symbol == symbol && c.range == range && !c.loading && now_ms.saturating_sub(c.at_ms) < fresh.as_millis() as u64);
-                if have {
-                    continue;
+                if !fresh_extra(&st, &symbol, range) {
+                    // Show "loading…" only when there's nothing to show yet.
+                    if !st.extra.iter().any(|c| c.symbol == symbol && c.range == range) {
+                        st.extra.push(Chart { symbol: symbol.clone(), range, points: Vec::new(), loading: true, at_ms: crate::status::now_ms() });
+                        emit(Update::Status(st.clone()));
+                    }
+                    refresh_extra(&mut st, &symbol, range);
+                    emit(Update::Status(st.clone()));
                 }
-                st.extra.retain(|c| !(c.symbol == symbol && c.range == range));
-                st.extra.push(Chart { symbol: symbol.clone(), range, points: Vec::new(), loading: true, at_ms: now_ms });
-                emit(Update::Status(st.clone()));
-                let points = fetch(&symbol, r, i).map(|q| q.series).unwrap_or_default();
-                if let Some(c) = st.extra.iter_mut().find(|c| c.symbol == symbol && c.range == range) {
-                    c.points = points;
-                    c.loading = false;
-                    c.at_ms = crate::status::now_ms();
-                }
-                emit(Update::Status(st.clone()));
             }
         }
         match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
@@ -277,6 +275,33 @@ fn run(mut cfg: Cfg, rx: Receiver<Cmd>, emit: impl Fn(Update)) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+/// The separately fetched `range` for `symbol` is there and not stale.
+fn fresh_extra(st: &Status, symbol: &str, range: Range) -> bool {
+    let Some((_, _, fresh)) = range.own_fetch() else { return true };
+    let now_ms = crate::status::now_ms();
+    st.extra.iter().any(|c| c.symbol == symbol && c.range == range && !c.loading && !c.points.is_empty() && now_ms.saturating_sub(c.at_ms) < fresh.as_millis() as u64)
+}
+
+/// Fetches `range` for `symbol` unless it's fresh; a failed fetch keeps what was there.
+fn refresh_extra(st: &mut Status, symbol: &str, range: Range) {
+    let Some((r, i, _)) = range.own_fetch() else { return };
+    if fresh_extra(st, symbol, range) {
+        return;
+    }
+    let points = fetch(symbol, r, i).map(|q| q.series).unwrap_or_default();
+    let now_ms = crate::status::now_ms();
+    match st.extra.iter_mut().find(|c| c.symbol == symbol && c.range == range) {
+        Some(c) => {
+            if !points.is_empty() {
+                c.points = points;
+                c.at_ms = now_ms;
+            }
+            c.loading = false;
+        }
+        None => st.extra.push(Chart { symbol: symbol.to_string(), range, points, loading: false, at_ms: now_ms }),
     }
 }
 
