@@ -138,6 +138,9 @@ struct Ask {
     mark_after: Instant,
     /// A permission prompt: (tag, what exactly, Claude's description).
     perm: Option<(String, String, String)>,
+    /// A next-step question (the desktop app's box): the session has already finished its
+    /// turn, so it's answered elsewhere once you send the session something new.
+    next: bool,
 }
 
 /// A Mac waiting for you to allow pairing (on the board or the settings page).
@@ -996,6 +999,7 @@ impl App {
                 until: Instant::now(),
                 shown: Instant::now(),
                 perm: Some((text(&v, "tag"), text(&v, "detail"), text(&v, "description"))),
+                next: false,
                 session_id: text(&v, "sessionId"),
                 mark: None,
                 mark_after: Instant::now(),
@@ -1044,6 +1048,7 @@ impl App {
             until: Instant::now() + Duration::from_secs(self.cfg.ask.timeout_seconds.clamp(15, 580)),
             shown: Instant::now(),
             perm: None,
+            next: v["kind"] == "next",
             session_id: text(&v, "sessionId"),
             mark: None,
             mark_after: Instant::now(),
@@ -1077,7 +1082,8 @@ impl App {
         }
         if ask.machine.is_empty() {
             // This Mac's session: read it fresh (the hook wrote it just before asking).
-            ask.mark = status::load(status::now_ms()).iter().find(|s| s.id == ask.session_id).map(progress);
+            let next = ask.next;
+            ask.mark = status::load(status::now_ms()).iter().find(|s| s.id == ask.session_id).map(|s| ask_mark(next, s));
         } else {
             // The other Mac's sessions sync every 2 seconds: start watching after that.
             ask.mark_after = Instant::now() + Duration::from_secs(4);
@@ -1089,7 +1095,7 @@ impl App {
         let mut gone = Vec::new();
         for (i, a) in self.asks.iter_mut().enumerate() {
             let Some(s) = self.sessions.iter().find(|s| s.id == a.session_id) else { continue };
-            let now = progress(s);
+            let now = ask_mark(a.next, s);
             match a.mark {
                 None if !a.session_id.is_empty() && Instant::now() >= a.mark_after => a.mark = Some(now),
                 Some(m) if m != now => gone.push(i),
@@ -2267,6 +2273,18 @@ impl ApplicationHandler<Event> for App {
 
 /// How far along a session is, ignoring "needs your permission" notices: steps taken,
 /// tools still running, turn finished.
+/// How far along a session is, for telling when a prompt on the Quake was answered on the
+/// Mac. A next-step question comes after the turn ends, so only something new you send
+/// (your latest prompt's time) counts; anything else counts any progress.
+fn ask_mark(next: bool, s: &Session) -> (u32, usize, bool) {
+    if next {
+        let last_prompt = s.steps.iter().rev().find(|st| st.tag == "you").map(|st| st.ts / 1000).unwrap_or(0);
+        (last_prompt as u32, 0, false)
+    } else {
+        progress(s)
+    }
+}
+
 fn progress(s: &Session) -> (u32, usize, bool) {
     (s.step_count, s.steps.iter().filter(|st| st.status == status::StepStatus::Running).count(), matches!(s.state, State::Done | State::Idle))
 }

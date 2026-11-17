@@ -586,6 +586,7 @@ fn main() {
         "hook" => status::hook(),
         "ask" => status::ask_hook(),
         "permit" => status::permit_hook(),
+        "nextstep" => status::next_step_hook(),
         "settings" | "ui" => {
             let _ = std::process::Command::new("/usr/bin/open").arg(web::url()).status();
         }

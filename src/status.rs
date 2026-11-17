@@ -627,6 +627,68 @@ pub fn permit_hook() {
     println!("{}", serde_json::json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}));
 }
 
+/// The buttons of a next-step box as labels: a reply's own words, or an app action's name.
+pub fn next_step_options(actions: &Value) -> Vec<String> {
+    let name = |a: &str| match a {
+        "commit" => "Commit".to_string(),
+        "create_pr" => "Create a PR".to_string(),
+        "merge" => "Merge".to_string(),
+        "fix_ci" => "Fix CI".to_string(),
+        "address_comments" => "Address comments".to_string(),
+        "resolve_conflicts" => "Resolve conflicts".to_string(),
+        "verify" => "Verify".to_string(),
+        "archive" => "Archive".to_string(),
+        "new_session" => "New session".to_string(),
+        other => other.replace('_', " "),
+    };
+    actions
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|b| match b.get("action").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    Some(action) => Some(name(action)),
+                    None => b.get("label").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+                })
+                .take(4)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the session is told when you answer its next-step question on the Quake.
+pub fn next_step_wake(question: &str, label: &str) -> String {
+    format!("The user answered your next-step question on their Quake desk screen. Question: \"{question}\". Their answer: \"{label}\". Treat it as their reply and carry on.")
+}
+
+/// `quaked nextstep`: a background (asyncRewake) PostToolUse hook on the desktop app's
+/// next-step tool. Shows its question on the Quake next to the app's own buttons; when you
+/// answer on the Quake it exits 2 with your answer on stderr, which wakes the session with
+/// it. Answered in the app first, dismissed or timed out: exits 0 and says nothing.
+pub fn next_step_hook() {
+    use std::io::Read;
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let Ok(input) = serde_json::from_str::<Value>(&raw) else { return };
+    let tool_input = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    let question = tool_input.get("ask").and_then(Value::as_str).map(str::trim).unwrap_or("").to_string();
+    let options = next_step_options(tool_input.get("actions").unwrap_or(&Value::Null));
+    if question.is_empty() || options.is_empty() {
+        return;
+    }
+    let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let session_id = input.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let payload = serde_json::json!({
+        "kind": "next",
+        "session": project_name(cwd),
+        "sessionId": session_id,
+        "questions": [{"question": question, "header": "Next step", "options": options, "multiSelect": false}],
+    });
+    let Some(reply) = ask_board(&payload) else { return };
+    let Some(label) = reply.get("answers").and_then(Value::as_object).and_then(|a| a.values().next()).and_then(Value::as_str) else { return };
+    eprintln!("{}", next_step_wake(&question, label));
+    std::process::exit(2);
+}
+
 /// `quaked hook`: called by Claude Code with the hook payload on stdin. Prints nothing
 /// and always exits 0, so it can never block or alter a session.
 pub fn hook() {
@@ -667,17 +729,25 @@ pub fn hook() {
 /// The hooks quaked installs: (event, tool matcher, `quaked` subcommand, timeout seconds).
 /// `quaked permit` mirrors Claude's questions and permission prompts on the Quake, next to
 /// Claude's own prompt (whichever you answer first applies), so it may wait.
-const HOOK_EVENTS: [(&str, Option<&str>, &str, u32); 9] = [
-    ("SessionStart", None, "hook", 5),
-    ("UserPromptSubmit", None, "hook", 5),
-    ("PreToolUse", Some("*"), "hook", 5),
-    ("PermissionRequest", Some("*"), "permit", 600),
-    ("PostToolUse", Some("*"), "hook", 5),
-    ("PostToolUseFailure", Some("*"), "hook", 5),
-    ("Notification", None, "hook", 5),
-    ("Stop", None, "hook", 5),
-    ("SessionEnd", None, "hook", 5),
+/// (event, matcher, quaked subcommand, timeout, runs in the background and may wake the
+/// session: asyncRewake).
+const HOOK_EVENTS: [(&str, Option<&str>, &str, u32, bool); 10] = [
+    ("SessionStart", None, "hook", 5, false),
+    ("UserPromptSubmit", None, "hook", 5, false),
+    ("PreToolUse", Some("*"), "hook", 5, false),
+    ("PermissionRequest", Some("*"), "permit", 600, false),
+    ("PostToolUse", Some("*"), "hook", 5, false),
+    // Claude's next-step question (the desktop app's box): shown on the Quake in the
+    // background; a knob answer wakes the session with it.
+    ("PostToolUse", Some(NEXT_STEP_TOOL), "nextstep", 600, true),
+    ("PostToolUseFailure", Some("*"), "hook", 5, false),
+    ("Notification", None, "hook", 5, false),
+    ("Stop", None, "hook", 5, false),
+    ("SessionEnd", None, "hook", 5, false),
 ];
+
+/// The desktop app's "next step" tool: a recap, and maybe a question with buttons.
+pub const NEXT_STEP_TOOL: &str = "mcp__ccd_turn__wrap_up";
 
 /// Adds quaked's hooks to `settings` where they aren't yet (`binary` is the path to the
 /// quaked binary). Returns what it added. Everything else in the file is left as it is.
@@ -696,7 +766,7 @@ fn merge_hooks(settings: &mut serde_json::Value, binary: &str) -> Result<Vec<Str
         }
     }
     hooks.retain(|_, g| g.as_array().is_none_or(|a| !a.is_empty()));
-    for (event, matcher, sub, timeout) in HOOK_EVENTS {
+    for (event, matcher, sub, timeout, rewake) in HOOK_EVENTS {
         let groups = hooks.entry(event).or_insert_with(|| json!([]));
         let groups = groups.as_array_mut().ok_or(format!("hooks.{event} isn't a list"))?;
         let wanted = format!("quaked {sub}");
@@ -708,7 +778,10 @@ fn merge_hooks(settings: &mut serde_json::Value, binary: &str) -> Result<Vec<Str
         if present {
             continue;
         }
-        let entry = json!({"type": "command", "command": format!("{binary} {sub}"), "timeout": timeout});
+        let mut entry = json!({"type": "command", "command": format!("{binary} {sub}"), "timeout": timeout});
+        if rewake {
+            entry["asyncRewake"] = json!(true);
+        }
         groups.push(match matcher {
             Some(m) => json!({"matcher": m, "hooks": [entry]}),
             None => json!({"hooks": [entry]}),
@@ -780,11 +853,25 @@ mod tests {
     }
 
     #[test]
+    fn next_step_buttons_and_wake() {
+        let actions = serde_json::json!([{"label": "Push it"}, {"action": "commit", "label": "ignored"}, {"label": "  "}, {"action": "create_pr"}]);
+        assert_eq!(next_step_options(&actions), ["Push it", "Commit", "Create a PR"]);
+        assert!(next_step_options(&serde_json::Value::Null).is_empty());
+        let w = next_step_wake("Push to GitHub?", "Push it");
+        assert!(w.contains("\"Push to GitHub?\"") && w.contains("\"Push it\""));
+    }
+
+    #[test]
     fn merging_hooks_keeps_everything_else_and_is_idempotent() {
         let mut v: serde_json::Value = serde_json::from_str(r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#).unwrap();
         let added = merge_hooks(&mut v, "/h/.local/bin/quaked").unwrap();
-        assert_eq!(added.len(), 9);
+        assert_eq!(added.len(), 10);
         assert_eq!(v["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], "/h/.local/bin/quaked permit");
+        let next = &v["hooks"]["PostToolUse"][1];
+        assert_eq!(next["matcher"], NEXT_STEP_TOOL);
+        assert_eq!(next["hooks"][0]["command"], "/h/.local/bin/quaked nextstep");
+        assert_eq!(next["hooks"][0]["asyncRewake"], true);
+        assert!(v["hooks"]["PostToolUse"][0]["hooks"][0].get("asyncRewake").is_none());
         assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 1, "no blocking question hook");
         assert_eq!(v["model"], "opus");
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2, "kept the existing Stop hook");
