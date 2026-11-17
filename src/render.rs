@@ -4,8 +4,12 @@
 //! Pages (the knob switches them at the top level): AI and Music.
 //! Levels: Top (just looking) -> Focus (knob drives the page) -> Detail (one session).
 
+use crate::audio;
+use crate::config::{Action, PageId, Shortcut};
+use crate::{docker, league};
 use crate::music::Track;
 use crate::status::{Session, State, Step, StepStatus};
+use crate::symbols::Symbols;
 use fontdue::{Font, FontSettings, Metrics};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,11 +26,7 @@ const DETAIL_ROW_H: f32 = 30.0;
 const DETAIL_ROWS_TOP: f32 = CY + 46.0;
 pub const DETAIL_ROWS: usize = ((CH - 56.0) / DETAIL_ROW_H) as usize;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Page {
-    Ai,
-    Music,
-}
+pub type Page = PageId;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Level {
@@ -45,10 +45,32 @@ pub enum Hit {
     PlayPause,
     Next,
     Volume(f32),
+    Shortcut(usize),
+    Clip(usize),
+    StopAll,
+    MicMute,
+    LeagueAuto,
+    LeagueAccept,
+    LeagueDecline,
+    LeagueFind,
+    LeagueCancel,
+    Container(usize),
+    DockerAction(&'static str),
+    DockerBack,
 }
 
 pub struct View<'a> {
+    pub pages: &'a [Page],
     pub page: Page,
+    /// The current page's ring color, used as its accent on screen.
+    pub accent: u32,
+    pub shortcuts: &'a [Shortcut],
+    pub sounds: &'a audio::Status,
+    /// Selected tile on the Shortcuts / Sounds pages, or container on the Docker page.
+    pub tile: usize,
+    pub league: &'a league::Status,
+    pub league_cfg: &'a crate::config::League,
+    pub docker: &'a docker::Status,
     pub level: &'a Level,
     pub sessions: &'a [Session],
     pub sel: usize,
@@ -291,6 +313,7 @@ pub struct Canvas<'a> {
     pub pixmap: Pixmap,
     scale: f32,
     fonts: &'a Fonts,
+    symbols: &'a Symbols,
 }
 
 fn rrect_path((x, y, w, h): R, r: f32) -> Option<tiny_skia::Path> {
@@ -310,10 +333,42 @@ fn rrect_path((x, y, w, h): R, r: f32) -> Option<tiny_skia::Path> {
 }
 
 impl<'a> Canvas<'a> {
-    pub fn new(width: u32, height: u32, fonts: &'a Fonts) -> Canvas<'a> {
+    pub fn new(width: u32, height: u32, fonts: &'a Fonts, symbols: &'a Symbols) -> Canvas<'a> {
         let pixmap = Pixmap::new(width.max(1), height.max(1)).unwrap();
         let scale = (width as f32 / W).min(height as f32 / H);
-        Canvas { pixmap, scale, fonts }
+        Canvas { pixmap, scale, fonts, symbols }
+    }
+
+    /// Draws an SF Symbol centered on (cx, cy), tinted. Returns false if the name is unknown.
+    fn symbol(&mut self, name: &str, px: f32, cx: f32, cy: f32, color: u32) -> bool {
+        let Some(mask) = self.symbols.get(name, px * self.scale) else { return false };
+        let (cr, cg, cb) = ((color >> 16) as u8 as f32, (color >> 8) as u8 as f32, color as u8 as f32);
+        let x0 = (cx * self.scale - mask.w as f32 / 2.0).round() as i32;
+        let y0 = (cy * self.scale - mask.h as f32 / 2.0).round() as i32;
+        let pw = self.pixmap.width() as i32;
+        let ph = self.pixmap.height() as i32;
+        let data = self.pixmap.data_mut();
+        for y in 0..mask.h as i32 {
+            let py = y0 + y;
+            if py < 0 || py >= ph {
+                continue;
+            }
+            for x in 0..mask.w as i32 {
+                let px_ = x0 + x;
+                if px_ < 0 || px_ >= pw {
+                    continue;
+                }
+                let a = mask.alpha[(y * mask.w as i32 + x) as usize] as f32 / 255.0;
+                if a <= 0.0 {
+                    continue;
+                }
+                let i = ((py * pw + px_) * 4) as usize;
+                data[i] = (cr * a + data[i] as f32 * (1.0 - a)) as u8;
+                data[i + 1] = (cg * a + data[i + 1] as f32 * (1.0 - a)) as u8;
+                data[i + 2] = (cb * a + data[i + 2] as f32 * (1.0 - a)) as u8;
+            }
+        }
+        true
     }
 
     fn sr(&self, (x, y, w, h): R) -> R {
@@ -483,11 +538,110 @@ impl<'a> Canvas<'a> {
 
 // ---------------------------------------------------------------- layout
 
-fn tab_rect(p: Page) -> R {
+fn tab_width(p: Page) -> f32 {
     match p {
-        Page::Ai => (M, 9.0, 84.0, 34.0),
-        Page::Music => (M + 92.0, 9.0, 120.0, 34.0),
+        Page::Ai => 70.0,
+        Page::Music => 104.0,
+        Page::Shortcuts => 150.0,
+        Page::Soundboard => 112.0,
+        Page::League => 104.0,
+        Page::Docker => 108.0,
     }
+}
+
+fn tab_rect(pages: &[Page], p: Page) -> R {
+    let mut x = M;
+    for q in pages {
+        if *q == p {
+            return (x, 9.0, tab_width(p), 34.0);
+        }
+        x += tab_width(*q) + 8.0;
+    }
+    (-1000.0, 0.0, 0.0, 0.0)
+}
+
+fn tabs_end(pages: &[Page]) -> f32 {
+    M + pages.iter().map(|p| tab_width(*p) + 8.0).sum::<f32>()
+}
+
+// Shortcuts: 2 rows x 8 tiles.
+pub const SC_COLS: usize = 8;
+pub const SC_ROWS: usize = 2;
+fn shortcut_rect(i: usize) -> R {
+    let w = (W - 2.0 * M - (SC_COLS as f32 - 1.0) * G) / SC_COLS as f32;
+    let h = (CH - G) / SC_ROWS as f32;
+    let (r, c) = (i / SC_COLS, i % SC_COLS);
+    (M + c as f32 * (w + G), CY + r as f32 * (h + G), w, h)
+}
+
+// Sounds: a status strip, then 2 rows x 6 clip tiles.
+pub const CLIP_COLS: usize = 6;
+pub const CLIP_ROWS: usize = 2;
+const STRIP_H: f32 = 50.0;
+fn stop_all_button() -> R {
+    (W - M - 150.0, CY, 150.0, STRIP_H - 6.0)
+}
+fn mic_button() -> R {
+    (W - M - 150.0 - 10.0 - 190.0, CY, 190.0, STRIP_H - 6.0)
+}
+fn clip_rect(slot: usize) -> R {
+    let top = CY + STRIP_H + 6.0;
+    let w = (W - 2.0 * M - (CLIP_COLS as f32 - 1.0) * G) / CLIP_COLS as f32;
+    let h = (CY + CH - top - G) / CLIP_ROWS as f32;
+    let (r, c) = (slot / CLIP_COLS, slot % CLIP_COLS);
+    (M + c as f32 * (w + G), top + r as f32 * (h + G), w, h)
+}
+// League
+const LEAGUE_LEFT_W: f32 = 430.0;
+fn league_auto_button() -> R {
+    (M + 24.0, CY + CH - 132.0, LEAGUE_LEFT_W - 48.0, 70.0)
+}
+fn league_main() -> R {
+    (M + LEAGUE_LEFT_W + G, CY, W - 2.0 * M - LEAGUE_LEFT_W - G, CH)
+}
+fn league_primary() -> R {
+    let (x, y, _, h) = league_main();
+    (x + 32.0, y + h - 100.0, 280.0, 72.0)
+}
+fn league_secondary() -> R {
+    let (x, y, _, h) = league_main();
+    (x + 32.0 + 296.0, y + h - 100.0, 240.0, 72.0)
+}
+
+// Docker
+const DOCKER_STRIP_H: f32 = 48.0;
+fn container_rect(slot: usize, cols: usize) -> R {
+    let (x, _, w, _) = col_rect(slot, cols);
+    (x, CY + DOCKER_STRIP_H + 6.0, w, CH - DOCKER_STRIP_H - 6.0)
+}
+fn docker_actions() -> [(R, &'static str); 3] {
+    let y = CY + CH - 58.0;
+    [((M + 24.0, y, 150.0, 42.0), "primary"), ((M + 184.0, y, 150.0, 42.0), "restart"), ((M + 344.0, y, 150.0, 42.0), "pause")]
+}
+fn docker_back() -> R {
+    (M + 24.0, CY + CH - 112.0, 120.0, 42.0)
+}
+pub const LOG_ROW_H: f32 = 21.0;
+pub const LOG_ROWS: usize = ((CH - 56.0) / LOG_ROW_H) as usize;
+
+/// What the Docker detail buttons do for a container in this state.
+pub fn docker_button_action(state: &str, which: &str) -> &'static str {
+    match which {
+        "primary" => if state == "running" || state == "paused" || state == "restarting" { "stop" } else { "start" },
+        "restart" => "restart",
+        _ => if state == "paused" { "unpause" } else { "pause" },
+    }
+}
+
+/// First clip shown, in whole rows, so that `sel` is visible.
+pub fn clip_window(n: usize, sel: usize) -> usize {
+    let per = CLIP_COLS * CLIP_ROWS;
+    if n <= per {
+        return 0;
+    }
+    let row = sel / CLIP_COLS;
+    let first_row = row.saturating_sub(CLIP_ROWS - 1);
+    (first_row * CLIP_COLS).min(n.div_ceil(CLIP_COLS).saturating_sub(CLIP_ROWS) * CLIP_COLS)
 }
 
 fn columns(n: usize) -> usize {
@@ -548,12 +702,48 @@ fn volume_hit() -> R {
 
 pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
     let (x, y) = (x as f32, y as f32);
-    for p in [Page::Ai, Page::Music] {
-        if inside(tab_rect(p), x, y) {
-            return Some(Hit::Tab(p));
+    for p in v.pages {
+        if inside(tab_rect(v.pages, *p), x, y) {
+            return Some(Hit::Tab(*p));
         }
     }
     match (v.page, v.level) {
+        (Page::League, _) => {
+            let l = v.league;
+            if inside(league_auto_button(), x, y) {
+                return Some(Hit::LeagueAuto);
+            }
+            match l.phase.as_str() {
+                "ReadyCheck" if inside(league_primary(), x, y) => Some(Hit::LeagueAccept),
+                "ReadyCheck" if inside(league_secondary(), x, y) => Some(Hit::LeagueDecline),
+                "Lobby" if inside(league_primary(), x, y) => Some(Hit::LeagueFind),
+                "Matchmaking" if inside(league_primary(), x, y) => Some(Hit::LeagueCancel),
+                _ => None,
+            }
+        }
+        (Page::Docker, Level::Detail(id)) => {
+            if inside(docker_back(), x, y) {
+                return Some(Hit::DockerBack);
+            }
+            let state = v.docker.containers.iter().find(|c| &c.id == id).map(|c| c.state.as_str()).unwrap_or("");
+            docker_actions().into_iter().find(|(r, _)| inside(*r, x, y)).map(|(_, which)| Hit::DockerAction(docker_button_action(state, which)))
+        }
+        (Page::Docker, _) => {
+            let n = v.docker.containers.len();
+            let (first, cols) = window(n, v.tile);
+            (0..cols).find(|&slot| inside(container_rect(slot, cols), x, y)).map(|slot| first + slot).filter(|&i| i < n).map(Hit::Container)
+        }
+        (Page::Shortcuts, _) => (0..v.shortcuts.len().min(SC_COLS * SC_ROWS)).find(|&i| inside(shortcut_rect(i), x, y)).map(Hit::Shortcut),
+        (Page::Soundboard, _) => {
+            if inside(stop_all_button(), x, y) {
+                return Some(Hit::StopAll);
+            }
+            if inside(mic_button(), x, y) {
+                return Some(Hit::MicMute);
+            }
+            let first = clip_window(v.sounds.clips.len(), v.tile);
+            (0..CLIP_COLS * CLIP_ROWS).find(|&s| inside(clip_rect(s), x, y)).map(|s| first + s).filter(|&i| i < v.sounds.clips.len()).map(Hit::Clip)
+        }
         (Page::Ai, Level::Detail(_)) => {
             if inside(back_button(), x, y) {
                 Some(Hit::Back)
@@ -586,7 +776,20 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
 
 fn hit_rect(v: &View, h: Hit) -> Option<R> {
     Some(match h {
-        Hit::Tab(p) => tab_rect(p),
+        Hit::Tab(p) => tab_rect(v.pages, p),
+        Hit::Shortcut(i) => shortcut_rect(i),
+        Hit::Clip(i) => clip_rect(i.checked_sub(clip_window(v.sounds.clips.len(), v.tile))?),
+        Hit::StopAll => stop_all_button(),
+        Hit::MicMute => mic_button(),
+        Hit::LeagueAuto => league_auto_button(),
+        Hit::LeagueAccept | Hit::LeagueFind | Hit::LeagueCancel => league_primary(),
+        Hit::LeagueDecline => league_secondary(),
+        Hit::Container(i) => {
+            let (first, cols) = window(v.docker.containers.len(), v.tile);
+            container_rect(i.checked_sub(first)?, cols)
+        }
+        Hit::DockerAction(_) => return None,
+        Hit::DockerBack => docker_back(),
         Hit::Session(i) => {
             let (first, cols) = window(v.sessions.len(), v.sel);
             col_rect(i.checked_sub(first)?, cols)
@@ -612,6 +815,14 @@ pub fn draw(c: &mut Canvas, v: &View) {
         },
         (Page::Ai, _) => ai_overview(c, v),
         (Page::Music, _) => music(c, v),
+        (Page::Shortcuts, _) => shortcuts(c, v),
+        (Page::Soundboard, _) => soundboard(c, v),
+        (Page::League, _) => league_page(c, v),
+        (Page::Docker, Level::Detail(id)) => match v.docker.containers.iter().find(|ct| &ct.id == id) {
+            Some(ct) => docker_detail(c, v, ct),
+            None => docker_page(c, v),
+        },
+        (Page::Docker, _) => docker_page(c, v),
     }
     if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
         c.rrect(r, 14.0, 0xFFFFFF, 0.22);
@@ -625,49 +836,53 @@ fn hints(v: &View) -> &'static str {
         (Page::Ai, Level::Focus) => "turn  choose   ·   press  open   ·   double-click  back",
         (Page::Ai, Level::Detail(_)) => "turn  scroll   ·   press  open in Claude   ·   double-click  back",
         (Page::Music, _) => "turn  volume   ·   press  play / pause   ·   double-click  back",
+        (Page::Shortcuts, Level::Top) => "turn  switch page   ·   press  pick a shortcut   ·   tap  run",
+        (Page::Shortcuts, _) => "turn  choose   ·   press  run   ·   double-click  back",
+        (Page::Soundboard, Level::Top) => "turn  switch page   ·   press  pick a clip   ·   tap  play",
+        (Page::Soundboard, _) => "turn  choose   ·   press  play / stop   ·   double-click  back",
+        (Page::League, Level::Top) => "turn  switch page   ·   press  controls",
+        (Page::League, _) => "press  accept / find / cancel   ·   double-click  back",
+        (Page::Docker, Level::Top) => "turn  switch page   ·   press  pick a container",
+        (Page::Docker, Level::Focus) => "turn  choose   ·   press  open   ·   double-click  back",
+        (Page::Docker, Level::Detail(_)) => "turn  scroll logs   ·   press  refresh   ·   double-click  back",
     }
 }
 
 fn top_bar(c: &mut Canvas, v: &View) {
     let waiting = v.sessions.iter().filter(|s| s.state == State::Waiting).count();
-    for p in [Page::Ai, Page::Music] {
-        let r = tab_rect(p);
+    for p in v.pages {
+        let p = *p;
+        let r = tab_rect(v.pages, p);
         let active = v.page == p;
         c.rrect(r, 17.0, if active { TEXT } else { 0x1C1C21 }, 1.0);
-        let label = if p == Page::Ai { "AI" } else { "MUSIC" };
-        c.text(F::Bold, label, 17.0, r.0 + r.2 / 2.0, r.1 + 23.5, if active { 0x111114 } else { MUTED }, Align::Center);
+        c.text(F::Bold, p.label(), 16.0, r.0 + r.2 / 2.0, r.1 + 23.0, if active { 0x111114 } else { MUTED }, Align::Center);
+        if active {
+            c.rrect((r.0 + 14.0, r.1 + r.3 + 3.0, r.2 - 28.0, 3.0), 1.5, v.accent, 1.0);
+        }
         if active && v.level != &Level::Top {
-            c.outline((r.0 - 3.0, r.1 - 3.0, r.2 + 6.0, r.3 + 6.0), 20.0, ORANGE, 2.0);
+            c.outline((r.0 - 3.0, r.1 - 3.0, r.2 + 6.0, r.3 + 6.0), 20.0, v.accent, 2.0);
         }
     }
-    if waiting > 0 {
-        let r = tab_rect(Page::Ai);
+    if waiting > 0 && v.pages.contains(&Page::Ai) {
+        let r = tab_rect(v.pages, Page::Ai);
         c.circle(r.0 + r.2 - 4.0, r.1 + 4.0, 11.0, AMBER, 1.0);
         c.text(F::Bold, &waiting.to_string(), 14.0, r.0 + r.2 - 4.0, r.1 + 9.0, 0x1C1500, Align::Center);
     }
 
     // Breadcrumb
-    let mut x = M + 232.0;
+    let crumb_x = tabs_end(v.pages) + 12.0;
+    let mut x = crumb_x;
     let crumb = match (v.page, v.level) {
         (Page::Ai, Level::Detail(id)) => v.sessions.iter().find(|s| &s.id == id).map(|s| format!("›  {}", s.name)),
         (Page::Ai, Level::Focus) => v.sessions.get(v.sel).map(|s| format!("›  choose  ·  {}", s.name)),
         (Page::Music, Level::Focus) => Some("›  controls".into()),
+        (Page::Shortcuts, Level::Focus) => v.shortcuts.get(v.tile).map(|s| format!("›  {}", s.title)),
+        (Page::Soundboard, Level::Focus) => v.sounds.clips.get(v.tile).map(|s| format!("›  {}", s.title)),
+        (Page::Docker, Level::Focus) => v.docker.containers.get(v.tile).map(|c| format!("›  choose  ·  {}", c.name)),
+        (Page::Docker, Level::Detail(id)) => v.docker.containers.iter().find(|c| &c.id == id).map(|c| format!("›  {}", c.name)),
         _ => None,
     };
-    if let Some(cb) = crumb {
-        x += c.fit(F::Bold, &cb, 20.0, 360.0, x, 33.0, TEXT, Align::Left) + 24.0;
-    }
-    let mut hx = x.max(M + 232.0);
-    for (i, part) in hints(v).split("   ·   ").enumerate() {
-        if i > 0 {
-            hx += c.text(F::Medium, "·", 15.0, hx + 10.0, 32.0, FAINT, Align::Left) + 20.0;
-        }
-        let (key, rest) = part.split_once("  ").unwrap_or((part, ""));
-        hx += c.text(F::Bold, key, 15.0, hx, 32.0, MUTED, Align::Left) + 6.0;
-        hx += c.text(F::Medium, rest, 15.0, hx, 32.0, FAINT, Align::Left);
-    }
-
-    // Right side: device / counts / now playing / clock
+    // Right side first (clock, counts, now playing), so the hints know how much room is left.
     let mut rx = W - M;
     rx -= c.text(F::Bold, v.clock, 22.0, rx, 34.0, 0xC9C9D1, Align::Right) + 24.0;
     let counts = [(State::Waiting, AMBER), (State::Working, ORANGE), (State::Done, GREEN)];
@@ -683,14 +898,36 @@ fn top_bar(c: &mut Canvas, v: &View) {
     if !v.connected {
         rx -= c.text(F::Medium, "device offline", 15.0, rx, 32.0, RED, Align::Right) + 20.0;
     }
-    if v.page == Page::Ai {
+    // Keep at least ~420px for the breadcrumb and hints.
+    let room_for_track = rx - (crumb_x + 420.0);
+    if v.page != Page::Music && room_for_track > 140.0 {
         if let Some(t) = v.track.filter(|t| t.playing) {
             let label = format!("{} — {}", t.title, t.artist);
-            let w = c.measure(F::Medium, &label, 15.0).min(340.0);
-            c.fit(F::Medium, &label, 15.0, 340.0, rx - w, 32.0, MUTED, Align::Left);
+            let max = room_for_track.min(320.0);
+            let w = c.measure(F::Medium, &label, 15.0).min(max);
+            c.fit(F::Medium, &label, 15.0, max, rx - w, 32.0, MUTED, Align::Left);
             let ix = rx - w - 18.0;
             c.poly(&[(ix, 21.0), (ix + 10.0, 27.0), (ix, 33.0)], SPOTIFY);
+            rx = ix - 16.0;
         }
+    }
+    let limit = rx - 16.0;
+
+    if let Some(cb) = crumb {
+        x += c.fit(F::Bold, &cb, 20.0, (limit - x).clamp(80.0, 360.0), x, 33.0, TEXT, Align::Left) + 24.0;
+    }
+    let mut hx = x.max(crumb_x);
+    for (i, part) in hints(v).split("   ·   ").enumerate() {
+        let (key, rest) = part.split_once("  ").unwrap_or((part, ""));
+        let need = if i > 0 { 26.0 } else { 0.0 } + c.measure(F::Bold, key, 15.0) + 6.0 + c.measure(F::Medium, rest, 15.0);
+        if hx + need > limit {
+            break;
+        }
+        if i > 0 {
+            hx += c.text(F::Medium, "·", 15.0, hx + 10.0, 32.0, FAINT, Align::Left) + 20.0;
+        }
+        hx += c.text(F::Bold, key, 15.0, hx, 32.0, MUTED, Align::Left) + 6.0;
+        hx += c.text(F::Medium, rest, 15.0, hx, 32.0, FAINT, Align::Left);
     }
     c.rect((M, CY - 6.0, W - 2.0 * M, 1.0), LINE, 1.0);
 }
@@ -941,9 +1178,481 @@ fn music(c: &mut Canvas, v: &View) {
     }
 }
 
+fn keys_label(a: &Action) -> String {
+    match a {
+        Action::Keys { keys } => keys.clone(),
+        Action::Open { target } => target.rsplit('/').next().unwrap_or(target).trim_end_matches(".app").to_string(),
+        Action::Shortcut { name } => format!("shortcut: {name}"),
+        Action::Shell { command } => command.clone(),
+        Action::MicMute => "soundboard mic".into(),
+        Action::Media { command } => command.clone(),
+        Action::Clip { title } => format!("clip: {title}"),
+        Action::Page { page } => format!("page: {}", page.label().to_lowercase()),
+    }
+}
+
+fn shortcuts(c: &mut Canvas, v: &View) {
+    let focus = v.level == &Level::Focus;
+    for i in 0..SC_COLS * SC_ROWS {
+        let r = shortcut_rect(i);
+        let Some(sc) = v.shortcuts.get(i) else {
+            c.rrect(r, 16.0, PANEL_DEEP, 1.0);
+            continue;
+        };
+        let (x, y, w, h) = r;
+        let col = crate::config::hex(&sc.color, TEXT);
+        let active = matches!(sc.action, Action::MicMute) && v.sounds.mic_muted;
+        c.rrect(r, 16.0, if active { 0x3A1414 } else { PANEL }, 1.0);
+        if !c.symbol(&sc.symbol, 58.0, x + w / 2.0, y + h * 0.40, col) {
+            let initial: String = sc.title.chars().take(1).collect::<String>().to_uppercase();
+            c.circle(x + w / 2.0, y + h * 0.40, 34.0, col, 0.18);
+            c.text(F::Bold, &initial, 36.0, x + w / 2.0, y + h * 0.40 + 13.0, col, Align::Center);
+        }
+        c.fit(F::Bold, &sc.title, 20.0, w - 20.0, x + w / 2.0, y + h - 40.0, TEXT, Align::Center);
+        let label = keys_label(&sc.action);
+        let lw = c.measure(F::Mono, &label, 13.0).min(w - 24.0);
+        c.clip(F::Mono, &label, 13.0, w - 24.0, x + (w - lw) / 2.0, y + h - 16.0, FAINT);
+        if focus && i == v.tile {
+            c.outline(r, 16.0, v.accent, 3.0);
+        }
+    }
+    if v.shortcuts.is_empty() {
+        c.text(F::Medium, "No shortcuts yet: add some in Quaked Companion", 26.0, W / 2.0, CY + CH / 2.0, FAINT, Align::Center);
+    }
+}
+
+fn soundboard(c: &mut Canvas, v: &View) {
+    let s = v.sounds;
+    let focus = v.level == &Level::Focus;
+    // Status strip
+    let (label, detail, bg, fg) = if let Some(e) = &s.error {
+        ("CHECK SETUP", e.clone(), AMBER, 0x1C1500)
+    } else if s.live {
+        let who = s
+            .listener
+            .as_deref()
+            .map(|l| crate::symbols::running_app_name(l).unwrap_or_else(|| l.rsplit('.').next().unwrap_or(l).to_string()))
+            .unwrap_or_else(|| "always on".into());
+        ("LIVE ON MIC", format!("{who} hears your mic + clips"), GREEN, 0xFFFFFF)
+    } else {
+        ("NOT ON A CALL", "clips play only for you; pick BlackHole 2ch as your mic in the call app".to_string(), 0x2A2A31, TEXT)
+    };
+    let pw = c.pill(M, CY + 8.0, label, 15.0, bg, fg);
+    c.fit(F::Medium, &detail, 18.0, mic_button().0 - M - pw - 40.0, M + pw + 16.0, CY + 30.0, if s.error.is_some() { AMBER } else { TEXT_2 }, Align::Left);
+    let mr = mic_button();
+    c.rrect(mr, 12.0, if s.mic_muted { 0x4A1A1A } else { 0x1C1C21 }, 1.0);
+    let mic_sym = if s.mic_muted { "mic.slash.fill" } else { "mic.fill" };
+    c.symbol(mic_sym, 20.0, mr.0 + 26.0, mr.1 + mr.3 / 2.0, if s.mic_muted { RED } else { TEXT });
+    c.text(F::Medium, if s.mic_muted { "Mic muted" } else { "Mic on" }, 17.0, mr.0 + 48.0, mr.1 + 28.0, TEXT, Align::Left);
+    let sr = stop_all_button();
+    c.rrect(sr, 12.0, 0x1C1C21, 1.0);
+    c.symbol("stop.fill", 18.0, sr.0 + 26.0, sr.1 + sr.3 / 2.0, TEXT);
+    c.text(F::Medium, "Stop all", 17.0, sr.0 + 46.0, sr.1 + 28.0, TEXT, Align::Left);
+
+    if s.clips.is_empty() {
+        let top = CY + STRIP_H + 6.0;
+        c.rrect((M, top, W - 2.0 * M, CY + CH - top), 16.0, PANEL_DEEP, 1.0);
+        c.text(F::Medium, "No clips yet", 30.0, W / 2.0, top + 140.0, TEXT_2, Align::Center);
+        c.text(F::Regular, "Drop audio files into ~/Music/Quaked Soundboard, or add them in Quaked Companion.", 20.0, W / 2.0, top + 178.0, FAINT, Align::Center);
+        return;
+    }
+    let first = clip_window(s.clips.len(), v.tile);
+    for slot in 0..CLIP_COLS * CLIP_ROWS {
+        let r = clip_rect(slot);
+        let i = first + slot;
+        let Some(clip) = s.clips.get(i) else {
+            c.rrect(r, 14.0, PANEL_DEEP, 1.0);
+            continue;
+        };
+        let (x, y, w, h) = r;
+        let col = crate::config::hex(&clip.color, 0xB36BFF);
+        let playing = s.playing.contains(&i);
+        c.rrect(r, 14.0, PANEL, 1.0);
+        if playing {
+            c.rrect(r, 14.0, col, 0.28);
+            c.outline(r, 14.0, col, 2.0);
+        }
+        c.rrect((x, y, 6.0, h), 3.0, col, 1.0);
+        let sym = if clip.symbol.is_empty() { if playing { "speaker.wave.3.fill" } else { "waveform" } } else { clip.symbol.as_str() };
+        c.symbol(sym, 34.0, x + 46.0, y + 44.0, col);
+        if playing {
+            c.pill(x + w - 100.0, y + 18.0, "PLAYING", 12.0, col, 0x111114);
+        }
+        c.paragraph(F::Bold, &clip.title, 23.0, x + 22.0, y + 98.0, w - 40.0, 2, 28.0, TEXT);
+        if focus && i == v.tile {
+            c.outline(r, 14.0, TEXT, 3.0);
+        }
+    }
+    let hidden = s.clips.len().saturating_sub(first + CLIP_COLS * CLIP_ROWS);
+    if hidden > 0 {
+        let r = clip_rect(CLIP_COLS * CLIP_ROWS - 1);
+        let label = format!("{hidden} more ›");
+        let w = c.measure(F::Bold, &label, 15.0) + 15.0 * 1.4;
+        c.pill(r.0 + r.2 - w - 10.0, r.1 + r.3 - 38.0, &label, 15.0, 0x2A2A31, TEXT);
+    }
+}
+
+fn bytes(n: u64) -> String {
+    let f = n as f64;
+    if f >= 1e9 {
+        format!("{:.1} GB", f / 1_073_741_824.0)
+    } else if f >= 1e6 {
+        format!("{:.0} MB", f / 1_048_576.0)
+    } else {
+        format!("{:.0} KB", f / 1024.0)
+    }
+}
+
+fn button(c: &mut Canvas, r: R, label: &str, bg: u32, fg: u32, symbol: &str) {
+    c.rrect(r, 14.0, bg, 1.0);
+    let w = c.measure(F::Bold, label, 22.0) + if symbol.is_empty() { 0.0 } else { 40.0 };
+    let x0 = r.0 + (r.2 - w) / 2.0;
+    if !symbol.is_empty() {
+        c.symbol(symbol, 22.0, x0 + 14.0, r.1 + r.3 / 2.0, fg);
+    }
+    c.text(F::Bold, label, 22.0, x0 + if symbol.is_empty() { 0.0 } else { 40.0 }, r.1 + r.3 / 2.0 + 8.0, fg, Align::Left);
+}
+
+const GOLD: u32 = 0xC89B3C;
+
+fn position_name(p: &str) -> &str {
+    match p {
+        "TOP" | "top" => "Top",
+        "JUNGLE" | "jungle" => "Jungle",
+        "MIDDLE" | "middle" => "Mid",
+        "BOTTOM" | "bottom" => "Bot",
+        "UTILITY" | "utility" => "Support",
+        "" => "",
+        other => other,
+    }
+}
+
+fn league_page(c: &mut Canvas, v: &View) {
+    let l = v.league;
+    let focus = v.level == &Level::Focus;
+    // Left: who, client, auto-accept
+    let left = (M, CY, LEAGUE_LEFT_W, CH);
+    c.rrect(left, 14.0, PANEL, 1.0);
+    c.rrect((M, CY, 6.0, CH), 3.0, GOLD, 1.0);
+    let ix = M + 28.0;
+    c.text(F::Bold, "LEAGUE OF LEGENDS", 13.0, ix, CY + 36.0, FAINT, Align::Left);
+    match &l.summoner {
+        Some((name, level)) => {
+            c.fit(F::Bold, name, 32.0, LEAGUE_LEFT_W - 56.0, ix, CY + 80.0, TEXT, Align::Left);
+            c.text(F::Medium, &format!("level {level}"), 18.0, ix, CY + 108.0, MUTED, Align::Left);
+        }
+        None => {
+            c.text(F::Bold, if l.running { "Signed in" } else { "Not running" }, 30.0, ix, CY + 80.0, TEXT_2, Align::Left);
+        }
+    }
+    let (pl, pbg, pfg) = if l.running { ("CLIENT OPEN", GREEN, 0xFFFFFF) } else { ("CLIENT CLOSED", 0x2A2A31, MUTED) };
+    c.pill(ix, CY + 128.0, pl, 13.0, pbg, pfg);
+    let on = v.league_cfg.auto_accept;
+    let ar = league_auto_button();
+    c.rrect(ar, 16.0, if on { 0x3A2E12 } else { 0x1C1C21 }, 1.0);
+    if on {
+        c.outline(ar, 16.0, GOLD, 2.0);
+    }
+    // switch
+    let (sx, sy) = (ar.0 + 22.0, ar.1 + ar.3 / 2.0 - 15.0);
+    c.rrect((sx, sy, 56.0, 30.0), 15.0, if on { GOLD } else { 0x3A3A42 }, 1.0);
+    c.circle(if on { sx + 41.0 } else { sx + 15.0 }, sy + 15.0, 12.0, 0xFFFFFF, 1.0);
+    c.text(F::Bold, if on { "Auto-accept on" } else { "Auto-accept off" }, 22.0, sx + 74.0, ar.1 + 32.0, TEXT, Align::Left);
+    let sub = if on { format!("accepts after {:.1}s", v.league_cfg.accept_delay_ms as f32 / 1000.0) } else { "tap to turn on".to_string() };
+    c.text(F::Medium, &sub, 15.0, sx + 74.0, ar.1 + 54.0, MUTED, Align::Left);
+    if v.league_cfg.snap {
+        c.text(F::Medium, "jumps here when the queue pops", 15.0, ix, CY + CH - 26.0, FAINT, Align::Left);
+    }
+
+    // Main: the phase
+    let mr = league_main();
+    let (mx, my, mw, mh) = mr;
+    let ready = l.phase == "ReadyCheck";
+    c.rrect(mr, 14.0, if ready { 0x2E2410 } else { PANEL_DEEP }, 1.0);
+    if ready {
+        c.outline(mr, 14.0, GOLD, 3.0);
+    }
+    let tx = mx + 32.0;
+    if !l.running {
+        c.text(F::Bold, "League isn't running", 40.0, tx, my + 96.0, TEXT_2, Align::Left);
+        c.paragraph(F::Regular, "Start the League client. This page follows your queue, accepts the match for you and jumps here when one pops.", 22.0, tx, my + 140.0, mw - 64.0, 3, 30.0, MUTED);
+        return;
+    }
+    let queue = l.queue.clone().unwrap_or_default();
+    match l.phase.as_str() {
+        "Lobby" => {
+            c.text(F::Bold, "IN LOBBY", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.fit(F::Bold, if queue.is_empty() { "Ready to queue" } else { &queue }, 48.0, mw - 64.0, tx, my + 110.0, TEXT, Align::Left);
+            button(c, league_primary(), "Find match", GOLD, 0x1A1408, "magnifyingglass");
+            if focus {
+                c.outline(league_primary(), 14.0, TEXT, 3.0);
+            }
+        }
+        "Matchmaking" => {
+            c.text(F::Bold, "IN QUEUE", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            let (t, est) = l.search.unwrap_or((0.0, 0.0));
+            c.text(F::Bold, &mmss(t), 110.0, tx, my + 160.0, TEXT, Align::Left);
+            let detail = if est > 0.0 { format!("estimated {}   ·   {queue}", mmss(est)) } else { queue.clone() };
+            c.fit(F::Medium, &detail, 22.0, mw - 64.0, tx, my + 200.0, MUTED, Align::Left);
+            button(c, league_primary(), "Cancel", 0x2A2A31, TEXT, "xmark");
+            if focus {
+                c.outline(league_primary(), 14.0, TEXT, 3.0);
+            }
+        }
+        "ReadyCheck" => {
+            let rc = l.ready.clone().unwrap_or_default();
+            c.text(F::Bold, "MATCH FOUND", 76.0, tx, my + 110.0, GOLD, Align::Left);
+            let (label, col) = match rc.response.as_str() {
+                "Accepted" => (if l.accepted_by_quaked { "ACCEPTED  ·  by quaked".to_string() } else { "ACCEPTED".to_string() }, GREEN),
+                "Declined" => ("DECLINED".to_string(), RED),
+                _ if v.league_cfg.auto_accept => ("accepting…".to_string(), TEXT),
+                _ => (format!("{}s left", (12.0 - rc.timer).max(0.0).round()), TEXT),
+            };
+            c.text(F::Bold, &label, 34.0, tx, my + 166.0, col, Align::Left);
+            if !queue.is_empty() {
+                c.fit(F::Medium, &queue, 20.0, mw - 64.0, tx, my + 202.0, MUTED, Align::Left);
+            }
+            if rc.response != "Accepted" {
+                button(c, league_primary(), "Accept", GREEN, 0xFFFFFF, "checkmark");
+                if focus {
+                    c.outline(league_primary(), 14.0, TEXT, 3.0);
+                }
+            }
+            if rc.response != "Declined" {
+                button(c, league_secondary(), "Decline", 0x4A1A1A, 0xFFD0D0, "xmark");
+            }
+        }
+        "ChampSelect" => {
+            let ch = l.champ.clone().unwrap_or_default();
+            let phase = match ch.phase.as_str() {
+                "PLANNING" => "PLANNING",
+                "BAN_PICK" => "PICKS & BANS",
+                "FINALIZATION" => "FINALIZING",
+                "GAME_STARTING" => "STARTING",
+                other => other,
+            };
+            c.text(F::Bold, &format!("CHAMP SELECT  ·  {phase}"), 18.0, tx, my + 46.0, GOLD, Align::Left);
+            let secs = (ch.time_left_ms / 1000.0).max(0.0).ceil();
+            c.text(F::Bold, &format!("{secs:.0}s"), 110.0, tx, my + 160.0, TEXT, Align::Left);
+            let mut line = Vec::new();
+            if !ch.position.is_empty() {
+                line.push(position_name(&ch.position).to_string());
+            }
+            if !ch.champion.is_empty() {
+                line.push(ch.champion.clone());
+            }
+            if !queue.is_empty() {
+                line.push(queue.clone());
+            }
+            c.fit(F::Medium, &line.join("   ·   "), 26.0, mw - 64.0, tx, my + 206.0, TEXT_2, Align::Left);
+        }
+        "InProgress" | "GameStart" | "Reconnect" => {
+            c.text(F::Bold, "IN GAME", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, if l.phase == "Reconnect" { "Reconnect needed" } else { "Good luck" }, 64.0, tx, my + 130.0, TEXT, Align::Left);
+        }
+        "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => {
+            c.text(F::Bold, "GAME OVER", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, "Back to the lobby when you're ready", 40.0, tx, my + 116.0, TEXT_2, Align::Left);
+        }
+        other => {
+            c.text(F::Bold, "CLIENT", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, if other.is_empty() || other == "None" { "Home screen" } else { other }, 48.0, tx, my + 110.0, TEXT_2, Align::Left);
+        }
+    }
+    let _ = mh;
+}
+
+fn state_color(state: &str) -> (u32, u32) {
+    match state {
+        "running" => (GREEN, 0xFFFFFF),
+        "paused" => (AMBER, 0x1C1500),
+        "restarting" => (ORANGE, 0x1F0E07),
+        "created" => (0x3A3A42, TEXT),
+        _ => (0x2A2A31, MUTED),
+    }
+}
+
+fn bar(c: &mut Canvas, x: f32, y: f32, w: f32, frac: f32, color: u32) {
+    c.rrect((x, y, w, 8.0), 4.0, 0x2A2A31, 1.0);
+    if frac > 0.0 {
+        c.rrect((x, y, (w * frac.min(1.0)).max(8.0), 8.0), 4.0, color, 1.0);
+    }
+}
+
+fn docker_page(c: &mut Canvas, v: &View) {
+    let d = v.docker;
+    // Strip
+    let accent = v.accent;
+    if let Some(e) = &d.error {
+        let pw = c.pill(M, CY + 6.0, "DOCKER UNAVAILABLE", 14.0, AMBER, 0x1C1500);
+        c.fit(F::Medium, e, 18.0, W - 2.0 * M - pw - 30.0, M + pw + 16.0, CY + 27.0, AMBER, Align::Left);
+    } else {
+        let pw = c.pill(M, CY + 6.0, &d.engine.to_uppercase(), 14.0, accent, 0xFFFFFF);
+        let running = d.containers.iter().filter(|c| c.state == "running").count();
+        let info = format!(
+            "{running} of {} running   ·   {} CPUs   ·   {}   ·   {} images   ·   {} volumes",
+            d.containers.len(),
+            d.ncpu,
+            bytes(d.mem_total),
+            d.images,
+            d.volumes
+        );
+        c.text(F::Medium, &info, 18.0, M + pw + 16.0, CY + 27.0, TEXT_2, Align::Left);
+        c.text(F::Mono, &d.socket, 13.0, W - M, CY + 26.0, FAINT, Align::Right);
+    }
+    let n = d.containers.len();
+    if n == 0 {
+        let top = CY + DOCKER_STRIP_H + 6.0;
+        c.rrect((M, top, W - 2.0 * M, CY + CH - top), 16.0, PANEL_DEEP, 1.0);
+        let msg = if d.ok { "No containers" } else { "Can't reach the Docker engine" };
+        c.text(F::Medium, msg, 30.0, W / 2.0, top + 170.0, FAINT, Align::Center);
+        return;
+    }
+    let (first, cols) = window(n, v.tile);
+    for slot in 0..cols {
+        let r = container_rect(slot, cols);
+        let i = first + slot;
+        let Some(ct) = d.containers.get(i) else {
+            c.rrect(r, 14.0, PANEL_DEEP, 1.0);
+            continue;
+        };
+        let (x, y, w, h) = r;
+        let (sc, sf) = state_color(&ct.state);
+        c.rrect(r, 14.0, PANEL, 1.0);
+        c.rrect((x, y, 6.0, h), 3.0, sc, 1.0);
+        let ix = x + 22.0;
+        let iw = w - 40.0;
+        c.fit(F::Bold, &ct.name, 26.0, iw, ix, y + 38.0, TEXT, Align::Left);
+        c.clip(F::Mono, &ct.image, 14.0, iw, ix, y + 62.0, MUTED);
+        let pw = c.pill(ix, y + 76.0, &ct.state.to_uppercase(), 13.0, sc, sf);
+        c.clip(F::Medium, &ct.status, 16.0, iw - pw - 10.0, ix + pw + 10.0, y + 94.0, MUTED);
+        let mut cy = y + 136.0;
+        if ct.state == "running" {
+            let cpu = ct.cpu.unwrap_or(0.0);
+            c.text(F::Bold, "CPU", 13.0, ix, cy, FAINT, Align::Left);
+            c.text(F::Mono, &format!("{cpu:.1}%"), 15.0, ix + iw, cy, TEXT, Align::Right);
+            bar(c, ix, cy + 10.0, iw, cpu / (100.0 * d.ncpu.max(1) as f32), accent);
+            cy += 46.0;
+            if let Some(mem) = ct.mem {
+                let limit = ct.mem_limit.unwrap_or(d.mem_total).max(1);
+                c.text(F::Bold, "MEMORY", 13.0, ix, cy, FAINT, Align::Left);
+                c.text(F::Mono, &format!("{} / {}", bytes(mem), bytes(limit)), 15.0, ix + iw, cy, TEXT, Align::Right);
+                bar(c, ix, cy + 10.0, iw, mem as f32 / limit as f32, accent);
+                cy += 46.0;
+            }
+        }
+        if !ct.ports.is_empty() {
+            c.text(F::Bold, "PORTS", 13.0, ix, cy, FAINT, Align::Left);
+            c.clip(F::Mono, &ct.ports.join("  "), 15.0, iw, ix, cy + 22.0, TEXT_2);
+        }
+        c.text(F::Mono, &ct.id.chars().take(12).collect::<String>(), 13.0, ix, y + h - 16.0, FAINT, Align::Left);
+        if v.level == &Level::Focus && i == v.tile {
+            c.outline(r, 14.0, TEXT, 3.0);
+        }
+    }
+    let right = n.saturating_sub(first + cols);
+    if right > 0 {
+        let r = container_rect(cols - 1, cols);
+        let label = format!("{right} ›");
+        let w = c.measure(F::Bold, &label, 16.0) + 16.0 * 1.4;
+        c.pill(r.0 + r.2 - w - 8.0, r.1 + r.3 - 40.0, &label, 16.0, 0x2A2A31, TEXT);
+    }
+    if first > 0 {
+        let r = container_rect(0, cols);
+        c.pill(r.0 + 8.0, r.1 + r.3 - 40.0, &format!("‹ {first}"), 16.0, 0x2A2A31, TEXT);
+    }
+}
+
+fn docker_detail(c: &mut Canvas, v: &View, ct: &docker::Container) {
+    let (sc, sf) = state_color(&ct.state);
+    let left = (M, CY, 520.0, CH);
+    c.rrect(left, 14.0, PANEL, 1.0);
+    c.rrect((M, CY, 6.0, CH), 3.0, sc, 1.0);
+    let ix = M + 24.0;
+    let iw = 520.0 - 44.0;
+    c.fit(F::Bold, &ct.name, 32.0, iw, ix, CY + 44.0, TEXT, Align::Left);
+    c.clip(F::Mono, &ct.image, 15.0, iw, ix, CY + 72.0, MUTED);
+    let pw = c.pill(ix, CY + 86.0, &ct.state.to_uppercase(), 14.0, sc, sf);
+    c.clip(F::Medium, &ct.status, 17.0, iw - pw - 12.0, ix + pw + 12.0, CY + 106.0, MUTED);
+    let mut cy = CY + 150.0;
+    if ct.state == "running" {
+        let cpu = ct.cpu.unwrap_or(0.0);
+        c.text(F::Bold, "CPU", 13.0, ix, cy, FAINT, Align::Left);
+        c.text(F::Mono, &format!("{cpu:.1}%"), 15.0, ix + iw, cy, TEXT, Align::Right);
+        bar(c, ix, cy + 10.0, iw, cpu / (100.0 * v.docker.ncpu.max(1) as f32), v.accent);
+        cy += 44.0;
+        if let Some(mem) = ct.mem {
+            let limit = ct.mem_limit.unwrap_or(v.docker.mem_total).max(1);
+            c.text(F::Bold, "MEMORY", 13.0, ix, cy, FAINT, Align::Left);
+            c.text(F::Mono, &format!("{} / {}", bytes(mem), bytes(limit)), 15.0, ix + iw, cy, TEXT, Align::Right);
+            bar(c, ix, cy + 10.0, iw, mem as f32 / limit as f32, v.accent);
+            cy += 44.0;
+        }
+    }
+    if !ct.ports.is_empty() {
+        c.text(F::Bold, "PORTS", 13.0, ix, cy, FAINT, Align::Left);
+        c.clip(F::Mono, &ct.ports.join("  "), 15.0, iw, ix, cy + 22.0, TEXT_2);
+    }
+    let br = docker_back();
+    c.rrect(br, 10.0, 0x26262D, 1.0);
+    c.text(F::Medium, "‹  Back", 17.0, br.0 + br.2 / 2.0, br.1 + 27.0, TEXT, Align::Center);
+    for (r, which) in docker_actions() {
+        let action = docker_button_action(&ct.state, which);
+        let (label, sym, bg) = match action {
+            "stop" => ("Stop", "stop.fill", 0x4A1A1A),
+            "start" => ("Start", "play.fill", 0x1A3A24),
+            "restart" => ("Restart", "arrow.clockwise", 0x26262D),
+            "pause" => ("Pause", "pause.fill", 0x26262D),
+            _ => ("Resume", "playpause.fill", 0x26262D),
+        };
+        c.rrect(r, 10.0, bg, 1.0);
+        c.symbol(sym, 16.0, r.0 + 26.0, r.1 + r.3 / 2.0, TEXT);
+        c.text(F::Medium, label, 17.0, r.0 + 46.0, r.1 + 27.0, TEXT, Align::Left);
+    }
+
+    // Logs
+    let rr = (M + 520.0 + G, CY, W - 2.0 * M - 520.0 - G, CH);
+    let (rx, ry, rw, rh) = rr;
+    c.rrect(rr, 14.0, PANEL_DEEP, 1.0);
+    c.text(F::Bold, "LOGS", 12.0, rx + 24.0, ry + 28.0, FAINT, Align::Left);
+    c.text(F::Medium, "newest at the bottom", 13.0, rx + rw - 24.0, ry + 28.0, FAINT, Align::Right);
+    let lines: &[String] = match &v.docker.logs {
+        Some((id, l)) if id == &ct.id => l,
+        _ => &[],
+    };
+    if lines.is_empty() {
+        c.text(F::Medium, "No logs yet", 22.0, rx + rw / 2.0, ry + rh / 2.0, FAINT, Align::Center);
+        return;
+    }
+    let max_scroll = lines.len().saturating_sub(LOG_ROWS);
+    let scroll = v.scroll.min(max_scroll);
+    let end = lines.len() - scroll;
+    let start = end.saturating_sub(LOG_ROWS);
+    for (row, line) in lines[start..end].iter().enumerate() {
+        let by = ry + 46.0 + row as f32 * LOG_ROW_H + 15.0;
+        let lower = line.to_lowercase();
+        let col = if lower.contains("error") || lower.contains("fatal") || lower.contains("panic") {
+            0xFF9B9B
+        } else if lower.contains("warn") {
+            0xE6B673
+        } else {
+            0xC9C9D1
+        };
+        c.clip(F::Mono, line, 14.0, rw - 48.0, rx + 24.0, by, col);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_windows() {
+        assert_eq!(clip_window(10, 9), 0);
+        assert_eq!(clip_window(20, 0), 0);
+        assert_eq!(clip_window(20, 13), 6);
+        assert_eq!(clip_window(20, 19), 12); // rows 2-3: clips 12..20
+    }
 
     #[test]
     fn ages() {

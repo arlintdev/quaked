@@ -1,6 +1,7 @@
 //! quaked — drives the DECOKEE Quake desk screen without DK-Suite.
 //!
-//!   quaked [run] [--no-buzzer]   the board (what the LaunchAgent runs)
+//!   quaked [run]                 the board (what the LaunchAgent runs); settings live in
+//!                                ~/Library/Application Support/Quaked/config.json
 //!   quaked hook                  Claude Code hook: records session state from stdin
 //!   quaked ctl <cmd>             drive the running board: turn 1|-1, press, double, hold, tap X Y
 //!   quaked probe [secs]          prints raw HID traffic from the device
@@ -9,11 +10,18 @@
 //!   quaked luminance <0-255>     sets the screen luminance
 
 mod app;
+mod audio;
+mod config;
 mod device;
+mod docker;
+mod http;
+mod keys;
+mod league;
 mod music;
 mod proto;
 mod render;
 mod status;
+mod symbols;
 
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -108,17 +116,70 @@ fn preview(dir: &str) {
         art_url: String::new(),
     };
     let fonts = render::Fonts::load();
-    let shots: [(&str, Page, Level, usize, usize); 5] = [
-        ("1-ai-top", Page::Ai, Level::Top, 0, 0),
-        ("2-ai-focus", Page::Ai, Level::Focus, 1, 0),
-        ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0),
-        ("4-music-top", Page::Music, Level::Top, 0, 0),
-        ("5-music-focus", Page::Music, Level::Focus, 0, 0),
+    let symbols = symbols::Symbols::default();
+    let cfg = config::Config::default();
+    let clip = |t: &str, color: &str, symbol: &str| audio::ClipInfo { title: t.into(), path: Default::default(), color: color.into(), symbol: symbol.into(), gain: 1.0 };
+    let sounds = audio::Status {
+        clips: vec![
+            clip("Airhorn", "#FF9F0A", "megaphone.fill"),
+            clip("Rimshot", "#4C8DFF", ""),
+            clip("Sad trombone", "#B36BFF", "music.note"),
+            clip("Applause", "#2F9E5B", "hands.clap.fill"),
+            clip("Crickets", "#8C8C96", "ant.fill"),
+            clip("Bruh", "#FF6B6B", ""),
+            clip("Drumroll please, this title is long enough to wrap", "#E6B673", ""),
+        ],
+        playing: vec![0],
+        live: true,
+        listener: Some("us.zoom.xos".into()),
+        mic_muted: false,
+        error: None,
+    };
+    let lg_lobby = league::Status { running: true, phase: "Matchmaking".into(), summoner: Some(("Austin".into(), 187)), queue: Some("Ranked Solo/Duo".into()), search: Some((94.0, 120.0)), ..Default::default() };
+    let lg_pop = league::Status { phase: "ReadyCheck".into(), ready: Some(league::ReadyCheck { state: "InProgress".into(), response: "Accepted".into(), timer: 3.0 }), accepted_by_quaked: true, ..lg_lobby.clone() };
+    let dk = docker::Status {
+        ok: true,
+        socket: "~/.kiri/run/docker.sock".into(),
+        engine: "Kiri 0.2.0".into(),
+        ncpu: 2,
+        mem_total: 8_408_313_856,
+        images: 13,
+        volumes: 16,
+        containers: vec![
+            docker::Container { id: "9b62926f50e3aa".into(), name: "digin-pg-dev".into(), image: "postgres:17-alpine".into(), state: "running".into(), status: "Up 2 days".into(), ports: vec!["55432→5432".into()], cpu: Some(3.4), mem: Some(109_559_808), mem_limit: Some(8_589_934_592) },
+            docker::Container { id: "1a2b3c4d5e6f77".into(), name: "buildx_buildkit_kiri-build0".into(), image: "moby/buildkit:buildx-stable-1".into(), state: "paused".into(), status: "Up 2 days (Paused)".into(), ..Default::default() },
+            docker::Container { id: "77aa88bb99cc00".into(), name: "digin-dev-db-tls".into(), image: "postgres:17".into(), state: "exited".into(), status: "Exited (0) 2 days ago".into(), ..Default::default() },
+        ],
+        logs: Some(("9b62926f50e3aa".into(), (1..40).map(|i| format!("2026-11-16 17:{i:02}:00 UTC [1] LOG:  checkpoint complete: wrote {i} buffers")).chain(["ERROR:  relation \"missing\" does not exist".to_string()]).collect())),
+        error: None,
+    };
+    let shots: [(&str, Page, Level, usize, usize, usize); 11] = [
+        ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
+        ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
+        ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
+        ("4-music-top", Page::Music, Level::Top, 0, 0, 0),
+        ("5-music-focus", Page::Music, Level::Focus, 0, 0, 0),
+        ("6-shortcuts", Page::Shortcuts, Level::Focus, 0, 0, 1),
+        ("7-sounds", Page::Soundboard, Level::Focus, 0, 0, 2),
+        ("8-sounds-empty", Page::Soundboard, Level::Top, 0, 0, 0),
+        ("9-league-queue", Page::League, Level::Top, 0, 0, 0),
+        ("10-league-pop", Page::League, Level::Focus, 0, 0, 0),
+        ("11-docker", Page::Docker, Level::Focus, 0, 0, 0),
     ];
-    for (name, page, level, sel, scroll) in shots {
-        let mut c = render::Canvas::new(1920, 480, &fonts);
+    let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
+    let empty = audio::Status::default();
+    for (name, page, level, sel, scroll, tile) in shots.into_iter().chain(std::iter::once(detail_shot)) {
+        let mut c = render::Canvas::new(1920, 480, &fonts, &symbols);
         let view = View {
+            pages: &cfg.pages,
             page,
+            accent: config::hex(cfg.ring.color_for(page), 0),
+            shortcuts: &cfg.shortcuts,
+            sounds: if name.ends_with("empty") { &empty } else { &sounds },
+            tile,
+            league: if name.contains("pop") { &lg_pop } else { &lg_lobby },
+            league_cfg: &cfg.league,
+            docker: &dk,
             level: &level,
             sessions: &sessions,
             sel,
@@ -159,10 +220,14 @@ fn control_once(cmd: device::Command) {
 }
 
 fn ctl(args: &[String]) {
+    use std::io::Read;
     let line = args.join(" ");
     match std::os::unix::net::UnixStream::connect(app::ctl_socket_path()) {
         Ok(mut s) => {
             let _ = writeln!(s, "{line}");
+            let mut reply = Vec::new();
+            let _ = s.read_to_end(&mut reply);
+            let _ = std::io::stdout().write_all(&reply);
         }
         Err(e) => {
             eprintln!("quaked is not running ({e})");
@@ -177,6 +242,25 @@ fn main() {
     match sub {
         "hook" => status::hook(),
         "ctl" => ctl(&args[1..]),
+        "via" => device::via_probe(),
+        "symbol" => {
+            // Debug: render an SF Symbol to PNG.
+            let name = args.get(1).cloned().unwrap_or_else(|| "sparkles".into());
+            let s = symbols::Symbols::default();
+            match s.get(&name, 96.0) {
+                Some(m) => {
+                    let mut p = tiny_skia::Pixmap::new(m.w, m.h).unwrap();
+                    for (i, a) in m.alpha.iter().enumerate() {
+                        let px = &mut p.data_mut()[i * 4..i * 4 + 4];
+                        px.copy_from_slice(&[*a, *a, *a, 255]);
+                    }
+                    let out = args.get(2).cloned().unwrap_or_else(|| format!("{name}.png"));
+                    p.save_png(&out).unwrap();
+                    println!("{name}: {}x{} -> {out}", m.w, m.h);
+                }
+                None => println!("{name}: not an SF Symbol"),
+            }
+        }
         "probe" => device::probe(args.get(1).and_then(|s| s.parse().ok()).unwrap_or(15)),
         "preview" => preview(args.get(1).map(String::as_str).unwrap_or("preview")),
         "beep" => control_once(device::Command::Tone(vec![(70, 70), (0, 60), (70, 70)])),
@@ -187,16 +271,16 @@ fn main() {
             });
             control_once(device::Command::Luminance(v));
         }
-        "run" | "--no-buzzer" => {
+        "run" => {
             let Some(_lock) = single_instance() else {
                 eprintln!("quaked is already running");
                 std::process::exit(0);
             };
             device::log(format!("quaked {} starting", env!("CARGO_PKG_VERSION")));
-            app::run(app::Options { buzzer: !args.iter().any(|a| a == "--no-buzzer") });
+            app::run();
         }
         _ => {
-            eprintln!("usage: quaked [run [--no-buzzer] | hook | ctl <cmd> | probe [secs] | preview <dir> | beep | luminance <n>]");
+            eprintln!("usage: quaked [run | hook | ctl <cmd> | probe [secs] | via | preview <dir> | symbol <name> | beep | luminance <n>]");
             std::process::exit(2);
         }
     }

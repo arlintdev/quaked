@@ -13,11 +13,15 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.3.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Quaked mixes your microphone with soundboard clips so people on your call hear both.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Quaked shows what Spotify or Music is playing and controls playback from the knob.</string>
   <!-- Background app: no Dock icon, no menu bar. -->
   <key>LSUIElement</key>
   <true/>

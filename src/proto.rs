@@ -54,6 +54,41 @@ pub fn report(ty: u8, payload: &[u8]) -> [u8; 33] {
     r
 }
 
+// ---- VIA (QMK) protocol, same raw-HID interface, no 0xA3 framing ----
+// [cmd, args..] in a 32-byte report; the device echoes the command with data.
+pub const VIA_PROTOCOL_VERSION: u8 = 0x01;
+pub const VIA_CUSTOM_SET: u8 = 0x07;
+pub const VIA_CUSTOM_GET: u8 = 0x08;
+/// The knob ring: VIA's built-in "qmk_rgb_matrix" menu.
+pub const RGB_MATRIX_CHANNEL: u8 = 3;
+pub const RGB_BRIGHTNESS: u8 = 1;
+pub const RGB_EFFECT: u8 = 2;
+pub const RGB_EFFECT_SPEED: u8 = 3;
+pub const RGB_COLOR: u8 = 4; // [hue, saturation], 0..=255 each
+pub const EFFECT_OFF: u8 = 0;
+pub const EFFECT_SOLID: u8 = 1;
+pub const EFFECT_BREATHING: u8 = 5;
+pub const EFFECT_CYCLE_ALL: u8 = 12;
+
+/// A VIA request as a 33-byte output report. Only reads and live (unsaved) ring
+/// changes are allowed: no EEPROM saves, keymap writes or resets.
+pub fn via_report(cmd: u8, args: &[u8]) -> [u8; 33] {
+    let allowed = match cmd {
+        VIA_PROTOCOL_VERSION | VIA_CUSTOM_GET => true,
+        VIA_CUSTOM_SET => args.len() >= 2 && args[0] == RGB_MATRIX_CHANNEL && (RGB_BRIGHTNESS..=RGB_COLOR).contains(&args[1]),
+        _ => false,
+    };
+    assert!(allowed, "refusing VIA command {cmd:#04x} {args:02x?}");
+    let mut r = [0u8; 33];
+    r[1] = cmd;
+    r[2..2 + args.len()].copy_from_slice(args);
+    r
+}
+
+/// Keyboard emulation: the Quake types a key combo as a real USB keyboard.
+/// action: 1 = down, 0 = up, 2 = tap. modifiers: HID bits (1 ctrl, 2 shift, 4 alt, 8 cmd).
+pub const CMD_KEYBOARD: u8 = 0x10;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub op: u8,
@@ -135,6 +170,18 @@ mod tests {
         // one point, down, x = 0x0394 (916), y = 0x015C (348)
         let buf = [0xA3, 0x08, 0x00, 0x1A, 0x01, 0x01, 0x5C, 0x01, 0x94, 0x03];
         assert_eq!(parse_touch(&buf), Some(vec![TouchPoint { down: true, x: 916, y: 348 }]));
+    }
+
+    #[test]
+    fn via_ring_reports() {
+        let r = via_report(VIA_CUSTOM_SET, &[RGB_MATRIX_CHANNEL, RGB_COLOR, 20, 255]);
+        assert_eq!(&r[..6], &[0x00, 0x07, 0x03, 0x04, 20, 255]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn via_save_is_refused() {
+        via_report(0x09, &[RGB_MATRIX_CHANNEL]);
     }
 
     #[test]

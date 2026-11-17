@@ -29,11 +29,17 @@ pub enum Input {
 }
 
 /// What the UI asks the control thread to do.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// (level, milliseconds) steps; level 0 is silence.
     Tone(Vec<(u8, u64)>),
     Luminance(u8),
+    /// The knob's light ring (live, never saved to the device).
+    Ring { effect: u8, hue: u8, sat: u8, brightness: u8, speed: u8 },
+    /// Type a key combo as the Quake's USB keyboard.
+    Keys { modifiers: u8, key: u8 },
+    /// The Quake's built-in microphone (and its indicator light).
+    Mic(bool),
 }
 
 pub fn log(msg: impl AsRef<str>) {
@@ -149,7 +155,13 @@ fn handshake(dev: &HidDevice) -> (Option<String>, Option<u8>) {
             luminance = m.data.first().copied();
         }
     }
-    log(format!("control: firmware {firmware:?}, luminance {luminance:?}"));
+    let mut mic = None;
+    if send(dev, proto::TYPE_GET, &[proto::CMD_MIC]).is_ok() {
+        if let Some(m) = await_reply(dev, proto::CMD_MIC, Duration::from_millis(500), |_| {}) {
+            mic = m.data.first().map(|&b| b == 1);
+        }
+    }
+    log(format!("control: firmware {firmware:?}, luminance {luminance:?}, mic {mic:?}"));
     (firmware, luminance)
 }
 
@@ -175,6 +187,26 @@ fn serve(dev: &HidDevice, commands: &Receiver<Command>, emit: &impl Fn(Input)) -
             }
             Ok(Command::Luminance(v)) => {
                 send(dev, proto::TYPE_SET, &[proto::CMD_LUMINANCE, v]).map_err(|e| e.to_string())?;
+            }
+            Ok(Command::Ring { effect, hue, sat, brightness, speed }) => {
+                let ch = proto::RGB_MATRIX_CHANNEL;
+                for args in [
+                    vec![ch, proto::RGB_EFFECT, effect],
+                    vec![ch, proto::RGB_COLOR, hue, sat],
+                    vec![ch, proto::RGB_BRIGHTNESS, brightness],
+                    vec![ch, proto::RGB_EFFECT_SPEED, speed],
+                ] {
+                    dev.write(&proto::via_report(proto::VIA_CUSTOM_SET, &args)).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(Command::Mic(on)) => {
+                send(dev, proto::TYPE_SET, &[proto::CMD_MIC, on as u8]).map_err(|e| e.to_string())?;
+                log(format!("control: device mic {}", if on { "on" } else { "off" }));
+            }
+            Ok(Command::Keys { modifiers, key }) => {
+                send(dev, proto::TYPE_SET, &[proto::CMD_KEYBOARD, 1, modifiers, key]).map_err(|e| e.to_string())?;
+                std::thread::sleep(Duration::from_millis(40));
+                send(dev, proto::TYPE_SET, &[proto::CMD_KEYBOARD, 0, modifiers, key]).map_err(|e| e.to_string())?;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -236,6 +268,24 @@ pub fn touch_thread(emit: impl Fn(Input) + Send + 'static) {
     }
 }
 
+/// The touch panel's y axis runs bottom-to-top relative to the picture (DK-Suite maps
+/// y = 480 - y as well). Both flips are settable from the config (`touch`).
+static FLIP_X: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FLIP_Y: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_touch_flip(x: bool, y: bool) {
+    FLIP_X.store(x, std::sync::atomic::Ordering::Relaxed);
+    FLIP_Y.store(y, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Panel coordinates -> screen coordinates (1920x480).
+fn to_screen(p: TouchPoint) -> (f64, f64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let x = if FLIP_X.load(Relaxed) { 1920.0 - p.x as f64 } else { p.x as f64 };
+    let y = if FLIP_Y.load(Relaxed) { 480.0 - p.y as f64 } else { p.y as f64 };
+    (x, y)
+}
+
 /// A press that lifts within this time and distance counts as a tap.
 const TAP_MAX_MS: u128 = 900;
 const TAP_MAX_MOVE: f64 = 60.0;
@@ -269,7 +319,9 @@ fn read_touches(dev: &HidDevice, emit: &impl Fn(Input)) -> Result<(), String> {
 fn finish(t0: Instant, start: TouchPoint, end: TouchPoint, emit: &impl Fn(Input)) {
     let moved = ((end.x as f64 - start.x as f64).powi(2) + (end.y as f64 - start.y as f64).powi(2)).sqrt();
     if t0.elapsed().as_millis() <= TAP_MAX_MS && moved <= TAP_MAX_MOVE {
-        emit(Input::Tap { x: start.x as f64, y: start.y as f64 });
+        let (x, y) = to_screen(start);
+        log(format!("touch: tap panel {},{} -> screen {x:.0},{y:.0}", start.x, start.y));
+        emit(Input::Tap { x, y });
     }
 }
 
@@ -280,6 +332,39 @@ pub fn spawn(emit: impl Fn(Input) + Send + Clone + 'static) -> Sender<Command> {
     std::thread::Builder::new().name("quake-control".into()).spawn(move || control_thread(rx, e1)).unwrap();
     std::thread::Builder::new().name("quake-touch".into()).spawn(move || touch_thread(emit)).unwrap();
     tx
+}
+
+/// Sends a VIA request and returns the matching reply's data (bytes after the echo).
+fn via(dev: &HidDevice, cmd: u8, args: &[u8]) -> Option<Vec<u8>> {
+    dev.write(&proto::via_report(cmd, args)).ok()?;
+    let deadline = Instant::now() + Duration::from_millis(400);
+    let mut buf = [0u8; 64];
+    while Instant::now() < deadline {
+        let n = dev.read_timeout(&mut buf, 50).ok()?;
+        if n > args.len() && buf[0] == cmd && buf[1..1 + args.len()] == *args {
+            return Some(buf[1 + args.len()..n].to_vec());
+        }
+    }
+    None
+}
+
+/// `quaked via`: reads the VIA protocol version and the knob ring's lighting values.
+pub fn via_probe() {
+    let mut api = new_api();
+    let Some(dev) = open(&mut api, QUAKE_VID, QUAKE_PID, QUAKE_USAGE_PAGE, QUAKE_USAGE) else {
+        println!("control interface not found");
+        return;
+    };
+    match via(&dev, proto::VIA_PROTOCOL_VERSION, &[]) {
+        Some(d) if d.len() >= 2 => println!("VIA protocol version {}", u16::from(d[0]) << 8 | u16::from(d[1])),
+        other => println!("VIA protocol version: no reply ({other:?})"),
+    }
+    for (name, id, len) in [("brightness", proto::RGB_BRIGHTNESS, 1), ("effect", proto::RGB_EFFECT, 1), ("speed", proto::RGB_EFFECT_SPEED, 1), ("color h,s", proto::RGB_COLOR, 2)] {
+        match via(&dev, proto::VIA_CUSTOM_GET, &[proto::RGB_MATRIX_CHANNEL, id]) {
+            Some(d) => println!("ring {name}: {:?}", &d[..len.min(d.len())]),
+            None => println!("ring {name}: no reply"),
+        }
+    }
 }
 
 /// `quaked probe`: prints raw reports from both interfaces for a few seconds.
