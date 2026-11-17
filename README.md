@@ -1,7 +1,7 @@
 # quaked
 
-Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Eleven pages (turn them on
-and off and reorder them on the settings page's Panes tab), each with its own color on the
+Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Seventeen pages (turn them
+on and off and reorder them on the settings page's Panes tab), each with its own color on the
 knob's light ring:
 
 - **Dashboard** (the grid icon, first by default): a tile per pane, each drawn for what
@@ -62,15 +62,60 @@ knob's light ring:
   it is signed in to. Tap one to open it.
 - **Digin**: your open issues (priority, key, status), inbox (mentions, DMs, assignments,
   comments) and recently changed pages from one or more Digin servers, with unread chat
-  counts on top. Tap or press a row to open it in Digin. Sign in on the settings page's
-  Digin tab with your email and a code (or a token from Digin's Settings → Access): quaked
-  asks for read access only and keeps the token in the Keychain of the Mac with the Quake.
+  counts on top. Tap or press a row to open it on the board: an issue shows its
+  description, checklist and newest comments with a button per status in the project's
+  order (press, press moves it one step; Done and Canceled need a second press); an inbox
+  item shows the whole message with Mark read; a page shows its text. Turn to scroll,
+  double-click to go back, "Open in Digin" opens it in the browser. Sign in on the
+  settings page's Digin tab with your email and a code (or a token from Digin's Settings ›
+  Access). quaked asks for issues and chat write (to move issues and mark chats read; it
+  never sends messages), pages read and profile write (to mark notifications read), and
+  keeps the token in the Keychain of the Mac with the Quake.
+- **Calendar** (calendar icon): the next 24 hours from macOS Calendar as a timeline, the
+  next meeting big with its time, place and a Join button for Zoom / Meet / Teams /
+  FaceTime / Webex links, and the list coming up. Two minutes before a meeting the board
+  jumps here (set the lead time in Extras).
+- **Focus** (timer icon): a countdown you set on the knob (25 minutes by default), shown
+  in the ring wherever the board is, with today's blocks, the week, and whether a block
+  fits before your next meeting. Optional macOS Shortcuts run when a block starts and ends
+  (e.g. Do Not Disturb). The tally lives in `focus.json`.
+- **Health** (pulse icon): CPU, memory, GPU, network, disk and uptime for this Mac and the
+  paired ones, with sparklines, plus the batteries of your Bluetooth keyboard, mouse,
+  trackpad and AirPods (LOW under 20%).
+- **Ship** (paper plane): your projects with an executable `deploy.sh` under `~/ArlintDev`
+  (or the list in Extras): branch, ahead / behind, changed files, last commit, the latest
+  GitHub Actions run, and a deploy button. A deploy only starts from the board, press to
+  arm and press again within a few seconds; its output streams onto the page and it can
+  be cancelled.
+- **Clipboard** (clipboard icon): your last 20 copies, kept in memory only; pick one and
+  the app in front pastes it. Copies from password managers, copies made in front of
+  password apps and strings that look like keys are skipped.
+- **Windows** (windows icon): your apps front to back with their window counts; press
+  one to bring it forward. It only looks while the page is on screen.
 - **Settings** (the gear): screen brightness, ring brightness, idle timeout, and switches
   for the ring, the alert pulse, blink / jump on new stuff, buzzer, the Quake's mic,
   League auto-accept and snap.
 
 The ring shows the page color, and breathes amber while a Claude session needs you (the
 buzzer chirps too).
+
+Three things appear over the pages on their own:
+
+- **Call mode**: while a call app (Zoom, Teams, FaceTime, Webex, Slack, Discord, or a
+  browser call) holds the mic, or something listens to the soundboard mic, the board shows
+  the call: app and timer, a mute control (the soundboard mic, the app's mute shortcut, or
+  bringing the app forward), the meeting from your calendar with Join, and your clips.
+  Hide puts it away until the call ends.
+- **Night mode**: after 10 idle minutes between 22:00 and 07:00 the board dims to a slowly
+  drifting clock with the weather (Open-Meteo, located from the settings or the
+  Cloudflare colo, never IP geolocation) and the first thing on tomorrow's calendar. The
+  ring goes dark; a touch or a turn wakes it.
+- **Music visualizer**: a spectrum behind the Music page from what the Mac plays (a Core
+  Audio process tap, macOS 14.2+), with the ring pulsing on the beat. It only listens
+  while the Music page shows and something plays; the first time, macOS asks to let
+  Quaked record system audio.
+
+The Extras tab of the settings page holds their options.
 
 **New stuff**: when a session starts waiting on you, a review is requested, CI fails, a PR
 is approved / gets changes requested / conflicts, a host goes down, a site starts failing
@@ -194,6 +239,9 @@ refused in code.
 - Music uses Spotify's and Music's AppleScript interfaces; macOS asks once to let Quaked
   control them (Privacy & Security > Automation). Cover art is cached in
   `~/Library/Caches/quaked/art`.
+- macOS also asks once for Calendars (the Calendar page, call mode and night mode) and for
+  System Audio Recording (the Music visualizer, the first time it listens). Saying no only
+  turns that piece off.
 
 DK-Suite must not run at the same time: both want the same display and HID devices.
 
