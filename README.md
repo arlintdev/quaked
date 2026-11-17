@@ -1,7 +1,12 @@
 # quaked
 
-Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Nine pages (order and
-visibility set in the config), each with its own color on the knob's light ring:
+Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Ten pages (turn them on
+and off and reorder them in the companion's Panes tab), each with its own color on the
+knob's light ring:
+
+- **Dashboard** (the grid icon, first by default): a tile per pane with a health dot and
+  its status at a glance: who needs you, now playing, call routing, League phase,
+  containers, hosts and sites, PRs. Tap a tile (or press the knob on it) to go there.
 
 - **AI**: a column per Claude Code session showing state (working / needs you / done / idle),
   the prompt, why it needs you or Claude's last reply, and its latest steps: commands,
@@ -87,7 +92,8 @@ own mic (off by default, which also turns its indicator light off), screen brigh
 touch mapping, buzzer, idle timeout, Ops hosts and sites, Code refresh and GitLab, new
 stuff alerts, two-Mac sync). quaked reloads it when it
 changes. **Quaked Companion** (`companion/`, a small SwiftUI app) edits it and shows a live
-mirror of the screen you can click on, with knob buttons.
+mirror of the screen you can click on, with knob buttons. Its Panes tab turns panes on
+and off and sets their order.
 
 ## How the Quake works
 
@@ -126,7 +132,7 @@ DK-Suite must not run at the same time: both want the same display and HID devic
 quaked ctl turn 1|-1         drive the running board like the knob
 quaked ctl press|double|hold
 quaked ctl tap X Y           tap at screen coordinates (1920x480)
-quaked ctl page <id>         ai | music | shortcuts | soundboard | league | docker | ops | code | settings
+quaked ctl page <id>         dash | ai | music | shortcuts | soundboard | league | docker | ops | code | settings
 quaked ctl shortcut <n>      run shortcut tile n (from 0)
 quaked ctl play <title>      play a clip; `ctl stop` stops all
 quaked ctl status            JSON status; `ctl frame [page]` = PNG of the screen (or another page, off-screen)

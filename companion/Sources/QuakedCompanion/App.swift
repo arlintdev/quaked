@@ -34,13 +34,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case live, shortcuts, soundboard, lighting, general
+    case live, panes, shortcuts, soundboard, lighting, general
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .live: return "Live"
+        case .panes: return "Panes"
         case .shortcuts: return "Shortcuts"
         case .soundboard: return "Soundboard"
         case .lighting: return "Lighting"
@@ -51,6 +52,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .live: return "display"
+        case .panes: return "rectangle.3.group"
         case .shortcuts: return "square.grid.2x2"
         case .soundboard: return "waveform"
         case .lighting: return "light.max"
@@ -82,6 +84,7 @@ struct ContentView: View {
                 Group {
                     switch item {
                     case .live: LiveView()
+                    case .panes: PanesView()
                     case .shortcuts: ShortcutsView()
                     case .soundboard: SoundboardView()
                     case .lighting: LightingView()

@@ -52,12 +52,6 @@ struct LightingView: View {
 
 struct GeneralView: View {
     @EnvironmentObject var store: ConfigStore
-    /// All pages in display order, shown pages first; hidden ones keep their place
-    /// here while the window is open.
-    @State private var order: [PageId] = []
-
-    private var shown: [PageId] { store.config.pages }
-
     var body: some View {
         Form {
             Section {
@@ -72,28 +66,6 @@ struct GeneralView: View {
                         Text("\(store.config.idleSeconds) s idle").monospacedDigit()
                     }
                 }
-            }
-
-            Section {
-                ForEach(Array(order.enumerated()), id: \.element) { index, page in
-                    HStack {
-                        Toggle(page.label, isOn: included(page))
-                            .disabled(shown == [page])
-                        Spacer()
-                        Button { move(index, by: -1) } label: { Image(systemName: "chevron.up") }
-                            .disabled(index == 0)
-                        Button { move(index, by: 1) } label: { Image(systemName: "chevron.down") }
-                            .disabled(index == order.count - 1)
-                    }
-                    .buttonStyle(.borderless)
-                }
-                .onMove { order.move(fromOffsets: $0, toOffset: $1); commit() }
-            } header: {
-                Text("Pages")
-            } footer: {
-                Text("The knob steps through the pages in this order. Untick one to hide it; at least one stays.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
 
             Section {
@@ -248,35 +220,6 @@ struct GeneralView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear(perform: syncOrder)
-        .onChange(of: store.config.pages) { _ in syncOrder() }
-    }
-
-    /// Rebuilds `order` when the saved pages no longer match it (first load, outside edits).
-    private func syncOrder() {
-        if order.filter(shown.contains) != shown || order.count != PageId.allCases.count {
-            order = shown + PageId.allCases.filter { !shown.contains($0) }
-        }
-    }
-
-    private func included(_ page: PageId) -> Binding<Bool> {
-        Binding(get: { shown.contains(page) },
-                set: { on in
-                    let next = order.filter { $0 == page ? on : shown.contains($0) }
-                    if !next.isEmpty { store.config.pages = next }
-                })
-    }
-
-    private func move(_ index: Int, by delta: Int) {
-        let target = index + delta
-        guard order.indices.contains(target) else { return }
-        order.swapAt(index, target)
-        commit()
-    }
-
-    private func commit() {
-        let next = order.filter(shown.contains)
-        if !next.isEmpty && next != shown { store.config.pages = next }
     }
 }
 

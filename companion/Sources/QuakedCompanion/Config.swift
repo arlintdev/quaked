@@ -4,12 +4,13 @@
 import Foundation
 
 enum PageId: String, Codable, CaseIterable, Identifiable {
-    case ai, music, shortcuts, soundboard, league, docker, ops, code, settings
+    case dash, ai, music, shortcuts, soundboard, league, docker, ops, code, settings
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .dash: return "Dashboard"
         case .ai: return "AI"
         case .music: return "Music"
         case .shortcuts: return "Shortcuts"
@@ -206,6 +207,7 @@ struct Ring: Codable, Equatable {
     var ops = "#7FD1B9"
     var code = "#A371F7"
     var settings = "#D0D0D8"
+    var dash = "#64D2FF"
     /// Breathe in `alertColor` while a Claude session needs you.
     var alert = true
     var alertColor = "#F2B705"
@@ -226,6 +228,7 @@ struct Ring: Codable, Equatable {
         ops = c.value(.ops, d.ops)
         code = c.value(.code, d.code)
         settings = c.value(.settings, d.settings)
+        dash = c.value(.dash, d.dash)
         alert = c.value(.alert, d.alert)
         alertColor = c.value(.alertColor, d.alertColor)
     }
@@ -241,6 +244,7 @@ struct Ring: Codable, Equatable {
         case .ops: return ops
         case .code: return code
         case .settings: return settings
+        case .dash: return dash
         }
     }
 
@@ -255,6 +259,7 @@ struct Ring: Codable, Equatable {
         case .ops: return \.ops
         case .code: return \.code
         case .settings: return \.settings
+        case .dash: return \.dash
         }
     }
 }

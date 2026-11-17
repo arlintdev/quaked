@@ -27,6 +27,7 @@ pub fn expand(p: &str) -> PathBuf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum PageId {
+    Dash,
     Ai,
     Music,
     Shortcuts,
@@ -41,6 +42,7 @@ pub enum PageId {
 impl PageId {
     pub fn label(self) -> &'static str {
         match self {
+            PageId::Dash => "HOME",
             PageId::Ai => "AI",
             PageId::Music => "MUSIC",
             PageId::Shortcuts => "SHORTCUTS",
@@ -210,6 +212,7 @@ pub struct Ring {
     pub ops: String,
     pub code: String,
     pub settings: String,
+    pub dash: String,
     /// Breathe in this color while a Claude session needs you.
     pub alert: bool,
     pub alert_color: String,
@@ -316,7 +319,7 @@ impl Default for Config {
             version: 1,
             buzzer: true,
             idle_seconds: 45,
-            pages: vec![PageId::Ai, PageId::Music, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
+            pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
             ring: Ring::default(),
             touch: Touch::default(),
             shortcuts: vec![
@@ -355,6 +358,7 @@ impl Default for Ring {
             ops: "#7FD1B9".into(),
             code: "#A371F7".into(),
             settings: "#D0D0D8".into(),
+            dash: "#64D2FF".into(),
             alert: true,
             alert_color: "#F2B705".into(),
         }
@@ -389,6 +393,7 @@ impl Ring {
             PageId::Ops => &self.ops,
             PageId::Code => &self.code,
             PageId::Settings => &self.settings,
+            PageId::Dash => &self.dash,
         }
     }
 }
@@ -470,7 +475,7 @@ mod tests {
         assert!(!partial.buzzer);
         assert_eq!(partial.ring.ai, "#112233");
         assert_eq!(partial.ring.music, Ring::default().music);
-        assert_eq!(partial.pages.len(), 9);
+        assert_eq!(partial.pages.len(), 10);
     }
 
     #[test]

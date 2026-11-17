@@ -298,6 +298,7 @@ impl App {
                 auto_accept: self.cfg.league.auto_accept,
                 snap: self.cfg.league.snap,
             },
+            ring: &self.cfg.ring,
             level: &self.level,
             sessions: &self.sessions,
             sel: self.sel,
@@ -345,6 +346,7 @@ impl App {
     fn animating(&self) -> bool {
         match (self.page, &self.level) {
             (PageId::Music, _) => self.track.as_ref().is_some_and(|t| t.playing),
+            (PageId::Dash, _) => self.track.as_ref().is_some_and(|t| t.playing) || self.sessions.iter().any(|s| s.state == State::Working),
             (PageId::Ai, Level::Detail(_)) => true,
             (PageId::Ai, _) => self.sessions.iter().any(|s| s.steps.last().is_some_and(|st| st.status == status::StepStatus::Running)),
             _ => false,
@@ -540,7 +542,7 @@ impl App {
         self.level = Level::Top;
         self.scroll = 0;
         self.tile = 0;
-        self.music_fast.store(p == PageId::Music, Ordering::Relaxed);
+        self.music_fast.store(p == PageId::Music || p == PageId::Dash, Ordering::Relaxed);
         self.docker_fast.store(p == PageId::Docker, Ordering::Relaxed);
         self.ops_fast.store(p == PageId::Ops, Ordering::Relaxed);
         self.code_fast.store(p == PageId::Code, Ordering::Relaxed);
@@ -707,6 +709,7 @@ impl App {
             PageId::Ops => 1 + self.ops.hosts.len() + self.ops.sites.len(),
             PageId::Code => self.code.mine.len() + self.code.reviews.len(),
             PageId::Settings => render::SETTING_COUNT,
+            PageId::Dash => render::dash_pages(&self.cfg.pages).len(),
             _ => 0,
         }
     }
@@ -741,7 +744,7 @@ impl App {
                 self.scroll = (self.scroll as i32 - d).max(0) as usize;
             }
             (PageId::Settings, Level::Detail(_)) => self.adjust_setting(self.tile, d),
-            (PageId::Shortcuts | PageId::Soundboard | PageId::Docker | PageId::Ops | PageId::Code | PageId::Settings, _) => {
+            (PageId::Shortcuts | PageId::Soundboard | PageId::Docker | PageId::Ops | PageId::Code | PageId::Settings | PageId::Dash, _) => {
                 let n = self.tile_count() as i32;
                 if n > 0 {
                     self.tile = (self.tile as i32 + d).clamp(0, n - 1) as usize;
@@ -794,6 +797,11 @@ impl App {
                 (PageId::Soundboard, _) => self.toggle_clip(self.tile),
                 (PageId::Ops, _) => self.ops_activate(self.tile),
                 (PageId::Code, _) => self.open_pr(self.tile),
+                (PageId::Dash, _) => {
+                    if let Some(p) = render::dash_pages(&self.cfg.pages).get(self.tile).copied() {
+                        self.set_page(p);
+                    }
+                }
                 (PageId::Settings, Level::Detail(_)) => self.level = Level::Focus,
                 (PageId::Settings, _) => {
                     if self.tile < render::SETTING_SLIDERS {
@@ -975,6 +983,7 @@ impl App {
                 self.tile = i;
                 self.open_pr(i);
             }
+            Hit::Pane(p) => self.set_page(p),
             Hit::Setting(i, frac) => {
                 self.tile = i;
                 if i < render::SETTING_SLIDERS {

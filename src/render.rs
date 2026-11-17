@@ -64,6 +64,8 @@ pub enum Hit {
     Pr(usize),
     /// A SETTINGS card; for the sliders, where along the bar it was touched.
     Setting(usize, Option<f32>),
+    /// A dashboard tile: go to that page.
+    Pane(Page),
 }
 
 /// What the SETTINGS page shows.
@@ -100,6 +102,8 @@ pub struct View<'a> {
     pub ops: &'a ops::Status,
     pub code: &'a github::Status,
     pub settings: SettingsView,
+    /// Page colors, for the dashboard tiles.
+    pub ring: &'a crate::config::Ring,
     pub level: &'a Level,
     pub sessions: &'a [Session],
     pub sel: usize,
@@ -580,6 +584,7 @@ fn tab_width(p: Page) -> f32 {
         Page::Ops => 80.0,
         Page::Code => 92.0,
         Page::Settings => 56.0, // a gear, not a word
+        Page::Dash => 56.0,     // a grid
     }
 }
 
@@ -707,6 +712,32 @@ fn pr_lists(g: &github::Status, tile: usize) -> [(R, usize, usize, usize); 2] {
         (mine_panel(), list_window(m, tile.min(m.saturating_sub(1)), PR_ROWS), 0, m),
         (reviews_panel(), list_window(g.reviews.len(), tile.saturating_sub(m), PR_ROWS), m, g.reviews.len()),
     ]
+}
+
+// Dashboard: a tile per page (all but itself and Settings), in page order, two rows.
+pub fn dash_pages(pages: &[Page]) -> Vec<Page> {
+    pages.iter().copied().filter(|p| *p != Page::Dash && *p != Page::Settings).collect()
+}
+fn dash_rect(i: usize, n: usize) -> R {
+    let cols = n.div_ceil(2).max(1);
+    let rows = if n > cols { 2 } else { 1 };
+    let w = (W - 2.0 * M - (cols as f32 - 1.0) * G) / cols as f32;
+    let h = (CH - (rows as f32 - 1.0) * G) / rows as f32;
+    (M + (i % cols) as f32 * (w + G), CY + (i / cols) as f32 * (h + G), w, h)
+}
+pub fn page_symbol(p: Page) -> &'static str {
+    match p {
+        Page::Dash => "square.grid.2x2.fill",
+        Page::Ai => "sparkles",
+        Page::Music => "music.note",
+        Page::Shortcuts => "square.grid.3x3.fill",
+        Page::Soundboard => "waveform",
+        Page::League => "gamecontroller.fill",
+        Page::Docker => "shippingbox.fill",
+        Page::Ops => "server.rack",
+        Page::Code => "arrow.triangle.pull",
+        Page::Settings => "gearshape.fill",
+    }
 }
 
 // Settings: three sliders on top, eight switches below.
@@ -878,6 +909,10 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
         (Page::Code, _) => pr_lists(v.code, v.tile).into_iter().find_map(|(panel, first, offset, n)| {
             (0..PR_ROWS).find(|&s| inside(pr_rect(panel, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::Pr(offset + i))
         }),
+        (Page::Dash, _) => {
+            let tiles = dash_pages(v.pages);
+            (0..tiles.len()).find(|&i| inside(dash_rect(i, tiles.len()), x, y)).map(|i| Hit::Pane(tiles[i]))
+        }
         (Page::Settings, _) => (0..SETTING_COUNT).find(|&i| inside(setting_rect(i), x, y)).map(|i| {
             let frac = (i < SETTING_SLIDERS && inside(setting_bar_hit(i), x, y)).then(|| {
                 let (bx, _, bw, _) = setting_bar(i);
@@ -954,6 +989,10 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
             pr_rect(panel, (i - offset).checked_sub(first)?)
         }
         Hit::Setting(i, _) => setting_rect(i),
+        Hit::Pane(p) => {
+            let tiles = dash_pages(v.pages);
+            dash_rect(tiles.iter().position(|t| *t == p)?, tiles.len())
+        }
         Hit::Session(i) => {
             let (first, cols) = window(v.sessions.len(), v.sel);
             col_rect(i.checked_sub(first)?, cols)
@@ -990,6 +1029,7 @@ pub fn draw(c: &mut Canvas, v: &View) {
         (Page::Ops, _) => ops_page(c, v),
         (Page::Code, _) => code_page(c, v),
         (Page::Settings, _) => settings_page(c, v),
+        (Page::Dash, _) => dash_page(c, v),
     }
     if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
         c.rrect(r, 14.0, 0xFFFFFF, 0.22);
@@ -1016,6 +1056,8 @@ fn hints(v: &View) -> &'static str {
         (Page::Ops, _) => "turn  choose   ·   press  open / toggle   ·   double-click  back",
         (Page::Code, Level::Top) => "turn  switch page   ·   press  pick a pull request   ·   tap  open",
         (Page::Code, _) => "turn  choose   ·   press  open in browser   ·   double-click  back",
+        (Page::Dash, Level::Top) => "turn  switch page   ·   press  pick a pane   ·   tap  open",
+        (Page::Dash, _) => "turn  choose   ·   press  open   ·   double-click  back",
         (Page::Settings, Level::Top) => "turn  switch page   ·   press  change settings",
         (Page::Settings, Level::Focus) => "turn  choose   ·   press  adjust / switch   ·   double-click  back",
         (Page::Settings, Level::Detail(_)) => "turn  change   ·   press  done",
@@ -1030,8 +1072,8 @@ fn top_bar(c: &mut Canvas, v: &View) {
         let active = v.page == p;
         c.rrect(r, 17.0, if active { TEXT } else { 0x1C1C21 }, 1.0);
         let fg = if active { 0x111114 } else { MUTED };
-        if p == Page::Settings {
-            c.symbol("gearshape.fill", 18.0, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, fg);
+        if p == Page::Settings || p == Page::Dash {
+            c.symbol(page_symbol(p), 18.0, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, fg);
         } else {
             c.text(F::Bold, p.label(), 16.0, r.0 + r.2 / 2.0, r.1 + 23.0, fg, Align::Center);
         }
@@ -1061,6 +1103,7 @@ fn top_bar(c: &mut Canvas, v: &View) {
         (Page::Docker, Level::Detail(id)) => v.docker.containers.iter().find(|c| &c.id == id).map(|c| format!("›  {}", c.name)),
         (Page::Ops, Level::Focus) => ops_item_name(v.ops, v.tile).map(|n| format!("›  {n}")),
         (Page::Code, Level::Focus) => v.code.all().get(v.tile).map(|p| format!("›  {}", pr_ref(p))),
+        (Page::Dash, Level::Focus) => dash_pages(v.pages).get(v.tile).map(|p| format!("›  {}", p.label())),
         (Page::Settings, Level::Focus) => Some(format!("›  {}", setting_name(v.tile))),
         (Page::Settings, Level::Detail(_)) => Some(format!("›  {}", setting_name(v.tile))),
         _ => None,
@@ -2037,6 +2080,233 @@ fn host_card(c: &mut Canvas, v: &View, h: &ops::Host, r: R) {
     }
     if let Some((util, mem_used, mem_total, temp)) = h.gpu {
         metric(c, "GPU", format!("{util:.0}%  ·  {:.0}/{:.0} GB  ·  {temp:.0}°C", mem_used / 1024.0, mem_total / 1024.0), util / 100.0);
+    }
+}
+
+// ---------------------------------------------------------------- DASHBOARD
+
+/// What one dashboard tile says about its page.
+struct Brief {
+    /// Health: green fine, amber look, red broken, faint nothing going on.
+    dot: Option<u32>,
+    big: String,
+    big_color: u32,
+    lines: Vec<(String, u32)>,
+    /// A thin progress bar (music position).
+    bar: Option<f32>,
+}
+
+impl Brief {
+    fn new(big: impl Into<String>, big_color: u32) -> Brief {
+        Brief { dot: None, big: big.into(), big_color, lines: Vec::new(), bar: None }
+    }
+    fn line(mut self, text: impl Into<String>, color: u32) -> Brief {
+        let t = text.into();
+        if !t.is_empty() {
+            self.lines.push((t, color));
+        }
+        self
+    }
+    fn dot(mut self, color: u32) -> Brief {
+        self.dot = Some(color);
+        self
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn brief(v: &View, p: Page, accent: u32) -> Brief {
+    match p {
+        Page::Ai => {
+            let count = |st: State| v.sessions.iter().filter(|s| s.state == st).count();
+            let (waiting, working, done) = (count(State::Waiting), count(State::Working), count(State::Done));
+            let names = |st: State| v.sessions.iter().filter(|s| s.state == st).map(|s| if s.machine.is_empty() { s.name.clone() } else { format!("{} ({})", s.name, s.machine) }).collect::<Vec<_>>().join(", ");
+            let latest = v.sessions.iter().filter(|s| s.state == State::Working).max_by_key(|s| s.updated_at).and_then(|s| s.current_step().map(|st| format!("{}  ›  {} {}", s.name, st.tag, st.text)));
+            if v.sessions.is_empty() {
+                Brief::new("No sessions", FAINT).line("Claude sessions show up when you send a prompt", FAINT).dot(FAINT)
+            } else if waiting > 0 {
+                Brief::new(format!("{waiting} need{} you", if waiting == 1 { "s" } else { "" }), AMBER)
+                    .line(names(State::Waiting), TEXT_2)
+                    .line(if working > 0 { format!("{working} working  ·  {done} done") } else { format!("{done} done") }, MUTED)
+                    .dot(AMBER)
+            } else if working > 0 {
+                Brief::new(format!("{working} working"), ORANGE).line(names(State::Working), TEXT_2).line(latest.unwrap_or_default(), MUTED).dot(ORANGE)
+            } else {
+                Brief::new("All quiet", TEXT_2).line(plural(v.sessions.len(), "session", "sessions") + " idle or done", MUTED).dot(GREEN)
+            }
+        }
+        Page::Music => match v.track {
+            Some(t) => {
+                let mut b = Brief::new(t.title.clone(), TEXT).line(t.artist.clone(), TEXT_2).line(format!("{}  ·  {}", t.app, if t.playing { "playing" } else { "paused" }), MUTED).dot(if t.playing { SPOTIFY } else { FAINT });
+                if t.duration > 0.0 {
+                    b.bar = Some((v.position / t.duration) as f32);
+                }
+                b
+            }
+            None => Brief::new("Nothing playing", FAINT).line(v.problem.unwrap_or(""), MUTED).dot(FAINT),
+        },
+        Page::Shortcuts => Brief::new(plural(v.shortcuts.len(), "shortcut", "shortcuts"), TEXT_2),
+        Page::Soundboard => {
+            let s = v.sounds;
+            let playing: Vec<&str> = s.playing.iter().filter_map(|&i| s.clips.get(i)).map(|c| c.title.as_str()).collect();
+            let app = s.listener.as_deref().map(|l| crate::symbols::running_app_name(l).unwrap_or_else(|| l.rsplit('.').next().unwrap_or(l).to_string()));
+            let b = if let Some(e) = &s.error {
+                Brief::new("Audio problem", RED).line(e.clone(), AMBER).dot(RED)
+            } else if s.live {
+                Brief::new(match app { Some(a) => format!("Live in {a}"), None => "Live".into() }, GREEN).dot(GREEN)
+            } else {
+                Brief::new("Not on a call", TEXT_2).dot(FAINT)
+            };
+            let b = b.line(if playing.is_empty() { plural(s.clips.len(), "clip", "clips") } else { format!("playing  {}", playing.join(", ")) }, if playing.is_empty() { MUTED } else { TEXT });
+            if s.mic_muted {
+                b.line("mic muted", RED)
+            } else {
+                b
+            }
+        }
+        Page::League => {
+            let l = v.league;
+            let auto = if v.league_cfg.auto_accept { ("auto-accept on", GREEN) } else { ("auto-accept off", MUTED) };
+            if !l.running {
+                return Brief::new("Client closed", FAINT).line(auto.0, auto.1).dot(FAINT);
+            }
+            let queue = l.queue.clone().unwrap_or_default();
+            let (big, col, dot) = match l.phase.as_str() {
+                "Lobby" => ("In lobby".to_string(), TEXT, GREEN),
+                "Matchmaking" => (format!("In queue  {}", mmss(l.search.map(|s| s.0).unwrap_or(0.0))), GOLD, GOLD),
+                "ReadyCheck" => ("Match found".to_string(), GOLD, GOLD),
+                "ChampSelect" => ("Champ select".to_string(), GOLD, GOLD),
+                "InProgress" | "GameStart" => ("In game".to_string(), TEXT, GREEN),
+                "Reconnect" => ("Reconnect needed".to_string(), AMBER, AMBER),
+                "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => ("Game over".to_string(), TEXT_2, GREEN),
+                _ => ("Home screen".to_string(), TEXT_2, GREEN),
+            };
+            Brief::new(big, col).line(queue, TEXT_2).line(auto.0, auto.1).dot(dot)
+        }
+        Page::Docker => {
+            let d = v.docker;
+            if let Some(e) = &d.error {
+                return Brief::new("Engine unreachable", RED).line(e.clone(), AMBER).dot(RED);
+            }
+            let running = d.containers.iter().filter(|c| c.state == "running").count();
+            let restarting: Vec<&str> = d.containers.iter().filter(|c| c.state == "restarting").map(|c| c.name.as_str()).collect();
+            let stopped: Vec<&str> = d.containers.iter().filter(|c| c.state == "exited" || c.state == "dead").map(|c| c.name.as_str()).collect();
+            let b = Brief::new(format!("{running} of {} running", d.containers.len()), if running > 0 { TEXT } else { TEXT_2 }).line(d.engine.clone(), MUTED);
+            if !restarting.is_empty() {
+                b.line(format!("restarting  {}", restarting.join(", ")), AMBER).dot(AMBER)
+            } else if !stopped.is_empty() {
+                b.line(format!("stopped  {}", stopped.join(", ")), MUTED).dot(GREEN)
+            } else {
+                b.dot(if d.ok { GREEN } else { FAINT })
+            }
+        }
+        Page::Ops => {
+            let o = v.ops;
+            let down: Vec<&str> = o.hosts.iter().filter(|h| !h.up).map(|h| h.name.as_str()).collect();
+            let failing: Vec<&str> = o.sites.iter().filter(|s| !s.code.is_some_and(|c| c < 400)).map(|s| site_host(&s.url)).collect();
+            let net = format!(
+                "WARP {}{}   ·   {}",
+                match o.net.warp {
+                    Some(true) => "on",
+                    Some(false) => "off",
+                    None => "?",
+                },
+                if o.net.appgate { "  ·  AppGate" } else { "" },
+                if o.net.ip.is_empty() { "no internet".to_string() } else { format!("{}  {}", o.net.ip, o.net.colo) }
+            );
+            let up = o.hosts.len() - down.len();
+            let summary = format!("{up}/{} hosts up  ·  {}/{} sites OK", o.hosts.len(), o.sites.len() - failing.len(), o.sites.len());
+            if !failing.is_empty() {
+                Brief::new(format!("{} failing", plural(failing.len(), "site", "sites")), RED).line(failing.join(", "), TEXT_2).line(net, MUTED).dot(RED)
+            } else if !down.is_empty() {
+                Brief::new(format!("{} down", plural(down.len(), "host", "hosts")), AMBER).line(summary, TEXT_2).line(net, MUTED).dot(AMBER)
+            } else if o.hosts.is_empty() && o.sites.is_empty() {
+                Brief::new("Nothing to watch", FAINT).line(net, MUTED).dot(FAINT)
+            } else {
+                Brief::new("All up", GREEN).line(summary, TEXT_2).line(net, MUTED).dot(GREEN)
+            }
+        }
+        Page::Code => {
+            let g = v.code;
+            if !g.ok && !g.gitlab_ok {
+                return Brief::new(if g.error.is_some() { "Can't reach GitHub" } else { "Loading…" }, MUTED).line(g.error.clone().unwrap_or_default(), AMBER).dot(FAINT);
+            }
+            let failing = g.mine.iter().filter(|p| matches!(p.ci.as_str(), "FAILURE" | "ERROR")).count();
+            let conflicts = g.mine.iter().filter(|p| p.mergeable == "CONFLICTING").count();
+            let approved = g.mine.iter().filter(|p| p.review == "APPROVED").count();
+            let r = g.reviews.len();
+            let b = if r > 0 {
+                Brief::new(format!("{} waiting on you", plural(r, "review", "reviews")), accent).dot(accent)
+            } else {
+                Brief::new(plural(g.mine.len(), "open PR", "open PRs"), TEXT).dot(if failing > 0 { RED } else { GREEN })
+            };
+            let b = b.line(
+                format!("{} open  ·  {failing} failing  ·  {conflicts} conflicting  ·  {approved} approved", g.mine.len()),
+                if failing > 0 { 0xFF9B9B } else { TEXT_2 },
+            );
+            match &g.gitlab_error {
+                Some(e) if e.contains("not signed in") => b.line("GitLab: glab auth login", AMBER),
+                _ => b,
+            }
+        }
+        Page::Dash | Page::Settings => Brief::new("", TEXT),
+    }
+}
+
+fn dash_page(c: &mut Canvas, v: &View) {
+    let tiles = dash_pages(v.pages);
+    if tiles.is_empty() {
+        c.rrect((M, CY, W - 2.0 * M, CH), 16.0, PANEL_DEEP, 1.0);
+        c.text(F::Medium, "No other pages to summarize", 30.0, W / 2.0, CY + CH / 2.0, FAINT, Align::Center);
+        return;
+    }
+    for (i, p) in tiles.iter().copied().enumerate() {
+        let r = dash_rect(i, tiles.len());
+        let (x, y, w, h) = r;
+        let color = crate::config::hex(v.ring.color_for(p), v.accent);
+        let b = brief(v, p, color);
+        let new = v.notice.is_some_and(|(_, _, q)| q == p);
+        c.rrect(r, 16.0, PANEL, 1.0);
+        c.rrect((x, y, 6.0, h), 3.0, color, 1.0);
+        c.symbol(page_symbol(p), 17.0, x + 34.0, y + 30.0, color);
+        c.text(F::Bold, p.label(), 14.0, x + 54.0, y + 35.0, color, Align::Left);
+        let mut rx = x + w - 20.0;
+        if let Some(d) = b.dot {
+            c.circle(rx - 6.0, y + 30.0, 7.0, d, 1.0);
+            rx -= 26.0;
+        }
+        if new {
+            let pw = c.measure(F::Bold, "NEW", 12.0) + 12.0 * 1.4;
+            c.pill(rx - pw, y + 19.0, "NEW", 12.0, color, 0x101013);
+        }
+        let ix = x + 24.0;
+        let iw = w - 44.0;
+        c.fit(F::Bold, &b.big, 34.0, iw, ix, y + 84.0, b.big_color, Align::Left);
+        let mut ly = y + 114.0;
+        for (t, col) in b.lines.iter().take(3) {
+            c.fit(F::Medium, t, 16.0, iw, ix, ly, *col, Align::Left);
+            ly += 24.0;
+        }
+        if let Some(f) = b.bar {
+            bar(c, ix, y + h - 26.0, iw, f.clamp(0.0, 1.0), color);
+        }
+        if p == Page::Shortcuts {
+            // The first tiles' icons, in their colors.
+            let mut sx = ix + 14.0;
+            for sc in v.shortcuts.iter().take(((iw - 10.0) / 44.0) as usize) {
+                let col = crate::config::hex(&sc.color, TEXT_2);
+                c.rrect((sx - 18.0, y + h - 66.0, 36.0, 36.0), 9.0, 0x22222A, 1.0);
+                c.symbol(&sc.symbol, 18.0, sx, y + h - 48.0, col);
+                sx += 44.0;
+            }
+        }
+        if v.level != &Level::Top && v.tile == i {
+            c.outline(r, 16.0, TEXT, 3.0);
+        } else if new {
+            c.outline(r, 16.0, color, 2.0);
+        }
     }
 }
 

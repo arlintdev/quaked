@@ -206,7 +206,7 @@ fn preview(dir: &str) {
         gitlab_error: None,
     };
     let settings = render::SettingsView { screen: 200, ring: 169, idle: 45, ring_on: true, alert: true, buzzer: true, mic: false, auto_accept: true, snap: true, blink: true, jump: true };
-    let shots: [(&str, Page, Level, usize, usize, usize); 15] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 16] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -221,6 +221,7 @@ fn preview(dir: &str) {
         ("13-ops", Page::Ops, Level::Focus, 0, 0, 2),
         ("14-code", Page::Code, Level::Focus, 0, 0, 1),
         ("15-settings", Page::Settings, Level::Focus, 0, 0, 6),
+        ("0-dash", Page::Dash, Level::Top, 0, 0, 0),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
@@ -240,6 +241,7 @@ fn preview(dir: &str) {
             ops: &opsd,
             code: &code,
             settings,
+            ring: &cfg.ring,
             level: &level,
             sessions: &sessions,
             sel,
