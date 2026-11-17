@@ -151,7 +151,14 @@ itself once you answer on the Mac.
   the timeout (2 minutes; settings page → General). Claude's prompt stays up either way.
 - A prompt from a session on your other Mac shows on whichever Mac has the Quake.
 
-It runs as a `PermissionRequest` hook (`quaked permit`), which `./install.sh` adds.
+- In the desktop app Claude often asks in its **next-step box** at the end of a turn
+  ("Push it?" with buttons). That question shows on the Quake too, with the same buttons;
+  picking one on the knob wakes the session with your answer. Replying in the app first
+  clears the Quake's copy.
+
+Questions and permissions run as a `PermissionRequest` hook (`quaked permit`); next-step
+questions as a background `PostToolUse` hook on the app's next-step tool (`quaked
+nextstep`, with `asyncRewake`, so it never holds the turn open). `./install.sh` adds both.
 
 AI cards also show what Claude is saying as it works (its narration between tool calls,
 read from the session transcript), and sessions that have been done or idle for 5 minutes
