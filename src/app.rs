@@ -599,6 +599,9 @@ impl App {
                 return;
             }
             RING_FACTORY
+        } else if let Some(cmd) = self.night_ring() {
+            // Night mode keeps the ring dark (it never runs during ready checks, questions or alerts).
+            cmd
         } else if self.league.phase == "ReadyCheck" {
             let (hue, sat) = config::hue_sat(config::hex(&r.league, 0xC89B3C));
             Command::Ring { effect: proto::EFFECT_BREATHING, hue, sat, brightness: r.brightness.max(180), speed: 220 }

@@ -44,9 +44,8 @@ impl App {
         }
     }
 
-    /// The ring this feature wants: dark while the night screen shows. Not consulted by
-    /// update_ring() yet, so night_hold_ring() keeps the ring dark in the meantime.
-    #[allow(dead_code)]
+    /// The ring this feature wants: dark while the night screen shows (update_ring()
+    /// checks this first).
     pub(super) fn night_ring(&self) -> Option<Command> {
         self.night.active.then_some(RING_OFF)
     }
