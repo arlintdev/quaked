@@ -205,7 +205,7 @@ fn preview(dir: &str) {
         gitlab_ok: true,
         gitlab_error: None,
     };
-    let settings = render::SettingsView { screen: 200, ring: 169, idle: 45, ring_on: true, alert: true, buzzer: true, mic: false, auto_accept: true, snap: true, blink: true, jump: true };
+    let settings = render::SettingsView { screen: 200, ring: 169, idle: 45, idle_home: true, ring_on: true, alert: true, buzzer: true, mic: false, auto_accept: true, snap: true, blink: true, jump: true };
     let shots: [(&str, Page, Level, usize, usize, usize); 16] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),

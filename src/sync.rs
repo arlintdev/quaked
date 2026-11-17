@@ -138,11 +138,8 @@ extern "C" fn on_browse(_: DnsRef, flags: u32, interface: u32, err: i32, name: *
         }
         return;
     }
-    if let Some(entry) = d.peers.lock().unwrap().get_mut(&service) {
-        entry.2 += 1;
-        return;
-    }
-    // Resolve to host and port right here (a separate dns_sd connection).
+    // Resolve to host and port right here (a separate dns_sd connection). Do it on
+    // every announcement: a restarted quaked comes back on a new port.
     let mut found: Option<(String, u16)> = None;
     let mut sd: DnsRef = std::ptr::null_mut();
     let rc = unsafe { DNSServiceResolve(&mut sd, 0, interface, name, regtype, domain, on_resolve, &mut found as *mut _ as *mut c_void) };
@@ -150,9 +147,20 @@ extern "C" fn on_browse(_: DnsRef, flags: u32, interface: u32, err: i32, name: *
         process(sd, 5000);
         unsafe { DNSServiceRefDeallocate(sd) };
     }
-    if let Some((host, port)) = found {
-        log(format!("sync: found {service} at {host}:{port}"));
-        d.peers.lock().unwrap().insert(service, (host, port, 1));
+    let mut peers = d.peers.lock().unwrap();
+    match (peers.get_mut(&service), found) {
+        (Some(entry), Some((host, port))) => {
+            if entry.0 != host || entry.1 != port {
+                log(format!("sync: {service} moved to {host}:{port}"));
+            }
+            *entry = (host, port, entry.2 + 1);
+        }
+        (Some(entry), None) => entry.2 += 1,
+        (None, Some((host, port))) => {
+            log(format!("sync: found {service} at {host}:{port}"));
+            peers.insert(service, (host, port, 1));
+        }
+        (None, None) => {}
     }
 }
 
@@ -213,9 +221,24 @@ fn serve(listener: TcpListener, cfg: Arc<Mutex<SyncCfg>>, name: Arc<Mutex<String
     }
 }
 
+/// Connects to a peer: IPv4 first (a ".local" name often resolves to unscoped IPv6
+/// link-local addresses first, which can't be reached), then the rest.
+fn connect(host: &str, port: u16) -> Result<TcpStream, String> {
+    let mut addrs: Vec<std::net::SocketAddr> = (host.trim_end_matches('.'), port).to_socket_addrs().map_err(|e| e.to_string())?.collect();
+    addrs.sort_by_key(|a| !a.is_ipv4());
+    addrs.dedup();
+    let mut last = "can't resolve".to_string();
+    for a in addrs {
+        match TcpStream::connect_timeout(&a, Duration::from_secs(2)) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e.to_string().split(" (os error").next().unwrap_or("").to_string(),
+        }
+    }
+    Err(last)
+}
+
 fn fetch(host: &str, port: u16, key: &str) -> Result<Vec<Session>, String> {
-    let addr = (host.trim_end_matches('.'), port).to_socket_addrs().map_err(|e| e.to_string())?.next().ok_or("can't resolve")?;
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string().split(" (os error").next().unwrap_or("").to_string())?;
+    let mut s = connect(host, port)?;
     s.set_read_timeout(Some(Duration::from_secs(4))).ok();
     writeln!(s, "{key} sessions").map_err(|e| e.to_string())?;
     let mut reply = String::new();
@@ -241,7 +264,8 @@ pub fn spawn(cfg: SyncCfg, want: Arc<AtomicBool>, emit: impl Fn(Status) + Send +
 fn run(cfg: SyncCfg, want: Arc<AtomicBool>, rx: Receiver<Cmd>, emit: impl Fn(Status)) {
     let shared = Arc::new(Mutex::new(cfg.clone()));
     let name = Arc::new(Mutex::new(if cfg.name.is_empty() { computer_name() } else { cfg.name.clone() }));
-    let listener = match TcpListener::bind("0.0.0.0:0") {
+    // IPv6 and IPv4 both (macOS sockets bound to [::] take IPv4 too).
+    let listener = match TcpListener::bind("[::]:0").or_else(|_| TcpListener::bind("0.0.0.0:0")) {
         Ok(l) => l,
         Err(e) => return log(format!("sync: can't listen: {e}")),
     };

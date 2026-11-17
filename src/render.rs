@@ -75,6 +75,7 @@ pub struct SettingsView {
     pub screen: u8,
     pub ring: u8,
     pub idle: u64,
+    pub idle_home: bool,
     pub ring_on: bool,
     pub alert: bool,
     pub blink: bool,
@@ -740,8 +741,8 @@ pub fn page_symbol(p: Page) -> &'static str {
     }
 }
 
-// Settings: three sliders on top, eight switches below.
-pub const SETTING_COUNT: usize = 11;
+// Settings: three sliders on top, nine switches below.
+pub const SETTING_COUNT: usize = 12;
 pub const SETTING_SLIDERS: usize = 3;
 pub const SCREEN_MIN: u8 = 10;
 /// Idle timeout choices, in seconds.
@@ -753,7 +754,7 @@ fn setting_rect(i: usize) -> R {
         (M + i as f32 * (w + G), CY, w, SET_ROW_H)
     } else {
         let j = (i - SETTING_SLIDERS) as f32;
-        let w = (W - 2.0 * M - 7.0 * G) / 8.0;
+        let w = (W - 2.0 * M - 8.0 * G) / 9.0;
         (M + j * (w + G), CY + SET_ROW_H + G, w, SET_ROW_H)
     }
 }
@@ -770,7 +771,7 @@ pub fn idle_index(secs: u64) -> usize {
     IDLE_STEPS.iter().enumerate().min_by_key(|(_, s)| s.abs_diff(secs)).map(|(i, _)| i).unwrap_or(2)
 }
 pub fn setting_name(i: usize) -> &'static str {
-    ["Screen brightness", "Ring brightness", "Back to top after", "Ring light", "Alert pulse", "Blink on new", "Jump to new", "Buzzer", "Quake mic", "Auto-accept", "Snap to League"].get(i).copied().unwrap_or("")
+    ["Screen brightness", "Ring brightness", "Idle after", "Home when idle", "Ring light", "Alert pulse", "Blink on new", "Jump to new", "Buzzer", "Quake mic", "Auto-accept", "Snap to League"].get(i).copied().unwrap_or("")
 }
 
 /// First row of a scrolling list so that `sel` stays visible.
@@ -2321,7 +2322,7 @@ fn settings_page(c: &mut Canvas, v: &View) {
     let sliders: [(&str, String, f32, &str); SETTING_SLIDERS] = [
         ("sun.max.fill", format!("{}%", (st.screen as f32 / 255.0 * 100.0).round()), (st.screen.saturating_sub(SCREEN_MIN)) as f32 / (255 - SCREEN_MIN) as f32, "the Quake's screen"),
         ("circle.circle.fill", format!("{}%", (st.ring as f32 / 255.0 * 100.0).round()), st.ring as f32 / 255.0, if st.ring_on { "the knob's light ring" } else { "ring light is off" }),
-        ("timer", idle_label, idle_i as f32 / (IDLE_STEPS.len() - 1) as f32, "without input"),
+        ("timer", idle_label, idle_i as f32 / (IDLE_STEPS.len() - 1) as f32, if st.idle_home { "then the dashboard" } else { "then back to the top" }),
     ];
     for (i, (sym, value, frac, sub)) in sliders.iter().enumerate() {
         let r = setting_rect(i);
@@ -2353,6 +2354,7 @@ fn settings_page(c: &mut Canvas, v: &View) {
         }
     }
     let switches: [(bool, &str, &str); SETTING_COUNT - SETTING_SLIDERS] = [
+        (st.idle_home, "house.fill", "back to the dashboard when idle"),
         (st.ring_on, "rays", "page colors on the knob"),
         (st.alert, "bell.badge.fill", "breathe when Claude needs you"),
         (st.blink, "light.beacon.max.fill", "flash the ring when something is new"),

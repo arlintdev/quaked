@@ -6,7 +6,9 @@ knob's light ring:
 
 - **Dashboard** (the grid icon, first by default): a tile per pane with a health dot and
   its status at a glance: who needs you, now playing, call routing, League phase,
-  containers, hosts and sites, PRs. Tap a tile (or press the knob on it) to go there.
+  containers, hosts and sites, PRs. Tap a tile (or press the knob on it) to go there. After the idle
+  time (default 45 s, set on the Settings page or in the companion) the board comes back
+  here; switch "Home when idle" off to stay on the current page instead.
 
 - **AI**: a column per Claude Code session showing state (working / needs you / done / idle),
   the prompt, why it needs you or Claude's last reply, and its latest steps: commands,

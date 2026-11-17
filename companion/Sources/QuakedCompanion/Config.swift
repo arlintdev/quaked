@@ -30,6 +30,8 @@ struct Config: Codable, Equatable {
     var buzzer = true
     /// Seconds without input before the board returns to the top level.
     var idleSeconds = 45
+    /// After idleSeconds, go back to the dashboard (not just the page's top level).
+    var idleHome = true
     /// Pages in knob order; a page left out is hidden.
     var pages: [PageId] = PageId.allCases
     var ring = Ring()
@@ -54,6 +56,7 @@ struct Config: Codable, Equatable {
         version = c.value(.version, d.version)
         buzzer = c.value(.buzzer, d.buzzer)
         idleSeconds = c.value(.idleSeconds, d.idleSeconds)
+        idleHome = c.value(.idleHome, d.idleHome)
         let pageNames: [String] = c.value(.pages, d.pages.map(\.rawValue))
         var seen = Set<PageId>()
         let parsed = pageNames.compactMap(PageId.init(rawValue:)).filter { seen.insert($0).inserted }

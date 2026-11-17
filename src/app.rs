@@ -134,6 +134,9 @@ struct App {
     scroll: usize,
     tile: usize,
     last_input: Instant,
+    /// When the page last changed (by you, an alert or a queue pop); idle counts from
+    /// whichever of this and the last input is later.
+    page_since: Instant,
     // Device
     connected: bool,
     ring_sent: Option<Command>,
@@ -289,6 +292,7 @@ impl App {
                 screen: self.undim_to.unwrap_or(self.luminance),
                 ring: self.cfg.ring.brightness,
                 idle: self.cfg.idle_seconds,
+                idle_home: self.cfg.idle_home,
                 ring_on: self.cfg.ring.enabled,
                 alert: self.cfg.ring.alert,
                 blink: self.cfg.alerts.blink,
@@ -538,6 +542,9 @@ impl App {
     // ------------------------------------------------------------ navigation
 
     fn set_page(&mut self, p: PageId) {
+        if p != self.page {
+            self.page_since = Instant::now();
+        }
         self.page = p;
         self.level = Level::Top;
         self.scroll = 0;
@@ -667,17 +674,18 @@ impl App {
 
     fn toggle_setting(&mut self, i: usize) {
         match i {
-            3 => self.cfg.ring.enabled = !self.cfg.ring.enabled,
-            4 => self.cfg.ring.alert = !self.cfg.ring.alert,
-            5 => self.cfg.alerts.blink = !self.cfg.alerts.blink,
-            6 => self.cfg.alerts.jump = !self.cfg.alerts.jump,
-            7 => self.cfg.buzzer = !self.cfg.buzzer,
-            8 => {
+            3 => self.cfg.idle_home = !self.cfg.idle_home,
+            4 => self.cfg.ring.enabled = !self.cfg.ring.enabled,
+            5 => self.cfg.ring.alert = !self.cfg.ring.alert,
+            6 => self.cfg.alerts.blink = !self.cfg.alerts.blink,
+            7 => self.cfg.alerts.jump = !self.cfg.alerts.jump,
+            8 => self.cfg.buzzer = !self.cfg.buzzer,
+            9 => {
                 self.cfg.device.mic = !self.cfg.device.mic;
                 let _ = self.commands.send(Command::Mic(self.cfg.device.mic));
             }
-            9 => return self.toggle_auto_accept(),
-            10 => {
+            10 => return self.toggle_auto_accept(),
+            11 => {
                 self.cfg.league.snap = !self.cfg.league.snap;
                 let _ = self.league_cmd.send(league::Cmd::Configure(self.cfg.league.clone()));
             }
@@ -1301,10 +1309,18 @@ impl ApplicationHandler<Event> for App {
             }
             self.next_logs = now + LOG_REFRESH;
         }
-        if self.level != Level::Top && self.last_input.elapsed() > Duration::from_secs(self.cfg.idle_seconds.max(5)) {
-            self.level = Level::Top;
-            self.scroll = 0;
-            self.redraw();
+        let idle_for = Duration::from_secs(self.cfg.idle_seconds.max(5));
+        if self.last_input.elapsed() > idle_for && self.page_since.elapsed() > idle_for {
+            // Stay on League while a match is being accepted or picked.
+            let league_busy = self.page == PageId::League && matches!(self.league.phase.as_str(), "ReadyCheck" | "ChampSelect");
+            if self.cfg.idle_home && self.page != PageId::Dash && self.cfg.pages.contains(&PageId::Dash) && !league_busy {
+                self.set_page(PageId::Dash);
+                self.redraw();
+            } else if self.level != Level::Top {
+                self.level = Level::Top;
+                self.scroll = 0;
+                self.redraw();
+            }
         }
         let (_, second) = clock();
         if second != self.drawn_second && (self.animating() || second % 60 == 0) {
@@ -1548,6 +1564,7 @@ pub fn run() {
         scroll: 0,
         tile: 0,
         last_input: Instant::now(),
+        page_since: Instant::now(),
         connected: false,
         ring_sent: None,
         luminance: 255,

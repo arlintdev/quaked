@@ -64,6 +64,9 @@ pub struct Config {
     pub buzzer: bool,
     /// Seconds without input before the board returns to the top level.
     pub idle_seconds: u64,
+    /// After `idle_seconds` without input, go back to the dashboard (when it's shown);
+    /// otherwise just back to the top level of the current page.
+    pub idle_home: bool,
     /// Pages in knob order. Leave one out to hide it.
     pub pages: Vec<PageId>,
     pub ring: Ring,
@@ -319,6 +322,7 @@ impl Default for Config {
             version: 1,
             buzzer: true,
             idle_seconds: 45,
+            idle_home: true,
             pages: vec![PageId::Dash, PageId::Ai, PageId::Music, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
             ring: Ring::default(),
             touch: Touch::default(),

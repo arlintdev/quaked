@@ -52,6 +52,17 @@ struct LightingView: View {
 
 struct GeneralView: View {
     @EnvironmentObject var store: ConfigStore
+
+    /// The same steps as the board's Settings slider, plus whatever is set now.
+    private var idleChoices: [Int] {
+        let steps = [15, 30, 45, 60, 90, 120, 180, 300, 600]
+        return steps.contains(store.config.idleSeconds) ? steps : (steps + [store.config.idleSeconds]).sorted()
+    }
+
+    private var idleLabel: String {
+        let s = store.config.idleSeconds
+        return s >= 120 ? "\(s / 60) min" : "\(s) s"
+    }
     var body: some View {
         Form {
             Section {
@@ -61,9 +72,18 @@ struct GeneralView: View {
                         Text("Chirps when a Claude session starts waiting on you.").font(.caption).foregroundColor(.secondary)
                     }
                 }
-                Stepper(value: $store.config.idleSeconds, in: 5...3600, step: 5) {
-                    LabeledContent("Back to the top after") {
-                        Text("\(store.config.idleSeconds) s idle").monospacedDigit()
+                Picker("Idle after", selection: $store.config.idleSeconds) {
+                    ForEach(idleChoices, id: \.self) { secs in
+                        Text(secs >= 120 ? "\(secs / 60) min" : "\(secs) s").tag(secs)
+                    }
+                }
+                Toggle(isOn: $store.config.idleHome) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Go back to the dashboard when idle")
+                        Text(store.config.idleHome
+                             ? "After \(idleLabel) without input the board returns to the dashboard (it stays on League during a ready check or champ select)."
+                             : "After \(idleLabel) without input the board only leaves what you opened and stays on its page.")
+                            .font(.caption).foregroundColor(.secondary)
                     }
                 }
             }
