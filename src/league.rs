@@ -5,7 +5,9 @@
 //! It also keeps your record with the people you play with: every finished matched game
 //! from the client's match history is saved to league-history.json (so the tally keeps
 //! growing past the client's short history), and during champ select and the game it
-//! shows your wins and losses with the teammates you have.
+//! shows your wins and losses with the teammates you have. Each saved game remembers your
+//! champion, so champ select shows your record on the one you're hovering, and when a game
+//! ends a post-game card shows your line from it and your updated records.
 //!
 //! During a game it reads Riot's Live Client Data API (https://127.0.0.1:2999, served by
 //! the game itself) for the clock, score, your stats, your respawn timer and the events,
@@ -36,6 +38,64 @@ pub struct ChampSelect {
     pub time_left_ms: f64,
     pub position: String,
     pub champion: String,
+    /// 0 until you hover or lock one in.
+    pub champion_id: i64,
+}
+
+/// Your record on one champion, from the saved games.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChampRecord {
+    pub champion: String,
+    /// In this kind of game (ARAM and Mayhem together).
+    pub mode: (u32, u32),
+    /// In every mode.
+    pub all: (u32, u32),
+    /// The last few games on it in this kind of game, oldest first (true: a win).
+    pub recent: Vec<bool>,
+    /// When you last played it (unix ms), 0 if never.
+    pub last: u64,
+}
+
+impl ChampRecord {
+    pub fn games(&self) -> u32 {
+        self.all.0 + self.all.1
+    }
+}
+
+/// The game you just finished (from the client's match history, which shows all of it).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PostGame {
+    pub game_id: i64,
+    pub win: bool,
+    /// Ended by an early vote (remake).
+    pub remake: bool,
+    /// Arena: where your team placed (1st..), 0 elsewhere.
+    pub placement: u32,
+    pub champion: String,
+    pub mode: Mode,
+    /// The queue's name ("ARAM: Mayhem").
+    pub mode_name: String,
+    /// Seconds.
+    pub duration: f64,
+    pub kills: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    /// Your team's kills (for kill participation).
+    pub team_kills: u32,
+    /// Damage to champions.
+    pub damage: u64,
+    /// Where that damage ranks on your team (1: the most).
+    pub damage_rank: u32,
+    pub gold: u64,
+    pub cs: u32,
+    pub vision: u32,
+    pub level: u32,
+    /// Your record in this kind of game, this one included.
+    pub mode_record: (u32, u32),
+    /// Your record on this champion in this kind of game, this one included.
+    pub champ_record: (u32, u32),
+    /// Teammates you know (friends, or played with before) and your record together now.
+    pub mates: Vec<Duo>,
 }
 
 /// What kind of game: the pane changes its layout and colors to match.
@@ -166,6 +226,12 @@ pub struct Status {
     pub mode_name: String,
     /// Your record in this kind of game (ARAM and Mayhem together).
     pub mode_record: (u32, u32),
+    /// This session's games, oldest first (true: a win).
+    pub session_games: Vec<bool>,
+    /// Champ select: your record on the champion you're hovering or locked in.
+    pub champ_record: Option<ChampRecord>,
+    /// The game you just finished: shown until you queue again (or for 10 minutes).
+    pub post_game: Option<PostGame>,
 }
 
 #[derive(Debug)]
@@ -260,6 +326,10 @@ fn run(mut cfg: LeagueCfg, rx: Receiver<Cmd>, emit: impl Fn(Event)) {
     let mut next_history = Instant::now();
     let mut next_mates = Instant::now();
     let mut last_phase = String::new();
+    // A game ended and isn't in the saved history yet (its result shows up a little later).
+    let mut awaiting: Option<Instant> = None;
+    // When the post-game card went up.
+    let mut post_shown: Option<Instant> = None;
     loop {
         let wait = if client.is_some() { Duration::from_millis(700) } else { Duration::from_secs(3) };
         match rx.recv_timeout(wait) {
@@ -338,13 +408,7 @@ fn run(mut cfg: LeagueCfg, rx: Receiver<Cmd>, emit: impl Fn(Event)) {
         if matches!(phase.as_str(), "Lobby" | "Matchmaking" | "ReadyCheck" | "ChampSelect") {
             let queue_id = c.get("/lol-lobby/v2/lobby").and_then(|l| l.pointer("/gameConfig/queueId").and_then(Value::as_i64));
             if let Some(id) = queue_id {
-                if !queues.contains_key(&id) {
-                    if let Some(q) = c.get(&format!("/lol-game-queues/v1/queues/{id}")) {
-                        let name = q.get("description").and_then(Value::as_str).filter(|s| !s.is_empty()).or_else(|| q.get("shortName").and_then(Value::as_str)).unwrap_or("").to_string();
-                        queues.insert(id, name);
-                    }
-                }
-                status.queue = queues.get(&id).cloned().filter(|s| !s.is_empty());
+                status.queue = queue_name(&c, &mut queues, id);
             }
         }
 
@@ -403,17 +467,24 @@ fn run(mut cfg: LeagueCfg, rx: Receiver<Cmd>, emit: impl Fn(Event)) {
                     time_left_ms: s.pointer("/timer/adjustedTimeLeftInPhase").and_then(Value::as_f64).unwrap_or(0.0),
                     position: mine.and_then(|p| p.get("assignedPosition").and_then(Value::as_str)).unwrap_or("").to_string(),
                     champion: champ_id.and_then(|id| champions.get(&id).cloned()).unwrap_or_default(),
+                    champion_id: champ_id.unwrap_or(0),
                 });
             }
         }
-        // A game just ended: its result shows up in the history a little later.
-        let ended = matches!(last_phase.as_str(), "InProgress" | "GameStart" | "Reconnect" | "WaitingForStats" | "PreEndOfGame") && matches!(phase.as_str(), "EndOfGame" | "Lobby" | "None" | "");
+        // A game just ended (or quaked started on the post-game screen): look for it in the
+        // history soon, and keep looking every few seconds until it's there.
+        let playing = |p: &str| matches!(p, "InProgress" | "GameStart" | "Reconnect");
+        let ended = (playing(&last_phase) && !playing(&phase) && !phase.is_empty()) || (last_phase.is_empty() && matches!(phase.as_str(), "WaitingForStats" | "PreEndOfGame" | "EndOfGame"));
         if ended {
-            next_history = Instant::now() + Duration::from_secs(20);
+            awaiting = Some(Instant::now());
+            next_history = Instant::now() + Duration::from_secs(3);
+        }
+        if awaiting.is_some_and(|t| t.elapsed() > Duration::from_secs(300)) {
+            awaiting = None; // a custom game, or the history is slow today
         }
         if !me.is_empty() && Instant::now() >= next_history {
             friends = friend_puuids(&c);
-            let added = sync_history(&c, &me, &mut store);
+            let (added, newest) = sync_history(&c, &me, &mut store, &champions);
             if added > 0 {
                 log(format!("league: saved {added} game{} to your history", if added == 1 { "" } else { "s" }));
             }
@@ -421,7 +492,11 @@ fn run(mut cfg: LeagueCfg, rx: Receiver<Cmd>, emit: impl Fn(Event)) {
             let mine: Vec<&GameRec> = store.games.iter().filter(|g| g.me == me).collect();
             let wins = mine.iter().filter(|g| g.win).count() as u32;
             status.record = (wins, mine.len() as u32 - wins);
-            (status.session, status.streak) = session_of(&store, &me);
+            let (games, streak) = session_of(&store, &me, unix_ms());
+            let won = games.iter().filter(|w| **w).count() as u32;
+            status.session = (won, games.len() as u32 - won);
+            status.session_games = games;
+            status.streak = streak;
             if status.mode != Mode::None {
                 status.mode_record = record_in(&store, &me, status.mode);
             }
@@ -429,8 +504,23 @@ fn run(mut cfg: LeagueCfg, rx: Receiver<Cmd>, emit: impl Fn(Event)) {
             top.sort_by(|a, b| b.games.cmp(&a.games).then(b.wins.cmp(&a.wins)));
             top.truncate(8);
             status.duos = top;
-            // Look again soon after a game (its result can be late), otherwise now and then.
-            next_history = Instant::now() + Duration::from_secs(if ended { 45 } else { 600 });
+            // The game that just ended is saved: put up its card.
+            if let Some(full) = newest.filter(|_| awaiting.is_some()).filter(|f| just_ended(f, unix_ms())) {
+                awaiting = None;
+                if let Some(mut pg) = post_game_of(&full, &me, &champions, &store, &duos) {
+                    let qid = full.get("queueId").and_then(Value::as_i64).unwrap_or(0);
+                    pg.mode_name = queue_name(&c, &mut queues, qid).unwrap_or_else(|| mode_label(pg.mode).to_string());
+                    log(format!("league: {} as {}", if pg.win { "won" } else { "lost" }, pg.champion));
+                    status.post_game = Some(pg);
+                    post_shown = Some(Instant::now());
+                }
+            }
+            next_history = Instant::now() + Duration::from_secs(if awaiting.is_some() { 8 } else { 600 });
+        }
+        // The card stays until you queue again, or for 10 minutes.
+        if status.post_game.is_some() && (matches!(phase.as_str(), "Matchmaking" | "ReadyCheck" | "ChampSelect" | "InProgress" | "GameStart" | "Reconnect") || post_shown.is_some_and(|t| t.elapsed() > Duration::from_secs(600))) {
+            status.post_game = None;
+            post_shown = None;
         }
         if Instant::now() >= next_mates || phase != last_phase {
             next_mates = Instant::now() + Duration::from_secs(4);
@@ -459,6 +549,11 @@ fn run(mut cfg: LeagueCfg, rx: Receiver<Cmd>, emit: impl Fn(Event)) {
                     .collect()
             };
         }
+        // Champ select: your record on the champion you're showing.
+        status.champ_record = match &status.champ {
+            Some(ch) if ch.champion_id > 0 && !me.is_empty() => Some(champ_record(&store, &me, ch.champion_id, &ch.champion, status.mode)),
+            _ => None,
+        };
         // The game itself, about once a second while it runs.
         status.live = if matches!(phase.as_str(), "InProgress" | "GameStart" | "Reconnect" | "WaitingForStats" | "PreEndOfGame") {
             live_get("/liveclientdata/allgamedata").as_ref().and_then(parse_live)
@@ -494,6 +589,11 @@ struct GameRec {
     /// gameMode ("ARAM", "KIWI", "CLASSIC", "CHERRY"...)
     #[serde(default)]
     mode: String,
+    /// The champion you played (name and id; older records get them from the client's history).
+    #[serde(default)]
+    champion: String,
+    #[serde(default)]
+    champion_id: i64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -525,55 +625,217 @@ fn player_name(p: &Value) -> String {
     if n.is_empty() { s("summonerName") } else { n }
 }
 
-/// Adds finished matched games from the client's history that the store doesn't have yet.
-fn sync_history(c: &Client, me: &str, store: &mut Store) -> usize {
-    let Some(list) = c.get("/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=50") else { return 0 };
-    let known: HashSet<i64> = store.games.iter().map(|g| g.id).collect();
-    let mut added = 0;
-    // Fill in the mode for games saved before it was recorded.
-    let mut filled = false;
-    for g in list.pointer("/games/games").and_then(Value::as_array).into_iter().flatten() {
-        let (Some(id), Some(mode)) = (g.get("gameId").and_then(Value::as_i64), g.get("gameMode").and_then(Value::as_str)) else { continue };
-        if let Some(rec) = store.games.iter_mut().find(|r| r.id == id && r.mode.is_empty()) {
-            rec.mode = mode.to_string();
-            filled = true;
-        }
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// A queue's name ("ARAM: Mayhem", "Ranked Solo/Duo"), cached.
+fn queue_name(c: &Client, queues: &mut HashMap<i64, String>, id: i64) -> Option<String> {
+    if id <= 0 {
+        return None;
     }
+    if let std::collections::hash_map::Entry::Vacant(slot) = queues.entry(id) {
+        let q = c.get(&format!("/lol-game-queues/v1/queues/{id}"))?;
+        slot.insert(q.get("description").and_then(Value::as_str).filter(|s| !s.is_empty()).or_else(|| q.get("shortName").and_then(Value::as_str)).unwrap_or("").to_string());
+    }
+    queues.get(&id).cloned().filter(|s| !s.is_empty())
+}
+
+/// What to call a kind of game when the queue's own name isn't known.
+fn mode_label(m: Mode) -> &'static str {
+    match m {
+        Mode::Aram => "ARAM",
+        Mode::Mayhem => "ARAM: Mayhem",
+        Mode::Rift => "Summoner's Rift",
+        Mode::Arena => "Arena",
+        Mode::Other | Mode::None => "League of Legends",
+    }
+}
+
+fn participant_id(v: &Value) -> Option<i64> {
+    v.get("participantId").and_then(Value::as_i64)
+}
+
+/// Your entry in a game's `participants` (the history list has only yours; a full game has all).
+fn my_participant<'a>(game: &'a Value, me: &str) -> Option<&'a Value> {
+    let parts = game.get("participants").and_then(Value::as_array)?;
+    let ids = game.get("participantIdentities").and_then(Value::as_array);
+    match ids.and_then(|ids| ids.iter().find(|i| i.pointer("/player/puuid").and_then(Value::as_str) == Some(me))).and_then(participant_id) {
+        Some(pid) => parts.iter().find(|p| participant_id(p) == Some(pid)),
+        None if parts.len() == 1 => parts.first(),
+        None => None,
+    }
+}
+
+/// Who a player plays with: the team, or in Arena their duo / trio (`teamId` there only
+/// splits the lobby in half).
+fn side_of(p: &Value) -> i64 {
+    match p.pointer("/stats/playerSubteamId").and_then(Value::as_i64) {
+        Some(sub) if sub > 0 => 1000 + sub,
+        _ => p.get("teamId").and_then(Value::as_i64).unwrap_or(-1),
+    }
+}
+
+/// Your teammates in a full game: (puuid, name), you left out.
+fn teammates_in(full: &Value, me: &str) -> Vec<(String, String)> {
+    let Some(mine) = my_participant(full, me) else { return Vec::new() };
+    let my_side = side_of(mine);
+    let parts = full.get("participants").and_then(Value::as_array).cloned().unwrap_or_default();
+    let side = |pid: i64| parts.iter().find(|p| participant_id(p) == Some(pid)).map(side_of);
+    full.get("participantIdentities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            let pid = participant_id(i)?;
+            let puuid = i.pointer("/player/puuid").and_then(Value::as_str)?.to_string();
+            (Some(pid) != participant_id(mine) && side(pid) == Some(my_side) && !puuid.is_empty() && puuid != me).then(|| (puuid, player_name(i.get("player").unwrap_or(&Value::Null))))
+        })
+        .collect()
+}
+
+/// The saved record of a finished game, from `/lol-match-history/v1/games/{id}`.
+fn rec_from_game(full: &Value, me: &str, champions: &HashMap<i64, String>) -> Option<GameRec> {
+    let id = full.get("gameId").and_then(Value::as_i64)?;
+    let mine = my_participant(full, me)?;
+    let champion_id = mine.get("championId").and_then(Value::as_i64).unwrap_or(0);
+    Some(GameRec {
+        id,
+        at: full.get("gameCreation").and_then(Value::as_u64).unwrap_or(0),
+        me: me.to_string(),
+        win: mine.pointer("/stats/win").and_then(Value::as_bool).unwrap_or(false),
+        queue: full.get("queueId").and_then(Value::as_i64).unwrap_or(0),
+        mates: teammates_in(full, me),
+        mode: full.get("gameMode").and_then(Value::as_str).unwrap_or("").to_string(),
+        champion: champions.get(&champion_id).cloned().unwrap_or_default(),
+        champion_id,
+    })
+}
+
+/// Fills in what older records lack (mode, champion) from the client's history list, for
+/// the games still in it. True if anything changed.
+fn backfill(store: &mut Store, list: &Value, me: &str, champions: &HashMap<i64, String>) -> bool {
+    let mut changed = false;
     for g in list.pointer("/games/games").and_then(Value::as_array).into_iter().flatten() {
         let Some(id) = g.get("gameId").and_then(Value::as_i64) else { continue };
-        if known.contains(&id) || g.get("gameType").and_then(Value::as_str) != Some("MATCHED_GAME") {
+        for rec in store.games.iter_mut().filter(|r| r.id == id) {
+            if rec.mode.is_empty() {
+                if let Some(mode) = g.get("gameMode").and_then(Value::as_str).filter(|m| !m.is_empty()) {
+                    rec.mode = mode.to_string();
+                    changed = true;
+                }
+            }
+            if rec.champion_id == 0 && rec.me == me {
+                if let Some(cid) = my_participant(g, me).and_then(|p| p.get("championId")).and_then(Value::as_i64).filter(|&c| c > 0) {
+                    rec.champion_id = cid;
+                    changed = true;
+                }
+            }
+        }
+    }
+    // Names for the ids (the champion table can load after the first sync).
+    for rec in store.games.iter_mut().filter(|r| r.champion.is_empty() && r.champion_id > 0) {
+        if let Some(name) = champions.get(&rec.champion_id) {
+            rec.champion = name.clone();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Adds finished matched games from the client's history that the store doesn't have yet.
+/// Returns how many, and the full game of the newest one added.
+fn sync_history(c: &Client, me: &str, store: &mut Store, champions: &HashMap<i64, String>) -> (usize, Option<Value>) {
+    // The client keeps about 50 games and ignores begIndex past that.
+    let Some(list) = c.get("/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=50") else { return (0, None) };
+    let mut changed = backfill(store, &list, me, champions);
+    let known: HashSet<i64> = store.games.iter().map(|g| g.id).collect();
+    let mut added = 0;
+    let mut newest: Option<(u64, Value)> = None;
+    for g in list.pointer("/games/games").and_then(Value::as_array).into_iter().flatten() {
+        let Some(id) = g.get("gameId").and_then(Value::as_i64) else { continue };
+        // Arena games saved before trios were told apart have the whole half-lobby as mates.
+        let repair = store.games.iter().any(|r| r.id == id && r.me == me && Mode::of(&r.mode) == Mode::Arena && r.mates.len() > 3);
+        if (known.contains(&id) && !repair) || g.get("gameType").and_then(Value::as_str) != Some("MATCHED_GAME") {
             continue;
         }
         // The list only names you; the game itself names everyone.
         let Some(full) = c.get(&format!("/lol-match-history/v1/games/{id}")) else { continue };
-        let ids = full.get("participantIdentities").and_then(Value::as_array).cloned().unwrap_or_default();
-        let parts = full.get("participants").and_then(Value::as_array).cloned().unwrap_or_default();
-        let pid_of = |puuid: &str| ids.iter().find(|i| i.pointer("/player/puuid").and_then(Value::as_str) == Some(puuid)).and_then(|i| i.get("participantId").and_then(Value::as_i64));
-        let Some(my_pid) = pid_of(me) else { continue };
-        let team_of = |pid: i64| parts.iter().find(|p| p.get("participantId").and_then(Value::as_i64) == Some(pid)).and_then(|p| p.get("teamId").and_then(Value::as_i64));
-        let Some(my_team) = team_of(my_pid) else { continue };
-        let win = parts
-            .iter()
-            .find(|p| p.get("participantId").and_then(Value::as_i64) == Some(my_pid))
-            .and_then(|p| p.pointer("/stats/win").and_then(Value::as_bool))
-            .unwrap_or(false);
-        let mates = ids
-            .iter()
-            .filter_map(|i| {
-                let pid = i.get("participantId").and_then(Value::as_i64)?;
-                let puuid = i.pointer("/player/puuid").and_then(Value::as_str)?.to_string();
-                (pid != my_pid && team_of(pid) == Some(my_team) && !puuid.is_empty()).then(|| (puuid, player_name(i.get("player").unwrap_or(&Value::Null))))
-            })
-            .collect();
-        let mode = full.get("gameMode").and_then(Value::as_str).unwrap_or("").to_string();
-        store.games.push(GameRec { id, at: full.get("gameCreation").and_then(Value::as_u64).unwrap_or(0), me: me.to_string(), win, queue: full.get("queueId").and_then(Value::as_i64).unwrap_or(0), mates, mode });
+        let Some(rec) = rec_from_game(&full, me, champions) else { continue };
+        if repair {
+            if let Some(old) = store.games.iter_mut().find(|r| r.id == id && r.me == me) {
+                old.mates = rec.mates;
+                changed = true;
+            }
+            continue;
+        }
+        if newest.as_ref().is_none_or(|(at, _)| rec.at > *at) {
+            newest = Some((rec.at, full));
+        }
+        store.games.push(rec);
         added += 1;
     }
-    if added > 0 || filled {
+    if added > 0 || changed {
         store.games.sort_by_key(|g| g.at);
         save_store(store);
     }
-    added
+    (added, newest.map(|(_, full)| full))
+}
+
+/// A game that ended in the last half hour (not an old one found while catching up).
+fn just_ended(full: &Value, now_ms: u64) -> bool {
+    let created = full.get("gameCreation").and_then(Value::as_u64).unwrap_or(0);
+    let ended = created + game_seconds(full) as u64 * 1000;
+    created > 0 && now_ms.saturating_sub(ended) < 30 * 60_000
+}
+
+/// `gameDuration` is in seconds (old clients sent milliseconds).
+fn game_seconds(full: &Value) -> f64 {
+    let d = full.get("gameDuration").and_then(Value::as_f64).unwrap_or(0.0);
+    if d > 20_000.0 { d / 1000.0 } else { d }
+}
+
+/// The post-game card for a saved game: your line from the full game, with your records
+/// (this game included) from the store.
+fn post_game_of(full: &Value, me: &str, champions: &HashMap<i64, String>, store: &Store, duos: &HashMap<String, Duo>) -> Option<PostGame> {
+    let id = full.get("gameId").and_then(Value::as_i64)?;
+    let mine = my_participant(full, me)?;
+    let parts = full.get("participants").and_then(Value::as_array)?;
+    let stat = |p: &Value, k: &str| p.get("stats").and_then(|s| s.get(k)).and_then(Value::as_u64).unwrap_or(0);
+    let my_side = side_of(mine);
+    let team: Vec<&Value> = parts.iter().filter(|p| side_of(p) == my_side).collect();
+    let damage = stat(mine, "totalDamageDealtToChampions");
+    let champion_id = mine.get("championId").and_then(Value::as_i64).unwrap_or(0);
+    let rec = store.games.iter().find(|g| g.id == id && g.me == me);
+    let mode = rec.map(rec_mode).unwrap_or_else(|| Mode::of(full.get("gameMode").and_then(Value::as_str).unwrap_or("")));
+    let champion = champions.get(&champion_id).cloned().or_else(|| rec.map(|r| r.champion.clone())).unwrap_or_default();
+    // Friends first, then the people you've played with most.
+    let mut mates: Vec<Duo> = teammates_in(full, me).iter().filter_map(|(puuid, _)| duos.get(puuid)).filter(|d| d.friend || d.games >= 2).cloned().collect();
+    mates.sort_by_key(|d| (std::cmp::Reverse(d.friend), std::cmp::Reverse(d.games)));
+    let flag = |k: &str| mine.get("stats").and_then(|s| s.get(k)).and_then(Value::as_bool).unwrap_or(false);
+    Some(PostGame {
+        game_id: id,
+        win: flag("win"),
+        remake: flag("gameEndedInEarlySurrender"),
+        placement: if mode == Mode::Arena { stat(mine, "subteamPlacement") as u32 } else { 0 },
+        champion: champion.clone(),
+        mode,
+        mode_name: String::new(),
+        duration: game_seconds(full),
+        kills: stat(mine, "kills") as u32,
+        deaths: stat(mine, "deaths") as u32,
+        assists: stat(mine, "assists") as u32,
+        team_kills: team.iter().map(|p| stat(p, "kills")).sum::<u64>() as u32,
+        damage,
+        damage_rank: 1 + team.iter().filter(|p| stat(p, "totalDamageDealtToChampions") > damage).count() as u32,
+        gold: stat(mine, "goldEarned"),
+        cs: (stat(mine, "totalMinionsKilled") + stat(mine, "neutralMinionsKilled")) as u32,
+        vision: stat(mine, "visionScore") as u32,
+        level: stat(mine, "champLevel") as u32,
+        mode_record: record_in(store, me, mode),
+        champ_record: champ_record(store, me, champion_id, &champion, mode).mode,
+        mates,
+    })
 }
 
 /// Your record with everyone you've played with, from the saved games.
@@ -857,7 +1119,7 @@ fn rec_mode(r: &GameRec) -> Mode {
     match r.queue {
         450 | 100 | 720 | 3270 => Mode::Aram,
         2400 => Mode::Mayhem,
-        1700 | 1710 => Mode::Arena,
+        1700 | 1710 | 1750 => Mode::Arena,
         400 | 420 | 430 | 440 | 480 | 490 | 700 | 900 | 1900 | 1020 => Mode::Rift,
         _ => Mode::Other,
     }
@@ -870,21 +1132,40 @@ fn record_in(store: &Store, me: &str, mode: Mode) -> (u32, u32) {
     (wins, games.len() as u32 - wins)
 }
 
-/// This session's record (games < 90 minutes apart, newest less than 3 hours ago) and the
-/// current streak, from the saved games.
-fn session_of(store: &Store, me: &str) -> ((u32, u32), i32) {
+/// Your record on one champion (by id; by name for records that only have that), in this
+/// kind of game and in all of them.
+fn champ_record(store: &Store, me: &str, champion_id: i64, name: &str, mode: Mode) -> ChampRecord {
+    let on_it = |g: &&GameRec| g.me == me && if g.champion_id > 0 && champion_id > 0 { g.champion_id == champion_id } else { !name.is_empty() && g.champion == name };
+    let games: Vec<&GameRec> = store.games.iter().filter(on_it).collect();
+    let in_mode: Vec<&GameRec> = games.iter().copied().filter(|g| mode == Mode::None || rec_mode(g).family() == mode.family()).collect();
+    let wl = |gs: &[&GameRec]| {
+        let w = gs.iter().filter(|g| g.win).count() as u32;
+        (w, gs.len() as u32 - w)
+    };
+    ChampRecord {
+        champion: name.to_string(),
+        mode: wl(&in_mode),
+        all: wl(&games),
+        recent: in_mode[in_mode.len().saturating_sub(5)..].iter().map(|g| g.win).collect(),
+        last: games.iter().map(|g| g.at).max().unwrap_or(0),
+    }
+}
+
+/// This session's games, oldest first (games < 90 minutes apart, the newest less than
+/// 3 hours ago), and the current streak, from the saved games.
+fn session_of(store: &Store, me: &str, now: u64) -> (Vec<bool>, i32) {
     let mine: Vec<&GameRec> = store.games.iter().filter(|g| g.me == me).collect();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    let mut session = (0, 0);
+    let mut session = Vec::new();
     if mine.last().is_some_and(|g| now.saturating_sub(g.at) < 3 * 3_600_000) {
         let mut prev = mine.last().map(|g| g.at).unwrap_or(0);
         for g in mine.iter().rev() {
             if prev.saturating_sub(g.at) > 90 * 60_000 {
                 break;
             }
-            if g.win { session.0 += 1 } else { session.1 += 1 }
+            session.push(g.win);
             prev = g.at;
         }
+        session.reverse();
     }
     let mut streak = 0i32;
     if let Some(last) = mine.last() {
@@ -908,6 +1189,154 @@ fn publish(published: &mut Status, status: &Status, emit: &impl Fn(Event)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn rec(id: i64, at: u64, me: &str, win: bool, mode: &str, champion_id: i64, champion: &str) -> GameRec {
+        GameRec { id, at, me: me.into(), win, queue: 0, mates: Vec::new(), mode: mode.into(), champion: champion.into(), champion_id }
+    }
+
+    /// One player in a full game: (puuid, name, teamId, subteam, championId, win, k, d, a, damage)
+    type P<'a> = (&'a str, &'a str, i64, i64, i64, bool, u64, u64, u64, u64);
+
+    /// A `/lol-match-history/v1/games/{id}` response, trimmed to what we read.
+    fn full_game(id: i64, mode: &str, queue: i64, created: u64, duration: u64, players: &[P]) -> Value {
+        let ids: Vec<Value> = players.iter().enumerate().map(|(i, p)| json!({"participantId": i + 1, "player": {"puuid": p.0, "gameName": p.1, "tagLine": "NA1"}})).collect();
+        let parts: Vec<Value> = players
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                json!({"participantId": i + 1, "teamId": p.2, "championId": p.4, "stats": {
+                    "win": p.5, "kills": p.6, "deaths": p.7, "assists": p.8, "totalDamageDealtToChampions": p.9,
+                    "goldEarned": 12000 + i as u64, "totalMinionsKilled": 150, "neutralMinionsKilled": 12, "visionScore": 31,
+                    "champLevel": 17, "gameEndedInEarlySurrender": false, "playerSubteamId": p.3, "subteamPlacement": if p.3 > 0 { 2 } else { 0 }
+                }})
+            })
+            .collect();
+        json!({"gameId": id, "gameMode": mode, "queueId": queue, "gameType": "MATCHED_GAME", "gameCreation": created, "gameDuration": duration, "participantIdentities": ids, "participants": parts})
+    }
+
+    #[test]
+    fn champion_record_counts_the_mode_family_and_every_mode() {
+        let store = Store {
+            games: vec![
+                rec(1, 100, "me", true, "KIWI", 777, "Yone"),
+                rec(2, 200, "me", true, "ARAM", 777, "Yone"),
+                rec(3, 300, "me", false, "KIWI", 777, "Yone"),
+                rec(4, 400, "me", true, "CLASSIC", 777, "Yone"),
+                rec(5, 500, "me", false, "KIWI", 103, "Ahri"),
+                rec(6, 600, "smurf", true, "KIWI", 777, "Yone"),
+                // Saved before ids were kept: matched by name.
+                rec(7, 700, "me", false, "ARAM", 0, "Yone"),
+            ],
+        };
+        let r = champ_record(&store, "me", 777, "Yone", Mode::Mayhem);
+        assert_eq!((r.mode, r.all, r.games()), ((2, 2), (3, 2), 5));
+        assert_eq!(r.recent, vec![true, true, false, false]);
+        assert_eq!(r.last, 700);
+        assert_eq!(champ_record(&store, "me", 777, "Yone", Mode::Rift).mode, (1, 0));
+        let new = champ_record(&store, "me", 266, "Aatrox", Mode::Aram);
+        assert_eq!((new.games(), new.recent.len(), new.last), (0, 0, 0));
+    }
+
+    #[test]
+    fn old_records_load_and_get_their_champion_from_the_history_list() {
+        // A file from before champions were saved still loads.
+        let old = r#"{"games":[{"id":1,"at":10,"me":"me","win":true,"queue":2400,"mates":[["p-sam","Sam"]]},
+                                {"id":2,"at":20,"me":"me","win":false,"queue":450,"mates":[],"mode":"ARAM","champion_id":99},
+                                {"id":3,"at":30,"me":"me","win":true,"queue":450,"mates":[],"mode":"ARAM"}]}"#;
+        let mut store: Store = serde_json::from_str(old).unwrap();
+        assert_eq!((store.games[0].champion_id, store.games[0].champion.as_str()), (0, ""));
+        // The list names only you; game 3 has dropped out of it, game 4 isn't saved.
+        let mine = |id: i64, champ: i64, mode: &str| json!({"gameId": id, "gameMode": mode, "gameType": "MATCHED_GAME",
+            "participantIdentities": [{"participantId": 1, "player": {"puuid": "me"}}],
+            "participants": [{"participantId": 1, "teamId": 100, "championId": champ, "stats": {"win": true}}]});
+        let list = json!({"games": {"games": [mine(1, 777, "KIWI"), mine(2, 777, "ARAM"), mine(4, 103, "KIWI")]}});
+        let champions: HashMap<i64, String> = [(777, "Yone".to_string()), (103, "Ahri".to_string())].into();
+        assert!(backfill(&mut store, &list, "me", &champions));
+        let g = |id: i64| store.games.iter().find(|r| r.id == id).unwrap().clone();
+        assert_eq!((g(1).champion_id, g(1).champion.as_str(), g(1).mode.as_str()), (777, "Yone", "KIWI"));
+        assert_eq!((g(2).champion_id, g(2).champion.as_str()), (99, ""), "an id already saved is kept");
+        assert_eq!((g(3).champion_id, g(3).champion.as_str()), (0, ""));
+        assert!(!backfill(&mut store, &list, "me", &champions), "nothing left to fill");
+        // It saves with the new fields and reads back the same.
+        let text = serde_json::to_string(&store).unwrap();
+        assert!(text.contains(r#""champion":"Yone","champion_id":777"#));
+        assert_eq!(serde_json::from_str::<Store>(&text).unwrap().games, store.games);
+    }
+
+    #[test]
+    fn post_game_card_from_a_finished_game() {
+        let created = 1_794_889_833_297;
+        let full = full_game(42, "KIWI", 2400, created, 1143, &[
+            ("p-me", "Austin", 100, 0, 777, true, 16, 6, 23, 29_358),
+            ("p-sam", "Sam", 100, 0, 55, true, 18, 9, 31, 47_228),
+            ("p-new", "Stranger", 100, 0, 81, true, 14, 12, 24, 20_641),
+            ("p-foe1", "Foe", 200, 0, 13, false, 19, 11, 33, 80_209),
+            ("p-foe2", "Foe2", 200, 0, 126, false, 9, 21, 31, 66_049),
+        ]);
+        let champions: HashMap<i64, String> = [(777, "Yone".to_string())].into();
+        // Two earlier games with Sam (a friend), one on Yone in ARAM.
+        let mut store = Store {
+            games: vec![
+                GameRec { mates: vec![("p-sam".into(), "Sam".into())], ..rec(1, created - 9_000_000, "me", false, "ARAM", 777, "Yone") },
+                GameRec { mates: vec![("p-sam".into(), "Sam".into())], ..rec(2, created - 5_000_000, "me", true, "CLASSIC", 103, "Ahri") },
+            ],
+        };
+        let saved = rec_from_game(&full, "me", &champions);
+        assert!(saved.is_none(), "not your game under another puuid");
+        let saved = rec_from_game(&full, "p-me", &champions).unwrap();
+        assert_eq!((saved.champion.as_str(), saved.champion_id, saved.win, saved.mode.as_str()), ("Yone", 777, true, "KIWI"));
+        assert_eq!(saved.mates.iter().map(|m| m.1.as_str()).collect::<Vec<_>>(), vec!["Sam", "Stranger"]);
+        for g in &mut store.games {
+            g.me = "p-me".into();
+        }
+        store.games.push(saved);
+        let friends: HashSet<String> = ["p-sam".to_string()].into();
+        let duos = tally(&store, "p-me", &friends);
+        let p = post_game_of(&full, "p-me", &champions, &store, &duos).unwrap();
+        assert_eq!((p.game_id, p.win, p.remake, p.placement, p.champion.as_str(), p.mode), (42, true, false, 0, "Yone", Mode::Mayhem));
+        assert_eq!((p.kills, p.deaths, p.assists, p.team_kills), (16, 6, 23, 48));
+        assert_eq!((p.damage, p.damage_rank, p.gold, p.cs, p.vision, p.level), (29_358, 2, 12_000, 162, 31, 17));
+        assert_eq!(p.duration, 1143.0);
+        assert_eq!(p.mode_record, (1, 1), "ARAM and Mayhem together, this game included");
+        assert_eq!(p.champ_record, (1, 1));
+        // Only people you know: Sam (now 2-1 together); the stranger is left out.
+        assert_eq!(p.mates.iter().map(|d| (d.name.as_str(), d.wins, d.games)).collect::<Vec<_>>(), vec![("Sam", 2, 3)]);
+        assert!(just_ended(&full, created + 1_143_000 + 90_000));
+        assert!(!just_ended(&full, created + 3 * 3_600_000), "an old game found while catching up");
+    }
+
+    #[test]
+    fn arena_teammates_are_your_trio_not_your_half_of_the_lobby() {
+        let full = full_game(7, "CHERRY", 1750, 1_000, 1605, &[
+            ("p-me", "Austin", 100, 2, 777, true, 21, 4, 9, 80_259),
+            ("p-duo", "Sam", 100, 2, 55, true, 3, 6, 12, 61_713),
+            ("p-other", "Other", 100, 4, 13, true, 7, 5, 4, 25_665),
+            ("p-low", "Low", 200, 3, 126, false, 8, 7, 2, 60_518),
+        ]);
+        let saved = rec_from_game(&full, "p-me", &HashMap::new()).unwrap();
+        assert_eq!(saved.mates, vec![("p-duo".to_string(), "Sam".to_string())]);
+        let store = Store { games: vec![saved] };
+        let p = post_game_of(&full, "p-me", &HashMap::new(), &store, &HashMap::new()).unwrap();
+        assert_eq!((p.mode, p.placement, p.team_kills, p.damage_rank), (Mode::Arena, 2, 24, 1));
+    }
+
+    #[test]
+    fn session_lists_games_oldest_first() {
+        let h = 3_600_000;
+        let now = 100 * h;
+        let store = Store {
+            games: vec![
+                rec(1, now - 30 * h, "me", true, "KIWI", 0, ""), // yesterday: not this session
+                rec(2, now - 3 * h, "me", true, "KIWI", 0, ""),
+                rec(3, now - 2 * h, "me", false, "KIWI", 0, ""),
+                rec(4, now - h, "me", true, "KIWI", 0, ""),
+                rec(5, now - h / 2, "me", true, "KIWI", 0, ""),
+            ],
+        };
+        assert_eq!(session_of(&store, "me", now), (vec![true, false, true, true], 2));
+        assert_eq!(session_of(&store, "me", now + 5 * h), (vec![], 2), "the session is over, the streak isn't");
+    }
 
     #[test]
     fn live_game_reads_from_your_side() {
