@@ -4,8 +4,9 @@
 //! device (USB headsets often report no system volume at all).
 
 use crate::device::log;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -41,7 +42,6 @@ pub enum MusicCmd {
     PlayPause,
     Next,
     Previous,
-    VolumeBy(i32),
     SetVolume(u8),
 }
 
@@ -117,18 +117,13 @@ fn poll() -> (Option<Track>, Option<u8>, Option<String>) {
 }
 
 /// Runs a command; returns the new volume when it changed it.
-fn run(cmd: &MusicCmd, track: Option<&Track>, volume: Option<u8>) -> Option<u8> {
+fn run(cmd: &MusicCmd, track: Option<&Track>) -> Option<u8> {
     let app = track.map(|t| t.app.as_str()).unwrap_or("Spotify");
     let mut new_volume = None;
     let script = match cmd {
         MusicCmd::PlayPause => format!("tell application \"{app}\" to playpause"),
         MusicCmd::Next => format!("tell application \"{app}\" to next track"),
         MusicCmd::Previous => format!("tell application \"{app}\" to previous track"),
-        MusicCmd::VolumeBy(d) => {
-            let v = (volume.unwrap_or(50) as i32 + d).clamp(0, 100) as u8;
-            new_volume = Some(v);
-            format!("tell application \"{app}\" to set sound volume to {v}")
-        }
         MusicCmd::SetVolume(v) => {
             new_volume = Some((*v).min(100));
             format!("tell application \"{app}\" to set sound volume to {}", (*v).min(100))
@@ -176,69 +171,231 @@ pub fn spawn(fast: Arc<AtomicBool>, emit: impl Fn(MusicEvent) + Send + Clone + '
     tx
 }
 
+/// How long after the last volume change polls wait (they'd hold up the glide) and the
+/// player's own reading is not trusted yet.
+const VOLUME_SETTLE: Duration = Duration::from_millis(1500);
+/// One step of the glide toward the knob's volume.
+const GLIDE_TICK: Duration = Duration::from_millis(12);
+/// The volume helper quits after this long without a change.
+const HELPER_IDLE: Duration = Duration::from_secs(120);
+
+/// A long-running `osascript` (JavaScript) that sets the player's volume from lines on its
+/// stdin ("Spotify 57"), so a change costs a few ms instead of a new process (~120 ms) and
+/// the volume can glide between knob clicks. It applies only the newest line it has.
+const VOLUME_JS: &str = r#"
+ObjC.import('Foundation');
+function run() {
+  const input = $.NSFileHandle.fileHandleWithStandardInput;
+  const out = $.NSFileHandle.fileHandleWithStandardOutput;
+  let buf = '';
+  for (;;) {
+    const data = input.availableData;
+    if (data.length == 0) return;
+    buf += $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding).js;
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    const last = lines.filter(l => l.trim()).pop();
+    if (!last) continue;
+    const sp = last.lastIndexOf(' ');
+    let reply = 'ok';
+    try { Application(last.slice(0, sp)).soundVolume = parseInt(last.slice(sp + 1), 10); } catch (e) { reply = 'error ' + e; }
+    out.writeData($.NSString.alloc.initWithString(reply + '\n').dataUsingEncoding($.NSUTF8StringEncoding));
+  }
+}
+"#;
+
+struct VolumeHelper {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    used: Instant,
+}
+
+impl VolumeHelper {
+    fn start() -> Option<VolumeHelper> {
+        let mut child = Command::new("/usr/bin/osascript").args(["-l", "JavaScript", "-e", VOLUME_JS]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        let stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        std::thread::Builder::new()
+            .name("music-volume".into())
+            .spawn(move || {
+                let mut last = String::new();
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    match line.strip_prefix("error ") {
+                        Some(e) if e != last => {
+                            log(format!("music: volume: {e}"));
+                            last = e.to_string();
+                        }
+                        Some(_) => {}
+                        None => last.clear(),
+                    }
+                }
+            })
+            .ok();
+        Some(VolumeHelper { child, stdin, used: Instant::now() })
+    }
+
+    /// False when the helper is gone (start another).
+    fn set(&mut self, app: &str, v: u8) -> bool {
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return false;
+        }
+        self.used = Instant::now();
+        writeln!(self.stdin, "{app} {v}").and_then(|_| self.stdin.flush()).is_ok()
+    }
+}
+
+impl Drop for VolumeHelper {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The next volume on the way from `cur` to `want`: a third of the way, at least 1, so a
+/// knob click (a few %) eases over a few frames and a big jump settles in ~0.2 s.
+fn glide_step(cur: u8, want: u8) -> u8 {
+    let diff = want as i32 - cur as i32;
+    let step = (diff.abs() / 3).max(1).min(diff.abs());
+    (cur as i32 + diff.signum() * step) as u8
+}
+
+/// Sets the player's volume through the helper (starting it if needed), or a one-off
+/// osascript if the helper can't run.
+fn set_volume(helper: &mut Option<VolumeHelper>, app: &str, v: u8) -> bool {
+    for _ in 0..2 {
+        if helper.is_none() {
+            *helper = VolumeHelper::start();
+        }
+        let Some(h) = helper.as_mut() else { break };
+        if h.set(app, v) {
+            return true;
+        }
+        *helper = None;
+    }
+    osascript(&format!("tell application \"{app}\" to set sound volume to {v}")).is_ok()
+}
+
 fn music_thread(rx: Receiver<MusicCmd>, fast: Arc<AtomicBool>, emit: impl Fn(MusicEvent) + Send + Clone + 'static) {
     let mut track: Option<Track> = None;
     let mut volume: Option<u8> = None;
     let mut problem: Option<String> = None;
     let mut art_url = String::new();
     let mut last_emit = Instant::now() - Duration::from_secs(60);
+    let mut helper: Option<VolumeHelper> = None;
+    // Where the knob wants the volume, and when it last moved it.
+    let mut target: Option<u8> = None;
+    let mut touched = Instant::now() - Duration::from_secs(60);
+    let mut next_poll = Instant::now();
     loop {
-        let (t, v, p) = poll();
-        let changed = match (&track, &t) {
-            (Some(a), Some(b)) => !a.same_song(b) || (a.position_at(last_emit) - b.position).abs() > 2.5,
-            (None, None) => false,
-            _ => true,
-        } || v != volume
-            || p != problem;
-        if changed {
-            if p != problem {
-                if let Some(msg) = &p {
-                    log(format!("music: {msg}"));
-                }
-            }
-            track = t.clone();
-            volume = v;
-            problem = p.clone();
-            last_emit = Instant::now();
-            emit(MusicEvent::State { track: t, volume: v, problem: p });
-        }
-        let url = track.as_ref().map(|t| t.art_url.clone()).unwrap_or_default();
-        if url != art_url {
-            art_url = url.clone();
-            let e = emit.clone();
-            std::thread::spawn(move || {
-                let image = if url.is_empty() { None } else { fetch_art(&url) };
-                e(MusicEvent::Artwork { url, image });
-            });
-        }
-        let wait = if fast.load(Ordering::Relaxed) { Duration::from_secs(1) } else { Duration::from_secs(5) };
-        match rx.recv_timeout(wait) {
-            Ok(cmd) => {
-                let mut target = volume;
-                let mut pending = Some(cmd);
-                // Fold a burst of knob ticks into one volume change.
-                while let Some(c) = pending.take() {
-                    match c {
-                        MusicCmd::VolumeBy(d) => target = Some((target.unwrap_or(50) as i32 + d).clamp(0, 100) as u8),
-                        MusicCmd::SetVolume(v) => target = Some(v.min(100)),
-                        other => {
-                            run(&other, track.as_ref(), volume);
-                        }
+        let now = Instant::now();
+        let gliding = target.is_some() && target != volume;
+        if !gliding && now >= next_poll && now.duration_since(touched) >= VOLUME_SETTLE {
+            let (t, v, p) = poll();
+            let changed = match (&track, &t) {
+                (Some(a), Some(b)) => !a.same_song(b) || (a.position_at(last_emit) - b.position).abs() > 2.5,
+                (None, None) => false,
+                _ => true,
+            } || v != volume
+                || p != problem;
+            if changed {
+                if p != problem {
+                    if let Some(msg) = &p {
+                        log(format!("music: {msg}"));
                     }
-                    pending = rx.try_recv().ok();
                 }
-                if target != volume {
-                    if let Some(v) = target {
-                        if run(&MusicCmd::SetVolume(v), track.as_ref(), volume).is_some() {
-                            volume = Some(v);
+                track = t.clone();
+                volume = v;
+                target = None;
+                problem = p.clone();
+                last_emit = Instant::now();
+                emit(MusicEvent::State { track: t, volume: v, problem: p });
+            }
+            let url = track.as_ref().map(|t| t.art_url.clone()).unwrap_or_default();
+            if url != art_url {
+                art_url = url.clone();
+                let e = emit.clone();
+                std::thread::spawn(move || {
+                    let image = if url.is_empty() { None } else { fetch_art(&url) };
+                    e(MusicEvent::Artwork { url, image });
+                });
+            }
+            next_poll = Instant::now() + if fast.load(Ordering::Relaxed) { Duration::from_secs(1) } else { Duration::from_secs(5) };
+        }
+        if let (true, Some(want)) = (gliding, target) {
+            // Only with a player open: setting the volume would launch Spotify otherwise.
+            match track.as_ref().map(|t| t.app.clone()) {
+                Some(app) => {
+                    let next = glide_step(volume.unwrap_or(want), want);
+                    if set_volume(&mut helper, &app, next) {
+                        volume = Some(next);
+                        touched = Instant::now();
+                        if next == want {
                             emit(MusicEvent::State { track: track.clone(), volume, problem: problem.clone() });
                         }
+                    } else {
+                        log("music: couldn't set the volume");
+                        target = None;
                     }
                 }
-                std::thread::sleep(Duration::from_millis(150));
+                None => target = None,
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
         }
+        if helper.as_ref().is_some_and(|h| h.used.elapsed() > HELPER_IDLE) {
+            helper = None;
+        }
+        let wait = if target.is_some() && target != volume {
+            GLIDE_TICK
+        } else {
+            next_poll.max(touched + VOLUME_SETTLE).saturating_duration_since(Instant::now()).min(Duration::from_secs(5))
+        };
+        let first = match rx.recv_timeout(wait) {
+            Ok(cmd) => cmd,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let mut cmds = vec![first];
+        while let Ok(c) = rx.try_recv() {
+            cmds.push(c);
+        }
+        for c in cmds {
+            match c {
+                MusicCmd::SetVolume(v) => {
+                    target = Some(v.min(100));
+                    touched = Instant::now();
+                }
+                other => {
+                    run(&other, track.as_ref());
+                    // Let the player catch up, then read it again.
+                    next_poll = Instant::now() + Duration::from_millis(150);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glide_eases_and_lands() {
+        // A knob click (+4) eases in 1% steps; a big jump starts fast and slows down.
+        let walk = |from: u8, to: u8| {
+            let mut v = from;
+            let mut steps = vec![];
+            while v != to {
+                v = glide_step(v, to);
+                steps.push(v);
+            }
+            steps
+        };
+        assert_eq!(walk(50, 54), [51, 52, 53, 54]);
+        assert_eq!(walk(54, 50), [53, 52, 51, 50]);
+        let big = walk(20, 80);
+        assert_eq!(big.first(), Some(&40));
+        assert_eq!(big.last(), Some(&80));
+        assert!(big.len() < 16);
+        assert_eq!(walk(0, 100).last(), Some(&100));
+        assert_eq!(glide_step(37, 37), 37);
     }
 }

@@ -1440,8 +1440,11 @@ impl App {
                 }
             }
             (PageId::Music, _) => {
-                self.volume = Some((self.volume.unwrap_or(50) as i32 + d * VOLUME_STEP).clamp(0, 100) as u8);
-                let _ = self.music_cmd.send(MusicCmd::VolumeBy(d * VOLUME_STEP));
+                // The board shows the new volume at once; the music thread glides the
+                // player there (absolute, so a late reading can't make them drift apart).
+                let v = (self.volume.unwrap_or(50) as i32 + d * VOLUME_STEP).clamp(0, 100) as u8;
+                self.volume = Some(v);
+                let _ = self.music_cmd.send(MusicCmd::SetVolume(v));
             }
             (PageId::Docker, Level::Detail(_)) => {
                 // Logs: newest at the bottom; turning left goes back in time.
