@@ -126,6 +126,12 @@ const PAGES = [
   ["ops", "Ops", "server.rack", "WARP, your servers and your sites"],
   ["code", "Code", "arrow.triangle.pull", "GitHub PRs and GitLab merge requests"],
   ["digin", "Digin", "bubble.left.and.text.bubble.right.fill", "Your issues, inbox, chat and pages from Digin"],
+  ["calendar", "Calendar", "calendar", "Today's agenda, the next meeting and a join button"],
+  ["focus", "Focus", "timer", "A focus timer on the knob and ring"],
+  ["deploy", "Deploy", "paperplane.fill", "Deploy your projects and watch CI"],
+  ["paste", "Clipboard", "doc.on.clipboard.fill", "Pick a recent copy and paste it"],
+  ["windows", "Windows", "macwindow.on.rectangle", "Switch apps from the knob"],
+  ["health", "Health", "waveform.path.ecg", "CPU, memory, GPU and network for your Macs"],
   ["settings", "Settings", "gearshape.fill", "Brightness and switches, right on the board"],
 ];
 const PAGE = Object.fromEntries(PAGES.map(([id, label, sym, blurb]) => [id, { id, label, sym, blurb }]));
@@ -133,6 +139,7 @@ const TABS = [
   ["live", "Live", "display"], ["panes", "Panes", "rectangle.3.group"], ["shortcuts", "Shortcuts", "square.grid.3x3"],
   ["soundboard", "Soundboard", "waveform"], ["lighting", "Lighting", "light.max"], ["general", "General", "gearshape"],
   ["digin", "Digin", "bubble.left.and.text.bubble.right"],
+  ["extras", "Extras", "sparkles"],
   ["sync", "Macs", "laptopcomputer.and.iphone"],
 ];
 const SYMBOLS = ["star.fill", "bolt.fill", "camera.viewfinder", "rectangle.dashed", "lock.fill", "moon.fill", "sun.max.fill", "speaker.slash.fill", "mic.slash.fill", "music.note", "playpause.fill", "forward.fill", "backward.fill", "terminal.fill", "safari.fill", "globe", "folder.fill", "doc.text.fill", "envelope.fill", "message.fill", "phone.fill", "video.fill", "calendar", "clock.fill", "timer", "bell.fill", "gearshape.fill", "hammer.fill", "wrench.and.screwdriver.fill", "sparkles", "brain.head.profile", "chevron.left.forwardslash.chevron.right", "server.rack", "shippingbox.fill", "cloud.fill", "network", "wifi", "lightbulb.fill", "house.fill", "gamecontroller.fill", "headphones", "megaphone.fill", "hand.thumbsup.fill", "heart.fill", "flame.fill", "trash.fill", "arrow.clockwise", "square.and.arrow.up", "rectangle.split.2x1.fill", "macwindow", "display", "keyboard", "command", "eye.fill", "magnifyingglass", "paperplane.fill", "cart.fill", "creditcard.fill", "person.fill", "figure.walk"];
@@ -247,7 +254,7 @@ function render() {
   const main = $("#main");
   main.replaceChildren(h("div", { id: "banner" }));
   renderBanner();
-  const views = { live: viewLive, panes: viewPanes, shortcuts: viewShortcuts, soundboard: viewSoundboard, lighting: viewLighting, general: viewGeneral, digin: viewDigin, sync: viewSync };
+  const views = { live: viewLive, panes: viewPanes, shortcuts: viewShortcuts, soundboard: viewSoundboard, lighting: viewLighting, general: viewGeneral, digin: viewDigin, extras: viewExtras, sync: viewSync };
   (views[tab] || viewLive)(main);
 }
 
@@ -503,6 +510,45 @@ function viewGeneral(main) {
     toggle("Include GitLab merge requests", "code.gitlab"),
     choice("Refresh every", "code.refreshSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], "Twice as often while the pane is showing", true)));
   main.append(card("Docker", null, text("Engine socket", "docker.socket", "Automatic (Kiri first)", "Empty finds Kiri's, then Docker's")));
+}
+
+// ---------------------------------------------------------------- Extras (the newer features)
+function viewExtras(main) {
+  main.append(h("h1", {}, "Extras"), h("p", { class: "sub" }, "Call mode, night mode, the focus timer, deploys, calendar, clipboard, windows, health and the music visualizer."));
+  main.append(card("Call mode", "While you're on a call the bar shows mute state, a call timer, your clips and the next meeting. Double-click dismisses it until the call ends.",
+    toggle("Show the call screen during calls", "call.enabled")));
+  main.append(card("Night mode", "After you've been away for a while at night the bar dims to a clock with the weather and your first meeting tomorrow. Any touch or knob turn wakes it.",
+    toggle("Night mode", "night.enabled"),
+    choice("Starts at", "night.startHour", [...Array(24).keys()].map((hh) => [hh, `${(hh % 12) || 12} ${hh < 12 ? "AM" : "PM"}`]), null, true),
+    choice("Ends at", "night.endHour", [...Array(24).keys()].map((hh) => [hh, `${(hh % 12) || 12} ${hh < 12 ? "AM" : "PM"}`]), null, true),
+    choice("After idle for", "night.idleMinutes", [[2, "2 min"], [5, "5 min"], [10, "10 min"], [20, "20 min"], [30, "30 min"]], null, true),
+    h("div", { class: "row" }, h("div", { class: "label" }, "Weather location", h("small", {}, "Latitude, longitude. Empty = estimated from your network (no location lookup services).")),
+      h("input", { type: "text", style: { width: "220px" }, placeholder: "40.76, -111.89", value: cfg.night?.latitude != null ? `${cfg.night.latitude}, ${cfg.night.longitude}` : "",
+        oninput: (e) => { const m = e.target.value.split(",").map((x) => parseFloat(x)); if (m.length === 2 && m.every((x) => !isNaN(x))) { cfg.night.latitude = m[0]; cfg.night.longitude = m[1]; } else { cfg.night.latitude = null; cfg.night.longitude = null; } changed(); } }))));
+  main.append(card("Focus timer", "Turn the knob to set the length, press to start or pause, hold to cancel. The ring shows the time left.",
+    choice("Default length", "focus.minutes", [[15, "15 min"], [25, "25 min"], [30, "30 min"], [45, "45 min"], [50, "50 min"], [60, "60 min"], [90, "90 min"]], null, true),
+    text("Shortcut when a block starts", "focus.startShortcut", "e.g. Focus On", "A macOS Shortcut (for example one that turns on Do Not Disturb)"),
+    text("Shortcut when it ends", "focus.endShortcut", "e.g. Focus Off")));
+  const projects = cfg.deploy.projects || (cfg.deploy.projects = []);
+  main.append(card("Deploy", projects.length ? "Press a project on the bar to arm it, press again within 4 seconds to deploy." : "Empty = quaked finds folders with a deploy.sh in ~/ArlintDev.",
+    ...projects.map((p, i) => h("div", { class: "row" },
+      h("input", { type: "text", value: p.name, placeholder: "name", style: { width: "140px" }, oninput: (e) => { p.name = e.target.value; changed(); } }),
+      h("input", { type: "text", value: p.path, placeholder: "~/ArlintDev/project", class: "mono", style: { width: "220px" }, oninput: (e) => { p.path = e.target.value; changed(); } }),
+      h("input", { type: "text", value: p.command, placeholder: "./deploy.sh", class: "mono", style: { width: "150px" }, oninput: (e) => { p.command = e.target.value; changed(); } }),
+      h("input", { type: "text", value: p.repo, placeholder: "owner/repo (CI)", class: "mono", style: { width: "180px" }, oninput: (e) => { p.repo = e.target.value; changed(); } }),
+      h("button", { class: "btn small danger", onclick: () => { projects.splice(i, 1); changed(); render(); } }, "Remove"))),
+    h("div", { class: "row" }, h("button", { class: "btn small", onclick: () => { projects.push({ name: "", path: "", command: "./deploy.sh", repo: "" }); changed(); render(); } }, sym("plus", 12), "Add a project"))));
+  main.append(card("Calendar", "Uses the calendars in macOS Calendar (macOS asks once for access).",
+    toggle("Calendar", "calendar.enabled"),
+    lines("Only these calendars", "calendar.calendars", "One name per line; empty = all")));
+  main.append(card("Clipboard and windows", "Copies from password managers are never kept; the history lives in memory only.",
+    toggle("Clipboard picker", "paste.enabled"),
+    choice("Remember", "paste.history", [[10, "10 copies"], [20, "20 copies"], [40, "40 copies"]], null, true),
+    toggle("Window switcher", "windows.enabled")));
+  main.append(card("Health and visualizer", null,
+    toggle("Mac health", "health.enabled", "This Mac and your paired Macs"),
+    toggle("Music visualizer", "viz.enabled", "macOS asks once to let Quaked hear system audio"),
+    toggle("Pulse the ring to the beat", "viz.ring")));
 }
 
 // ---------------------------------------------------------------- Digin
