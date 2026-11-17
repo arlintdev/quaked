@@ -303,7 +303,7 @@ function renderLive() {
     ["Claude sessions", st.sessions != null ? `${st.sessions} (${st.waiting || 0} waiting on you, ${st.working || 0} working)` : "—"],
     ["Now playing", st.track ? `${st.track.title} — ${st.track.artist}${st.track.playing ? "" : " (paused)"}` : "Nothing"],
     ["Soundboard", sb.error ? [dot("var(--red)"), sb.error] : sb.routing ? [dot("var(--green)"), `Live${sb.listener ? " · " + sb.listener : ""}`] : [dot("var(--faint)"), "Idle (mic not routed)"]],
-    ["Other Macs", peers.length ? peers.map((p) => `${p.name}: ${p.ok ? `${p.sessions} sessions${p.board ? ", has the Quake" : ""}` : p.error || "…"}`).join("  ·  ") : "None found"],
+    ["Other Macs", peers.length ? peers.map((p) => `${p.name}: ${p.ok ? `${p.sessions} sessions${p.board ? ", has the Quake" : ""}${p.error ? ` (${p.error})` : ""}` : p.error || "…"}`).join("  ·  ") : "None found"],
     ["quaked", st.version || "—"],
   ];
   if (state.boardError) rows.unshift(["Board", [dot("var(--red)"), state.boardError]]);
@@ -648,8 +648,8 @@ function viewSync(main) {
       const busy = pairing === p.name;
       const unpaired = !p.ok && /key/.test(p.error || "");
       return h("div", { class: "row" }, h("div", { class: "icon", style: { width: "30px", display: "grid", placeItems: "center" } }, sym("laptopcomputer", 20, "var(--muted)")),
-        h("div", { class: "label" }, h("b", {}, p.name), h("small", {}, p.ok ? `${p.sessions} Claude sessions${p.board ? " · has the Quake" : ""}` : unpaired ? "Not paired" : p.error || "Connecting…")),
-        p.ok ? h("span", { class: "pill green" }, "Paired") : unpaired ? h("button", { class: "btn primary", disabled: !!pairing, onclick: () => pairWith(p.name) }, busy ? "Waiting for approval…" : "Pair") : h("span", { class: "pill amber" }, "Not reachable"));
+        h("div", { class: "label" }, h("b", {}, p.name), h("small", {}, p.ok ? `${p.sessions} Claude sessions${p.board ? " · has the Quake" : ""}${p.build ? ` · build ${p.build}` : ""}${p.error ? ` · ${p.error}` : ""}` : unpaired ? "Not paired" : p.error || "Connecting…")),
+        p.ok && p.error ? h("span", { class: "pill amber" }, "Needs update") : p.ok ? h("span", { class: "pill green" }, "Paired") : unpaired ? h("button", { class: "btn primary", disabled: !!pairing, onclick: () => pairWith(p.name) }, busy ? "Waiting for approval…" : "Pair") : h("span", { class: "pill amber" }, "Not reachable"));
     }) : [h("div", { class: "empty" }, "No other Mac running quaked found on this network.")])));
   const key = h("input", { type: "text", class: "mono", value: cfg.sync?.key || "", style: { width: "200px" }, oninput: (e) => set("sync.key", e.target.value.trim()) });
   main.append(h("details", { class: "card", style: { padding: "0" } }, h("summary", { style: { padding: "14px 18px", cursor: "pointer", color: "var(--muted)" } }, "Pairing key (advanced)"),

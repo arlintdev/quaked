@@ -4,6 +4,8 @@
 # ~/.local/bin/quaked to it, adds the Claude Code hooks, and (re)starts the LaunchAgent.
 set -e
 cd "$(dirname "$0")"
+BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "Building quaked $BUILD"
 cargo build --release
 APP="$HOME/Applications/Quaked.app"
 mkdir -p "$APP/Contents/MacOS" "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
@@ -32,5 +34,28 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   launchctl print "gui/$(id -u)/dev.arlint.quaked" >/dev/null 2>&1 || break
   sleep 0.5
 done
+# A daemon started some other way (from Terminal, or an old install) would keep running
+# the old build and keep its place on the network. Hooks (quaked hook / permit) are left
+# alone: only "quaked run" is the daemon.
+for pid in $(pgrep -x quaked || true); do
+  case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+    *"quaked run") echo "Stopping an older quaked (pid $pid)"; kill "$pid" 2>/dev/null || true ;;
+  esac
+done
+sleep 0.5
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.arlint.quaked.plist"
-echo "quaked installed; settings: http://127.0.0.1:47380 (or open Quaked Settings); log: ~/Library/Logs/quaked.log"
+# Check the new build is the one answering.
+RUNNING=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  RUNNING="$("$HOME/.local/bin/quaked" ctl status 2>/dev/null | sed -n 's/.*"build":"\([^"]*\)".*/\1/p')"
+  [ -n "$RUNNING" ] && break
+  sleep 0.5
+done
+if [ "$RUNNING" = "$BUILD" ]; then
+  echo "quaked $BUILD is running; settings: http://127.0.0.1:47380 (or open Quaked Settings); log: ~/Library/Logs/quaked.log"
+else
+  echo "warning: expected quaked $BUILD to be running, but it answered with build '${RUNNING:-nothing}'." >&2
+  echo "Last lines of ~/Library/Logs/quaked.log:" >&2
+  tail -n 15 "$HOME/Library/Logs/quaked.log" >&2 || true
+  exit 1
+fi

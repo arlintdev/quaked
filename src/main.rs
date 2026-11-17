@@ -631,7 +631,7 @@ fn main() {
                 eprintln!("quaked is already running");
                 std::process::exit(0);
             };
-            device::log(format!("quaked {} starting", env!("CARGO_PKG_VERSION")));
+            device::log(format!("quaked {} ({}) starting", env!("CARGO_PKG_VERSION"), env!("QUAKED_BUILD")));
             app::run();
         }
         _ => {

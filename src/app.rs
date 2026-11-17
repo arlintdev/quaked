@@ -1232,7 +1232,7 @@ impl App {
             "status": serde_json::from_str::<serde_json::Value>(&self.status_json()).unwrap_or_default(),
             "peers": self.peers.peers.iter().map(|p| serde_json::json!({
                 "name": p.name, "host": p.host, "port": p.port, "ok": p.ok, "error": p.error,
-                "board": p.board, "sessions": p.sessions.len(), "configAt": p.config_at,
+                "board": p.board, "sessions": p.sessions.len(), "configAt": p.config_at, "build": p.build,
             })).collect::<Vec<_>>(),
             "pairAsk": self.pair_ask.as_ref().map(|a| a.name.clone()),
             "route": route,
@@ -1820,6 +1820,7 @@ impl App {
         let playing: Vec<&str> = self.sounds.playing.iter().filter_map(|&i| self.sounds.clips.get(i)).map(|c| c.title.as_str()).collect();
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
+            "build": env!("QUAKED_BUILD"),
             "connected": self.connected,
             "page": self.page,
             "level": self.level_name(),
