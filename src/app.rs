@@ -693,7 +693,9 @@ impl App {
                 }
             }
             self.sel = self.sel.min(self.sessions.len().saturating_sub(1));
-            if let Level::Detail(id) = &self.level {
+            // An opened session that's gone: back to the cards. Only on the AI page; other
+            // pages' detail views (a stock, a Digin issue) aren't sessions.
+            if let (PageId::Ai, Level::Detail(id)) = (self.page, &self.level) {
                 if !self.sessions.iter().any(|s| &s.id == id) {
                     self.level = Level::Focus;
                 }
