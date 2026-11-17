@@ -422,6 +422,17 @@ fn listener_of(name: &str) -> Option<String> {
     None
 }
 
+/// Bundle ids of the apps capturing from any input device right now, other than us
+/// (call mode looks for call apps among them). Reading these doesn't prompt.
+pub fn input_apps() -> Vec<String> {
+    let me = std::process::id();
+    prop_vec(SYSTEM_OBJECT, b"prs#", SCOPE_GLOBAL)
+        .into_iter()
+        .filter(|&p| prop_u32(p, b"ppid") != Some(me) && prop_u32(p, b"piri") == Some(1))
+        .filter_map(|p| prop_string(p, b"pbid"))
+        .collect()
+}
+
 // ---------------------------------------------------------------- engine thread
 
 pub struct Audio {

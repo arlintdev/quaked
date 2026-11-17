@@ -1575,6 +1575,7 @@ dependencies = [
 name = "quaked"
 version = "0.3.0"
 dependencies = [
+ "block2",
  "cpal",
  "fontdue",
  "hidapi",
