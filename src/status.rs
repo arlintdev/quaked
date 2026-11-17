@@ -103,6 +103,70 @@ pub struct Todo {
     pub state: TodoState,
 }
 
+/// Claude's task list rebuilt from the session's transcript: its last full plan, then the
+/// changes after it. For a plan set before quaked started following it (an update, a
+/// missed hook). Reads backwards from the end in 1 MB chunks, at most 48 MB, and only
+/// parses lines that mention a plan tool. Also returns the tool-use ids it replayed.
+pub fn todos_from_transcript(path: &str) -> (Vec<Todo>, std::collections::HashSet<String>) {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 1 << 20;
+    const MAX: u64 = 48 << 20;
+    let mut seen = std::collections::HashSet::new();
+    let Ok(mut f) = fs::File::open(path) else { return (Vec::new(), seen) };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let is_plan = |name: &str| name.ends_with("__update_plan") || name == "TodoWrite" || name == NEXT_STEP_TOOL;
+    // Newest first, up to and including the last full list.
+    let mut calls: Vec<(String, Value)> = Vec::new();
+    let mut carry: Vec<u8> = Vec::new();
+    let mut end = len;
+    let mut full = false;
+    while end > 0 && len - end < MAX && !full {
+        let start = end.saturating_sub(CHUNK);
+        let mut buf = vec![0; (end - start) as usize];
+        if f.seek(SeekFrom::Start(start)).is_err() || f.read_exact(&mut buf).is_err() {
+            break;
+        }
+        buf.extend_from_slice(&carry);
+        // A line cut by the chunk's start waits for the next (earlier) chunk.
+        let split = if start == 0 { 0 } else { buf.iter().position(|&b| b == b'\n').map_or(buf.len(), |i| i + 1) };
+        carry = buf[..split].to_vec();
+        let text = String::from_utf8_lossy(&buf[split..]).into_owned();
+        'lines: for line in text.lines().rev() {
+            if !line.contains("\"assistant\"") || !(line.contains("update_plan") || line.contains("TodoWrite") || line.contains(NEXT_STEP_TOOL)) {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            if v["type"] != "assistant" {
+                continue;
+            }
+            for b in v["message"]["content"].as_array().into_iter().flatten().rev() {
+                let name = b["name"].as_str().unwrap_or("");
+                if b["type"] != "tool_use" || !is_plan(name) {
+                    continue;
+                }
+                let id = b["id"].as_str().unwrap_or("").to_string();
+                if !seen.insert(id) {
+                    continue;
+                }
+                let whole = name == "TodoWrite" || (name.ends_with("__update_plan") && b["input"].get("items").is_some());
+                calls.push((name.to_string(), b["input"].clone()));
+                if whole {
+                    full = true;
+                    break 'lines;
+                }
+            }
+        }
+        end = start;
+    }
+    let mut todos = Vec::new();
+    if full {
+        for (name, input) in calls.iter().rev() {
+            update_todos(&mut todos, name, input);
+        }
+    }
+    (todos, seen)
+}
+
 /// Follows Claude's task list through its tool calls: the desktop app's plan tool (a whole
 /// list, or advance / done / start on it), the CLI's TodoWrite, and the next-step tool,
 /// which checks everything off. Returns whether it changed.
@@ -561,7 +625,17 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
             s.notice.clear();
             let status = if input.hook_event_name == "PostToolUse" { StepStatus::Ok } else { StepStatus::Error };
             if status == StepStatus::Ok {
-                update_todos(&mut s.todos, &input.tool_name, &input.tool_input);
+                let partial = input.tool_name.ends_with("__update_plan") && input.tool_input.get("items").is_none();
+                if partial && s.todos.is_empty() && !s.transcript.is_empty() {
+                    // A change to a list we never saw: rebuild it from the transcript.
+                    let (todos, replayed) = todos_from_transcript(&s.transcript);
+                    s.todos = todos;
+                    if !replayed.contains(&input.tool_use_id) {
+                        update_todos(&mut s.todos, &input.tool_name, &input.tool_input);
+                    }
+                } else {
+                    update_todos(&mut s.todos, &input.tool_name, &input.tool_input);
+                }
             }
             let (tag, text) = summarize(&input.tool_name, &input.tool_input, &cwd);
             match running_step(&mut s, &input.tool_use_id, &tag) {
@@ -951,6 +1025,44 @@ mod tests {
         fs::write(&path, next).unwrap();
         assert_eq!(turn_comment(path.to_str().unwrap()), "", "a new prompt starts a new turn");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plans_rebuild_from_the_transcript() {
+        let dir = std::env::temp_dir().join(format!("quaked-plan-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let tool = |id: &str, name: &str, input: Value| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}).to_string();
+        let plan = "mcp__ccd_turn__update_plan";
+        let mut lines = vec![
+            tool("t0", plan, json!({"items": [{"content": "Old", "status": "in_progress"}]})),
+            json!({"type": "user", "message": {"content": "hi"}}).to_string(),
+            tool("t1", plan, json!({"items": [{"content": "A", "status": "in_progress"}, {"content": "B", "status": "pending"}, {"content": "C", "status": "pending"}]})),
+            tool("t2", "Bash", json!({"command": "ls"})),
+            tool("t3", plan, json!({"advance": true})),
+        ];
+        // A big line in between, so the reader crosses chunks.
+        lines.insert(3, json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "x".repeat(1_500_000)}]}}).to_string());
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let (todos, ids) = todos_from_transcript(path.to_str().unwrap());
+        use TodoState::*;
+        assert_eq!(todos.iter().map(|t| (t.text.as_str(), t.state)).collect::<Vec<_>>(), [("A", Completed), ("B", InProgress), ("C", Pending)]);
+        assert!(ids.contains("t3") && ids.contains("t1") && !ids.contains("t0"));
+        assert!(todos_from_transcript("/nonexistent").0.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// QUAKED_TRANSCRIPT=<path> cargo test --release -- --ignored real_transcript --nocapture
+    #[test]
+    #[ignore]
+    fn real_transcript() {
+        let path = std::env::var("QUAKED_TRANSCRIPT").expect("QUAKED_TRANSCRIPT");
+        let t = std::time::Instant::now();
+        let (todos, ids) = todos_from_transcript(&path);
+        eprintln!("{} todos from {} plan calls in {:?}", todos.len(), ids.len(), t.elapsed());
+        for x in &todos {
+            eprintln!("  {:?} {}", x.state, x.text);
+        }
     }
 
     #[test]
