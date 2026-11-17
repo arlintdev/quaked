@@ -194,7 +194,7 @@ fn card(c: &mut Canvas, v: &View, l: &Layout) {
     c.fit(F::Medium, &meta, 18.0, w - pw - 80.0, x + 44.0 + pw, y + 41.0, TEXT_2, Align::Left);
     c.fit(F::Bold, &e.title, 46.0, w - 60.0, x + 30.0, y + 106.0, TEXT, Align::Left);
     // Where: the meeting app, and the place unless it's just the link again.
-    let place = if e.location.contains("://") || e.location.to_ascii_lowercase().contains("meeting") { "" } else { e.location.as_str() };
+    let place = if e.location.contains("://") || e.location.to_ascii_lowercase().contains("meeting") { String::new() } else { one_line(&e.location) };
     let mut sx = x + 30.0;
     if !e.join_url.is_empty() {
         c.symbol("video.fill", 18.0, sx + 12.0, y + 140.0, MUTED);
@@ -202,7 +202,7 @@ fn card(c: &mut Canvas, v: &View, l: &Layout) {
     }
     if !place.is_empty() {
         c.symbol("mappin.and.ellipse", 18.0, sx + 10.0, y + 140.0, MUTED);
-        c.clip(F::Medium, place, 20.0, x + w - sx - 60.0, sx + 32.0, y + 147.0, TEXT_2);
+        c.clip(F::Medium, &place, 20.0, x + w - sx - 60.0, sx + 32.0, y + 147.0, TEXT_2);
     }
     // When, big.
     let soon = running || e.start_ms - now <= 15 * 60_000;
@@ -285,8 +285,18 @@ fn list(c: &mut Canvas, v: &View, l: &Layout) {
             c.symbol("video.fill", 17.0, tx_end - 10.0, mid, if soon { JOIN_GREEN } else { MUTED });
             tx_end -= 34.0;
         }
-        c.clip(F::Medium, &e.title, 21.0, tx_end - (rx + 122.0), rx + 122.0, mid + 7.0, TEXT);
+        let mut tx = rx + 122.0;
+        if let Some(day) = cal::other_day(l.now, e.start_ms) {
+            tx += c.text(F::Bold, day, 13.0, tx, mid + 6.0, FAINT, Align::Left) + 12.0;
+        }
+        c.clip(F::Medium, &e.title, 21.0, tx_end - tx, tx, mid + 7.0, TEXT);
     }
+}
+
+/// A multi-line location ("Studio\n2500 Murphy St") on one line; the fonts have no glyph
+/// for line breaks.
+fn one_line(s: &str) -> String {
+    s.split(['\n', '\r', '\u{2028}', '\u{2029}']).map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ·  ")
 }
 
 /// Touch on this page: return Hit::Feature(Page::<this page>, i) for row / card `i`.

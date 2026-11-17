@@ -84,7 +84,11 @@ fn until(ms: u64) -> String {
 }
 
 fn plural_min(m: u64) -> String {
-    if m == 1 { "1 min".into() } else { format!("{m} min") }
+    match m {
+        1 => "1 min".into(),
+        0..=119 => format!("{m} min"),
+        _ => format!("{} h", m / 60),
+    }
 }
 
 /// An arc of the dial from `a` to `b` (fractions of a turn, clockwise from the top).

@@ -151,6 +151,12 @@ pub fn day_label(ms: u64) -> String {
     format!("{}, {} {}", DAYS[tm.tm_wday.clamp(0, 6) as usize], MONTHS[tm.tm_mon.clamp(0, 11) as usize], tm.tm_mday)
 }
 
+/// "TUE" when `ms` falls on another local day than `now` (rows from tomorrow say so).
+pub fn other_day(now: u64, ms: u64) -> Option<&'static str> {
+    const DAYS: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    (days_apart(now, ms) != 0).then(|| DAYS[local(ms).tm_wday.clamp(0, 6) as usize])
+}
+
 fn days_apart(a: u64, b: u64) -> i32 {
     let (x, y) = (local(a), local(b));
     if x.tm_year == y.tm_year {
