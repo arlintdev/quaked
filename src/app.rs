@@ -12,6 +12,7 @@
 mod calendar;
 mod call;
 mod deploy;
+mod digin_actions;
 mod focus;
 mod health;
 mod night;
@@ -1442,6 +1443,7 @@ impl App {
                 self.scroll = (self.scroll as i32 - d).max(0) as usize;
             }
             (PageId::Settings, Level::Detail(_)) => self.adjust_setting(self.tile, d),
+            (PageId::Digin, Level::Detail(_)) => self.digin_turn(d),
             (PageId::Shortcuts | PageId::Soundboard | PageId::Docker | PageId::Ops | PageId::Code | PageId::Settings | PageId::Dash | PageId::Digin, _) => {
                 let n = self.tile_count() as i32;
                 if n > 0 {
@@ -1522,11 +1524,7 @@ impl App {
                 (PageId::Soundboard, _) => self.toggle_clip(self.tile),
                 (PageId::Ops, _) => self.ops_activate(self.tile),
                 (PageId::Code, _) => self.open_pr(self.tile),
-                (PageId::Digin, _) => {
-                    if let Some(url) = render::digin_url(&self.digin, self.tile) {
-                        open_target(&url);
-                    }
-                }
+                (PageId::Digin, _) => self.digin_press(),
                 (PageId::Dash, _) => {
                     if let Some(p) = render::dash_pages(&self.cfg.pages).get(self.tile).copied() {
                         self.set_page(p);
@@ -1724,12 +1722,7 @@ impl App {
             }
             Hit::Pane(p) => self.set_page(p),
             Hit::Feature(p, i) => self.feature_tap(p, i),
-            Hit::DiginItem(i) => {
-                self.tile = i;
-                if let Some(url) = render::digin_url(&self.digin, i) {
-                    open_target(&url);
-                }
-            }
+            Hit::DiginItem(i) => self.digin_tap(i),
             Hit::AskCard(i) => {
                 if let Some(a) = self.asks.front_mut() {
                     a.sel = i;
@@ -2087,7 +2080,10 @@ impl ApplicationHandler<Event> for App {
             }
             Event::Menu(action) => self.on_menu(action),
             Event::Feature(f) => self.on_feature(f),
-            Event::Digin(st) => {
+            Event::Digin(mut st) => {
+                // The open item is the app's; the poller only answers about it.
+                let reply = st.reply.take();
+                st.detail = self.digin.detail.take();
                 // New in the inbox since last time (not on the first load or after signing in).
                 let known: std::collections::HashSet<(usize, i64)> = self.digin.inbox.iter().map(|n| (n.account, n.id)).collect();
                 let was_in: Vec<bool> = self.digin.accounts.iter().map(|a| a.signed_in && a.error.is_none()).collect();
@@ -2099,6 +2095,9 @@ impl ApplicationHandler<Event> for App {
                     .map(|n| if n.body.is_empty() { n.title.clone() } else { format!("{}: {}", n.title, n.body) })
                     .collect();
                 self.digin = st;
+                if let Some(r) = reply {
+                    self.digin_reply(r);
+                }
                 self.tile = self.tile.min(self.tile_count().saturating_sub(1));
                 if let Some(r) = Self::summarize(news) {
                     self.alert(PageId::Digin, r, true);

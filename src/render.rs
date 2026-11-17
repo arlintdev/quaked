@@ -79,7 +79,8 @@ pub enum Hit {
     Pane(Page),
     /// A card in Claude's question (options, then Done for multi-select, then "Answer in Claude").
     AskCard(usize),
-    /// A Digin row: issues, then inbox, then pages (one index across the three lists).
+    /// A Digin row: issues, then inbox, then pages (one index across the three lists). On an
+    /// open item: its action `i`, or `DG_BACK`.
     DiginItem(usize),
     /// Item `usize` on a feature's page (or overlay: Page::Dash for call / night).
     Feature(Page, usize),
@@ -907,6 +908,50 @@ fn digin_lists(d: &digin::Status, tile: usize) -> [(R, usize, usize, usize); 3] 
         (cp, list_window(np, local(ni + nn, np), DG_ROWS), ni + nn, np),
     ]
 }
+// An open Digin item: what it is on the left, its text on the right, its actions along the
+// bottom ("‹ Back" for touch, then the issue's statuses or "Mark read", "Open in Digin" last).
+const DG_BAR_H: f32 = 60.0;
+const DG_BAR_Y: f32 = CY + CH - DG_BAR_H;
+const DG_HEAD_W: f32 = 560.0;
+const DG_OPEN_W: f32 = 236.0;
+/// `Hit::DiginItem` on an open item: action `i`, or this for "‹ Back".
+pub const DG_BACK: usize = usize::MAX;
+fn dg_head() -> R {
+    (M, CY, DG_HEAD_W, DG_BAR_Y - G - CY)
+}
+fn dg_text() -> R {
+    (M + DG_HEAD_W + G, CY, W - 2.0 * M - DG_HEAD_W - G, DG_BAR_Y - G - CY)
+}
+/// Where the text itself goes inside its panel.
+fn dg_text_area() -> R {
+    let (x, y, w, h) = dg_text();
+    (x + 26.0, y + 48.0, w - 64.0, h - 48.0 - 16.0)
+}
+fn dg_back() -> R {
+    (M, DG_BAR_Y + 6.0, 112.0, DG_BAR_H - 6.0)
+}
+/// The action bar: one rect per action, "Open in Digin" (always last) at the far right.
+fn dg_bar(n: usize) -> Vec<R> {
+    let (y, h) = (DG_BAR_Y + 6.0, DG_BAR_H - 6.0);
+    let open_x = W - M - DG_OPEN_W;
+    let others = n.saturating_sub(1);
+    let left = M + 112.0 + 2.0 * G;
+    let room = open_x - 3.0 * G - left;
+    let w = if others == 0 { 0.0 } else { ((room - (others as f32 - 1.0) * G) / others as f32).min(250.0) };
+    let mut out: Vec<R> = (0..others).map(|i| (left + i as f32 * (w + G), y, w, h)).collect();
+    if n > 0 {
+        out.push((open_x, y, DG_OPEN_W, h));
+    }
+    out
+}
+/// The open item, if the board is showing it.
+fn dg_open<'a>(v: &'a View) -> Option<&'a digin::Detail> {
+    match v.level {
+        Level::Detail(key) => v.digin.detail.as_ref().filter(|d| &d.key == key),
+        _ => None,
+    }
+}
+
 /// The link for a Digin row in the one index.
 pub fn digin_url(d: &digin::Status, i: usize) -> Option<String> {
     let (ni, nn) = (d.issues.len(), d.inbox.len());
@@ -1071,6 +1116,13 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
         (Page::Windows, _) => windows::hit(v, x, y),
         (Page::Calendar, _) => calendar::hit(v, x, y),
         (Page::Health, _) => health::hit(v, x, y),
+        (Page::Digin, Level::Detail(_)) if dg_open(v).is_some() => {
+            let d = dg_open(v)?;
+            if inside(dg_back(), x, y) {
+                return Some(Hit::DiginItem(DG_BACK));
+            }
+            dg_bar(d.body.actions().len()).into_iter().position(|r| inside(r, x, y)).map(Hit::DiginItem)
+        }
         (Page::Digin, _) => digin_lists(v.digin, v.tile).into_iter().find_map(|(col, first, offset, n)| {
             (0..DG_ROWS).find(|&s| inside(digin_row(col, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::DiginItem(offset + i))
         }),
@@ -1155,6 +1207,10 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
         }
         Hit::Setting(i, _) => setting_rect(i),
         Hit::Feature(p, i) => return feature_rect(v, p, i),
+        Hit::DiginItem(i) if dg_open(v).is_some() => match i {
+            DG_BACK => dg_back(),
+            _ => *dg_bar(dg_open(v)?.body.actions().len()).get(i)?,
+        },
         Hit::DiginItem(i) => {
             let (col, first, offset, _) = digin_lists(v.digin, v.tile).into_iter().find(|(_, _, off, n)| i >= *off && i < off + n)?;
             digin_row(col, (i - offset).checked_sub(first)?)
@@ -1281,7 +1337,8 @@ fn hints(v: &View) -> &'static str {
         (Page::Calendar, l) => calendar::hints(l),
         (Page::Health, l) => health::hints(l),
         (Page::Digin, Level::Top) => "turn  switch page   ·   press  pick an item   ·   tap  open",
-        (Page::Digin, _) => "turn  choose   ·   press  open in Digin   ·   double-click  back",
+        (Page::Digin, Level::Detail(_)) => digin_hints(v),
+        (Page::Digin, _) => "turn  choose   ·   press  open   ·   double-click  back",
         (Page::Dash, Level::Top) => "turn  switch page   ·   press  pick a pane   ·   tap  open",
         (Page::Dash, _) => "turn  choose   ·   press  open   ·   double-click  back",
         (Page::Settings, Level::Top) => "turn  switch page   ·   press  change settings",
@@ -1330,6 +1387,11 @@ fn top_bar(c: &mut Canvas, v: &View) {
         (Page::Ops, Level::Focus) => ops_item_name(v.ops, v.tile).map(|n| format!("›  {n}")),
         (Page::Code, Level::Focus) => v.code.all().get(v.tile).map(|p| format!("›  {}", pr_ref(p))),
         (Page::Dash, Level::Focus) => dash_pages(v.pages).get(v.tile).map(|p| format!("›  {}", p.label())),
+        (Page::Digin, Level::Detail(_)) => dg_open(v).map(|d| match &d.body {
+            digin::Body::Issue(x) => format!("›  {}", x.key),
+            digin::Body::Note(_) => "›  inbox".to_string(),
+            digin::Body::Page(p) => format!("›  {}", p.title),
+        }),
         (Page::Digin, Level::Focus) => {
             let d = v.digin;
             let (ni, nn) = (d.issues.len(), d.inbox.len());
@@ -3567,6 +3629,7 @@ fn status_style(status: &str) -> (u32, u32) {
         "waiting" => (0x1A2A44, 0x8AB4F8),
         "todo" => (0x2A2A31, TEXT_2),
         "backlog" => (0x1E1E24, MUTED),
+        "done" => (0x12301F, 0x6EDB9A),
         _ => (0x2A2A31, MUTED),
     }
 }
@@ -3604,6 +3667,9 @@ fn note_symbol(kind: &str) -> &'static str {
 }
 
 fn digin_page(c: &mut Canvas, v: &View) {
+    if let Some(open) = dg_open(v) {
+        return digin_detail(c, v, open);
+    }
     let d = v.digin;
     let focus = v.level != &Level::Top;
     if d.accounts.is_empty() {
@@ -3722,6 +3788,522 @@ fn dash_digin(c: &mut Canvas, v: &View, r: R, accent: u32, b: &Brief) {
     if let Some((text, sym)) = foot {
         c.symbol(sym, 13.0, x + 7.0, y + h - 11.0, MUTED);
         c.clip(F::Medium, &text, 14.0, w - 22.0, x + 20.0, y + h - 6.0, TEXT_2);
+    }
+}
+
+// ---------------------------------------------------------------- DIGIN: one item open
+//
+// The knob walks one line of stops: down the text (three lines a detent), then along the
+// action bar. A press on the text jumps to the actions (an issue's next status, "Mark read");
+// a press on an action does it. Done and Canceled want a second press within 4 seconds.
+
+const DG_GREEN: u32 = 0x6EDB9A;
+const DG_BODY_PX: f32 = 19.0;
+const DG_BODY_H: f32 = 27.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum DgDeco {
+    Plain,
+    Code,
+    Quote,
+    Rule,
+    /// A table's heading row: underlined.
+    Head,
+}
+
+/// One drawn line of an open item's text.
+struct DgLine {
+    f: F,
+    px: f32,
+    /// Left edge, from the text area's.
+    x: f32,
+    text: String,
+    color: u32,
+    /// Space above it (dropped when it's the first line showing), and its own height.
+    pad: f32,
+    h: f32,
+    /// Drawn left of the first line of a list item.
+    marker: Option<(String, u32)>,
+    /// After the text, fainter (a comment's age).
+    meta: String,
+    deco: DgDeco,
+    /// A table row: each cell and where it starts (instead of `text`).
+    cells: Vec<(f32, String)>,
+}
+
+impl DgLine {
+    fn new(f: F, px: f32, x: f32, text: String, color: u32, pad: f32, h: f32) -> DgLine {
+        DgLine { f, px, x, text, color, pad, h, marker: None, meta: String::new(), deco: DgDeco::Plain, cells: Vec::new() }
+    }
+}
+
+/// "just now", "4 min ago", "3 h ago", "yesterday", "5 days ago" (empty for no time).
+fn dg_ago(now_ms: u64, ms: u64) -> String {
+    if ms == 0 {
+        return String::new();
+    }
+    match now_ms.saturating_sub(ms) / 60_000 {
+        0 => "just now".into(),
+        m @ 1..=59 => format!("{m} min ago"),
+        m @ 60..=1439 => format!("{} h ago", m / 60),
+        m if m < 2880 => "yesterday".into(),
+        m => format!("{} days ago", m / 1440),
+    }
+}
+
+/// Where each column of the table that row `i` is in starts: as wide as its widest cell,
+/// squeezed to fit `w`.
+fn dg_columns(fonts: &Fonts, blocks: &[digin::Block], i: usize, w: f32) -> Vec<f32> {
+    let row = |b: &digin::Block| matches!(b, digin::Block::Row(..));
+    let start = (0..=i).rev().take_while(|&k| row(&blocks[k])).last().unwrap_or(i);
+    let end = (i..blocks.len()).take_while(|&k| row(&blocks[k])).last().unwrap_or(i);
+    let mut widths: Vec<f32> = Vec::new();
+    for b in &blocks[start..=end] {
+        if let digin::Block::Row(cells, head) = b {
+            for (k, cell) in cells.iter().enumerate() {
+                let cw = fonts.measure(if *head { F::Bold } else { F::Regular }, cell, 18.0) + 40.0;
+                match widths.get_mut(k) {
+                    Some(old) => *old = old.max(cw),
+                    None => widths.push(cw),
+                }
+            }
+        }
+    }
+    let total: f32 = widths.iter().sum();
+    let k = if total > w { w / total } else { 1.0 };
+    widths.iter().scan(0.0, |x, cw| {
+        let at = *x;
+        *x += cw * k;
+        Some(at)
+    }).collect()
+}
+
+/// Markdown blocks as lines `w` wide.
+fn dg_blocks(fonts: &Fonts, blocks: &[digin::Block], w: f32, out: &mut Vec<DgLine>) {
+    use digin::Block;
+    let wrap = |f: F, t: &str, px: f32, w: f32| {
+        let lines = fonts.wrap(f, t, px, w.max(40.0), 2000);
+        if lines.is_empty() { vec![String::new()] } else { lines }
+    };
+    let mut prev: Option<&Block> = None;
+    for (bi, b) in blocks.iter().enumerate() {
+        // Space between blocks; list items, code lines and table rows run on.
+        let pad = match (prev, b) {
+            (None, _) => 0.0,
+            (Some(Block::Item(..)), Block::Item(..)) | (Some(Block::Code(_)), Block::Code(_)) | (Some(Block::Row(..)), Block::Row(..)) => 0.0,
+            (_, Block::Heading(..)) => 16.0,
+            _ => 10.0,
+        };
+        let first = |k: usize| if k == 0 { pad } else { 0.0 };
+        match b {
+            Block::Heading(level, t) => {
+                let px = match level {
+                    1 => 24.0,
+                    2 => 21.0,
+                    _ => 19.0,
+                };
+                for (k, l) in wrap(F::Bold, t, px, w).into_iter().enumerate() {
+                    out.push(DgLine::new(F::Bold, px, 0.0, l, TEXT, first(k), (px * 1.4).round()));
+                }
+            }
+            Block::Para(t) => {
+                for (k, l) in wrap(F::Regular, t, DG_BODY_PX, w).into_iter().enumerate() {
+                    out.push(DgLine::new(F::Regular, DG_BODY_PX, 0.0, l, TEXT_2, first(k), DG_BODY_H));
+                }
+            }
+            Block::Item(marker, depth, t) => {
+                let x = 30.0 + *depth as f32 * 26.0;
+                let mcol = match marker.as_str() {
+                    "✓" => DG_GREEN,
+                    "○" => FAINT,
+                    _ => MUTED,
+                };
+                for (k, l) in wrap(F::Regular, t, DG_BODY_PX, w - x).into_iter().enumerate() {
+                    let mut line = DgLine::new(F::Regular, DG_BODY_PX, x, l, TEXT_2, first(k), DG_BODY_H);
+                    if k == 0 {
+                        line.marker = Some((marker.clone(), mcol));
+                    }
+                    out.push(line);
+                }
+            }
+            Block::Code(t) => {
+                let indent = t.chars().take_while(|c| *c == ' ').count() as f32 * fonts.measure(F::Mono, " ", 15.0);
+                let x = 14.0 + indent;
+                for (k, l) in wrap(F::Mono, t.trim_start(), 15.0, w - x - 14.0).into_iter().enumerate() {
+                    let mut line = DgLine::new(F::Mono, 15.0, x, l, 0xE0CDA9, first(k), 23.0);
+                    line.deco = DgDeco::Code;
+                    out.push(line);
+                }
+            }
+            Block::Quote(t) => {
+                for (k, l) in wrap(F::Regular, t, 18.0, w - 22.0).into_iter().enumerate() {
+                    let mut line = DgLine::new(F::Regular, 18.0, 22.0, l, MUTED, first(k), 26.0);
+                    line.deco = DgDeco::Quote;
+                    out.push(line);
+                }
+            }
+            Block::Row(cells, head) => {
+                let (f, color) = if *head { (F::Bold, TEXT) } else { (F::Regular, TEXT_2) };
+                let mut line = DgLine::new(f, 18.0, 0.0, String::new(), color, pad, 30.0);
+                line.cells = dg_columns(fonts, blocks, bi, w).into_iter().zip(cells.iter().cloned()).collect();
+                if *head {
+                    line.deco = DgDeco::Head;
+                }
+                out.push(line);
+            }
+            Block::Rule => {
+                let mut line = DgLine::new(F::Regular, DG_BODY_PX, 0.0, String::new(), LINE, pad, 18.0);
+                line.deco = DgDeco::Rule;
+                out.push(line);
+            }
+            Block::Aside(t) => {
+                for (k, l) in wrap(F::Medium, t, 17.0, w).into_iter().enumerate() {
+                    out.push(DgLine::new(F::Medium, 17.0, 0.0, l, FAINT, first(k), 25.0));
+                }
+            }
+        }
+        prev = Some(b);
+    }
+}
+
+/// Everything an open item's text panel shows, as lines `w` wide.
+fn dg_lines(fonts: &Fonts, d: &digin::Detail, w: f32, now_ms: u64) -> Vec<DgLine> {
+    let mut out = Vec::new();
+    let quiet = |t: &str| DgLine::new(F::Medium, 18.0, 0.0, t.to_string(), FAINT, 0.0, 26.0);
+    match &d.body {
+        digin::Body::Issue(x) => {
+            if x.description.is_empty() && !d.loading {
+                out.push(quiet("No description"));
+            }
+            dg_blocks(fonts, &x.description, w, &mut out);
+            if x.comment_count > 0 {
+                let mut head = DgLine::new(F::Bold, 12.0, 0.0, format!("COMMENTS  ·  {}", x.comment_count), FAINT, if out.is_empty() { 0.0 } else { 24.0 }, 24.0);
+                head.meta = "newest first".into();
+                out.push(head);
+                for cm in &x.comments {
+                    let mut who = DgLine::new(F::Bold, 16.0, 0.0, if cm.author.is_empty() { "Someone".into() } else { cm.author.clone() }, TEXT, 10.0, 26.0);
+                    who.meta = age(now_ms.saturating_sub(cm.created));
+                    out.push(who);
+                    let start = out.len();
+                    dg_blocks(fonts, &cm.text, w - 18.0, &mut out);
+                    for l in &mut out[start..] {
+                        l.x += 18.0;
+                    }
+                }
+                if x.comment_count > x.comments.len() {
+                    let mut more = quiet(&format!("{} older in Digin", x.comment_count - x.comments.len()));
+                    more.pad = 10.0;
+                    out.push(more);
+                }
+            }
+        }
+        digin::Body::Note(n) => {
+            if n.text.is_empty() {
+                out.push(quiet("Nothing more to it than the line above"));
+            }
+            dg_blocks(fonts, &n.text, w, &mut out);
+        }
+        digin::Body::Page(p) => {
+            if p.text.is_empty() && !d.loading {
+                out.push(quiet("This page is empty"));
+            }
+            dg_blocks(fonts, &p.text, w, &mut out);
+        }
+    }
+    out
+}
+
+/// The first line that can show at the top with the rest still filling the panel.
+fn dg_max_scroll(lines: &[DgLine], room: f32) -> usize {
+    let (mut s, mut below) = (lines.len(), 0.0);
+    while s > 0 && below + lines[s - 1].h <= room + 0.5 {
+        below += lines[s - 1].h + lines[s - 1].pad;
+        s -= 1;
+    }
+    s.min(lines.len().saturating_sub(1))
+}
+
+/// How far the knob can scroll the open item's text (in lines).
+pub fn digin_scroll_max(fonts: &Fonts, d: &digin::Status) -> usize {
+    let Some(open) = &d.detail else { return 0 };
+    let (_, _, w, h) = dg_text_area();
+    dg_max_scroll(&dg_lines(fonts, open, w, 0), h)
+}
+
+fn digin_hints(v: &View) -> &'static str {
+    match dg_open(v) {
+        Some(d) if d.armed.is_some() => "press again  confirm   ·   turn  cancel   ·   double-click  back",
+        Some(d) if d.focus.is_some() => "turn  choose   ·   press  do it   ·   double-click  back",
+        _ => "turn  scroll, then actions   ·   press  actions   ·   double-click  back",
+    }
+}
+
+fn priority_name(p: u8) -> &'static str {
+    match p {
+        1 => "Urgent",
+        2 => "High",
+        3 => "Medium",
+        4 => "Low",
+        _ => "",
+    }
+}
+
+fn note_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "mentioned" => "MENTION",
+        "message" => "MESSAGE",
+        "assigned" => "ASSIGNED TO YOU",
+        "commented" => "COMMENT",
+        "status" => "STATUS CHANGE",
+        "due" => "DUE",
+        "changed" => "CHANGED",
+        "call_missed" => "MISSED CALL",
+        _ => "NOTICE",
+    }
+}
+
+fn digin_detail(c: &mut Canvas, v: &View, d: &digin::Detail) {
+    dg_header(c, v, d);
+    dg_text_panel(c, v, d);
+    dg_action_bar(c, d);
+}
+
+/// The left panel: what the item is, and how the last action went.
+fn dg_header(c: &mut Canvas, v: &View, d: &digin::Detail) {
+    let r = dg_head();
+    let (x, y, w, h) = r;
+    c.rrect(r, 14.0, PANEL, 1.0);
+    let (ix, iw) = (x + 26.0, w - 52.0);
+    let host = if v.digin.accounts.len() > 1 { v.digin.accounts.get(d.account).map(|a| a.label.clone()).unwrap_or_default() } else { String::new() };
+    let ago = |ms: u64| dg_ago(v.now_ms, ms);
+    let join = |parts: &[&str]| parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join("  ·  ");
+    match &d.body {
+        digin::Body::Issue(it) => {
+            let (bg, fg) = status_style(&it.status);
+            c.rrect((x, y, 6.0, h), 3.0, fg, 1.0);
+            let kw = c.text(F::Mono, &it.key, 17.0, ix, y + 38.0, MUTED, Align::Left);
+            let mut right = x + w - 26.0;
+            let pname = priority_name(it.priority);
+            if !pname.is_empty() {
+                let tw = c.text(F::Medium, pname, 15.0, right, y + 38.0, if it.priority == 1 { RED } else { MUTED }, Align::Right);
+                priority_glyph(c, right - tw - 26.0, y + 33.0, it.priority);
+                right -= tw + 40.0;
+            }
+            c.clip(F::Medium, &join(&[&it.project, &host]), 15.0, (right - ix - kw - 24.0).max(0.0), ix + kw + 14.0, y + 38.0, FAINT);
+            let th = c.paragraph(F::Bold, &it.title, 27.0, ix, y + 80.0, iw, 3, 33.0, TEXT);
+            let py = y + 80.0 + th - 12.0;
+            let label = if it.status_name.is_empty() { it.status.replace('_', " ") } else { it.status_name.clone() };
+            let pw = c.pill(ix, py, &label.to_uppercase(), 13.0, bg, fg);
+            let who = match it.assignee.as_str() {
+                "" => String::new(),
+                "you" => "Assigned to you".into(),
+                a => format!("Assigned to {a}"),
+            };
+            c.clip(F::Medium, &who, 16.0, iw - pw - 14.0, ix + pw + 14.0, py + 17.0, TEXT_2);
+            let comments = if it.comment_count > 0 { plural(it.comment_count, "comment", "comments") } else { String::new() };
+            let updated = if it.updated > 0 { format!("Updated {}", ago(it.updated)) } else { String::new() };
+            c.clip(F::Medium, &join(&[&updated, &comments]), 15.0, iw, ix, py + 58.0, FAINT);
+        }
+        digin::Body::Note(n) => {
+            let col = if n.kind == "mentioned" { v.accent } else { TEXT_2 };
+            c.rrect((x, y, 6.0, h), 3.0, if n.read { GREEN } else { v.accent }, 1.0);
+            c.symbol(note_symbol(&n.kind), 18.0, ix + 10.0, y + 32.0, col);
+            let kind = note_kind_label(&n.kind);
+            let kw = c.text(F::Bold, kind, 13.0, ix + 32.0, y + 38.0, FAINT, Align::Left);
+            c.clip(F::Medium, &host, 13.0, (iw - kw - 50.0).max(0.0), ix + 32.0 + kw + 14.0, y + 38.0, FAINT);
+            let th = c.paragraph(F::Bold, &n.title, 27.0, ix, y + 80.0, iw, 3, 33.0, TEXT);
+            let mut ly = y + 80.0 + th + 4.0;
+            if !n.author.is_empty() && !n.title.contains(&n.author) {
+                c.clip(F::Medium, &format!("from {}", n.author), 17.0, iw, ix, ly, TEXT_2);
+                ly += 28.0;
+            }
+            c.clip(F::Medium, &ago(n.created), 15.0, iw, ix, ly, FAINT);
+        }
+        digin::Body::Page(p) => {
+            let col = if p.changed { v.accent } else { MUTED };
+            c.rrect((x, y, 6.0, h), 3.0, col, 1.0);
+            c.symbol("doc.text.fill", 17.0, ix + 8.0, y + 32.0, col);
+            c.clip(F::Bold, &join(&["PAGE", &p.project.to_uppercase(), &host]), 13.0, iw - 30.0, ix + 30.0, y + 38.0, FAINT);
+            let th = c.paragraph(F::Bold, &p.title, 27.0, ix, y + 80.0, iw, 3, 33.0, TEXT);
+            let mut ly = y + 80.0 + th + 4.0;
+            let by = if p.updated_by.is_empty() { format!("Updated {}", ago(p.updated)) } else { format!("Updated by {}  ·  {}", p.updated_by, ago(p.updated)) };
+            c.clip(F::Medium, &by, 16.0, iw, ix, ly, TEXT_2);
+            ly += 18.0;
+            if p.changed {
+                c.pill(ix, ly, "CHANGED SINCE YOU LAST READ IT", 11.0, v.accent, 0x101013);
+            }
+        }
+    }
+    dg_status_line(c, d, ix, y + h - 22.0, iw);
+}
+
+/// How the last action went, or what's waiting on you, at the foot of the left panel.
+fn dg_status_line(c: &mut Canvas, d: &digin::Detail, x: f32, base: f32, w: f32) {
+    let armed = d.armed.and_then(|(k, _)| d.body.actions().get(k).cloned());
+    let (text, color, sym) = if let Some(b) = &d.busy {
+        (b.clone(), AMBER, "arrow.triangle.2.circlepath")
+    } else if let Some(digin::Action::Status(s)) = armed {
+        (format!("Press again to move it to {}", s.name), AMBER, "exclamationmark.circle.fill")
+    } else if let Some((s, ok)) = &d.said {
+        if digin::needs_permit(s) {
+            (s.clone(), AMBER, "lock.fill")
+        } else if *ok {
+            (s.clone(), DG_GREEN, "checkmark.circle.fill")
+        } else {
+            (s.clone(), RED, "xmark.octagon.fill")
+        }
+    } else {
+        return;
+    };
+    let lines = c.fonts.wrap(F::Bold, &text, 16.0, w - 30.0, 3);
+    let top = base - (lines.len().max(1) - 1) as f32 * 21.0;
+    c.symbol(sym, 17.0, x + 9.0, top - 6.0, color);
+    for (k, l) in lines.iter().enumerate() {
+        c.text(F::Bold, l, 16.0, x + 28.0, top + k as f32 * 21.0, color, Align::Left);
+    }
+}
+
+/// The right panel: the text, scrolled by the knob.
+fn dg_text_panel(c: &mut Canvas, v: &View, d: &digin::Detail) {
+    let r = dg_text();
+    let (x, y, w, h) = r;
+    c.rrect(r, 14.0, PANEL_DEEP, 1.0);
+    if d.focus.is_none() {
+        c.outline(r, 14.0, v.accent, 2.0); // the knob is on the text
+    }
+    let label = match &d.body {
+        digin::Body::Issue(_) => "DESCRIPTION",
+        digin::Body::Note(_) => "MESSAGE",
+        digin::Body::Page(_) => "PAGE",
+    };
+    c.text(F::Bold, label, 12.0, x + 26.0, y + 30.0, FAINT, Align::Left);
+    let (ax, ay, aw, ah) = dg_text_area();
+    if let Some(e) = &d.error {
+        let (col, sym, words) = if digin::needs_permit(e) { (AMBER, "lock.fill", e.clone()) } else { (RED, "xmark.octagon.fill", format!("Couldn't load it: {e}")) };
+        c.symbol(sym, 30.0, x + w / 2.0, y + h / 2.0 - 30.0, col);
+        let lines = c.fonts.wrap(F::Medium, &words, 19.0, aw - 80.0, 3);
+        for (k, l) in lines.iter().enumerate() {
+            c.text(F::Medium, l, 19.0, x + w / 2.0, y + h / 2.0 + 14.0 + k as f32 * 26.0, TEXT_2, Align::Center);
+        }
+        return;
+    }
+    let lines = dg_lines(c.fonts, d, aw, v.now_ms);
+    if lines.is_empty() && d.loading {
+        c.text(F::Medium, "Loading…", 20.0, x + w / 2.0, y + h / 2.0 + 6.0, FAINT, Align::Center);
+        return;
+    }
+    let max = dg_max_scroll(&lines, ah);
+    let scroll = v.scroll.min(max);
+    let mut ty = ay;
+    for (k, l) in lines.iter().enumerate().skip(scroll) {
+        let top = ty + if k == scroll { 0.0 } else { l.pad };
+        if top + l.h > ay + ah + 0.5 {
+            break;
+        }
+        let base = top + (l.h + 0.72 * l.px) / 2.0;
+        match l.deco {
+            DgDeco::Code => c.rect((ax, top, aw, l.h), 0x1B1B22, 1.0),
+            DgDeco::Quote => c.rect((ax + 4.0, top + 2.0, 3.0, l.h - 4.0), 0x3A3A44, 1.0),
+            DgDeco::Rule => c.rect((ax, top + l.h / 2.0, aw, 1.0), LINE, 1.0),
+            DgDeco::Head => c.rect((ax, top + l.h - 1.0, aw, 1.0), LINE, 1.0),
+            DgDeco::Plain => {}
+        }
+        if let Some((m, col)) = &l.marker {
+            // Checkboxes are drawn (the font has no ✓ or ○); bullets and numbers are text.
+            let (s, mid) = (15.0, base - 0.36 * l.px);
+            let (bx, by) = (ax + l.x - 12.0 - s, mid - s / 2.0);
+            match m.as_str() {
+                "✓" => {
+                    c.rrect((bx, by, s, s), 4.0, *col, 1.0);
+                    c.polyline(&[(bx + 3.5, by + 7.8), (bx + 6.5, by + 10.8), (bx + 11.5, by + 4.6)], 0x0E2416, 2.0);
+                }
+                "○" => c.outline((bx, by, s, s), 4.0, *col, 1.5),
+                _ => {
+                    c.text(F::Bold, m, l.px, ax + l.x - 10.0, base, *col, Align::Right);
+                }
+            }
+        }
+        for (k, (cx, cell)) in l.cells.iter().enumerate() {
+            let next = l.cells.get(k + 1).map(|n| n.0).unwrap_or(aw);
+            c.clip(l.f, cell, l.px, next - cx - 16.0, ax + cx, base, l.color);
+        }
+        let tw = c.text(l.f, &l.text, l.px, ax + l.x, base, l.color, Align::Left);
+        if !l.meta.is_empty() {
+            c.text(F::Medium, &l.meta, 14.0, ax + l.x + tw + 12.0, base, FAINT, Align::Left);
+        }
+        ty = top + l.h;
+    }
+    if d.loading {
+        c.text(F::Medium, "Loading…", 13.0, x + w - 26.0, y + 30.0, FAINT, Align::Right);
+    } else if max > 0 {
+        // Where you are: a thin scroll bar, and whether there's more below.
+        let track = (x + w - 16.0, ay, 4.0, ah);
+        let thumb_h = (ah * (1.0 - max as f32 / lines.len() as f32)).clamp(28.0, ah);
+        c.rrect(track, 2.0, LINE, 1.0);
+        c.rrect((track.0, ay + (ah - thumb_h) * scroll as f32 / max as f32, 4.0, thumb_h), 2.0, MUTED, 1.0);
+        let more = if scroll < max { "MORE BELOW" } else { "END" };
+        c.text(F::Bold, more, 12.0, x + w - 26.0, y + 30.0, FAINT, Align::Right);
+    }
+}
+
+/// The bottom bar: "‹ Back" (touch), then the actions the knob moves along.
+fn dg_action_bar(c: &mut Canvas, d: &digin::Detail) {
+    let back = dg_back();
+    c.rrect(back, 12.0, 0x1C1C21, 1.0);
+    c.text(F::Medium, "‹  Back", 17.0, back.0 + back.2 / 2.0, back.1 + back.3 / 2.0 + 6.0, TEXT_2, Align::Center);
+    let actions = d.body.actions();
+    let current = d.body.current();
+    for (i, (a, r)) in actions.iter().zip(dg_bar(actions.len())).enumerate() {
+        let focused = d.focus == Some(i);
+        let armed = d.armed.is_some_and(|(k, _)| k == i);
+        let busy = focused && d.busy.is_some();
+        let mid = r.1 + r.3 / 2.0;
+        let plain = if focused { (0x2C2C34, TEXT) } else { (0x1C1C21, TEXT_2) };
+        match a {
+            digin::Action::Status(s) => {
+                let (sbg, sfg) = status_style(&s.category);
+                let is_current = current == Some(i);
+                let (bg, fg) = if armed {
+                    (AMBER, 0x1C1500)
+                } else if is_current {
+                    (sbg, sfg)
+                } else {
+                    plain
+                };
+                c.rrect(r, 12.0, bg, 1.0);
+                let label = if busy {
+                    "Saving…".to_string()
+                } else if armed {
+                    format!("Again: {}", s.name)
+                } else {
+                    s.name.clone()
+                };
+                let dot = if armed { 0x1C1500 } else { sfg };
+                let tw = c.measure(F::Bold, &label, 17.0).min(r.2 - 52.0);
+                let x0 = r.0 + (r.2 - tw - 18.0) / 2.0;
+                c.circle(x0 + 4.0, mid, if is_current { 5.5 } else { 4.0 }, if s.category == "todo" && !is_current && !armed { MUTED } else { dot }, 1.0);
+                c.fit(F::Bold, &label, 17.0, r.2 - 52.0, x0 + 18.0, mid + 6.0, fg, Align::Left);
+            }
+            digin::Action::MarkRead => {
+                c.rrect(r, 12.0, plain.0, 1.0);
+                let label = if busy { "Marking read…" } else { "Mark read" };
+                let tw = c.measure(F::Bold, label, 17.0);
+                let x0 = r.0 + (r.2 - tw - 30.0) / 2.0;
+                c.symbol("checkmark.circle", 18.0, x0 + 9.0, mid, DG_GREEN);
+                c.text(F::Bold, label, 17.0, x0 + 30.0, mid + 6.0, plain.1, Align::Left);
+            }
+            digin::Action::Open => {
+                c.rrect(r, 12.0, plain.0, 1.0);
+                let label = "Open in Digin";
+                let tw = c.measure(F::Bold, label, 17.0);
+                let x0 = r.0 + (r.2 - tw - 30.0) / 2.0;
+                c.symbol("arrow.up.right.square", 18.0, x0 + 9.0, mid, plain.1);
+                c.text(F::Bold, label, 17.0, x0 + 30.0, mid + 6.0, plain.1, Align::Left);
+            }
+        }
+        if focused {
+            c.outline(r, 12.0, TEXT, 2.5);
+        }
     }
 }
 
