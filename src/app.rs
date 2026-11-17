@@ -67,6 +67,9 @@ const NEW_STUFF_TONE: &[(u8, u64)] = &[(55, 60)];
 const BLINK: Duration = Duration::from_millis(420);
 /// Don't yank the board away if it was used this recently.
 const JUMP_QUIET: Duration = Duration::from_secs(15);
+/// How long a session waiting on you gets for its prompt to reach the Quake before the board
+/// jumps to the AI page instead.
+const WAITING_GRACE: Duration = Duration::from_secs(4);
 const LOG_REFRESH: Duration = Duration::from_secs(3);
 /// A question or permission prompt ignores presses this soon after it appears.
 const ASK_GUARD: Duration = Duration::from_millis(1000);
@@ -259,6 +262,9 @@ struct App {
     jumped: Option<(PageId, Urgency, Instant)>,
     /// An urgent alert that came while you were using the board: jump once you stop.
     pending_jump: Option<(PageId, Urgency, Instant)>,
+    /// A session that just started waiting on you: (id, name, when to alert if no prompt for
+    /// it reached the Quake by then).
+    waiting_alert: Option<(String, String, Instant)>,
     /// Health problems already announced (app/health.rs `problems` keys).
     health_flags: std::collections::HashSet<String>,
     blink_on: bool,
@@ -709,10 +715,10 @@ impl App {
             self.next_ai_sample = Instant::now() + Duration::from_secs(30);
         }
         if let Some(i) = newly_waiting {
-            if let Some(name) = self.sessions.get(i).map(|s| s.name.clone()) {
-                if self.alert(PageId::Ai, format!("{name} needs you"), false) {
-                    self.sel = i;
-                }
+            if let Some(s) = self.sessions.get(i) {
+                // Its question or permission prompt usually shows on the Quake by itself: wait a
+                // moment, and jump to the AI page only if nothing did (app/relevance.rs).
+                self.waiting_alert = Some((s.id.clone(), s.name.clone(), Instant::now() + WAITING_GRACE));
             }
         }
         self.update_ring();
@@ -2648,6 +2654,7 @@ pub fn run() {
         jumped: None,
         pending_jump: None,
         health_flags: Default::default(),
+        waiting_alert: None,
         blink_on: false,
         next_blink: Instant::now(),
         next_poll: Instant::now(),

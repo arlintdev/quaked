@@ -147,8 +147,33 @@ impl App {
         }
     }
 
+    /// A session waiting on you whose prompt didn't reach the Quake: say so and jump to it.
+    /// When its question or permission prompt did show, that overlay is enough: just a note,
+    /// and the board stays on the page you were on.
+    fn waiting_tick(&mut self) {
+        let Some((id, name, due)) = self.waiting_alert.clone() else { return };
+        let prompted = self.asks.iter().any(|a| a.session_id == id);
+        let still = self.sessions.iter().position(|s| s.id == id && s.state == State::Waiting);
+        if prompted || still.is_none() {
+            self.waiting_alert = None;
+            if prompted {
+                self.alert_with(PageId::Ai, format!("{name} needs you"), false, Urgency::Low);
+            }
+            return;
+        }
+        if Instant::now() >= due {
+            self.waiting_alert = None;
+            if self.alert(PageId::Ai, format!("{name} needs you"), false) {
+                if let Some(i) = still {
+                    self.sel = i;
+                }
+            }
+        }
+    }
+
     /// Every loop: a deferred jump once you've stopped using the board.
     pub(super) fn relevance_tick(&mut self) {
+        self.waiting_tick();
         let Some((page, urgency, until)) = self.pending_jump else { return };
         if Instant::now() >= until || self.attention.as_ref().is_none_or(|a| a.page != page) {
             self.pending_jump = None;
