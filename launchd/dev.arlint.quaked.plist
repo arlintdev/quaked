@@ -6,7 +6,7 @@
   <string>dev.arlint.quaked</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/austinarlint/Applications/Quaked.app/Contents/MacOS/quaked</string>
+    <string>__HOME__/Applications/Quaked.app/Contents/MacOS/quaked</string>
     <string>run</string>
   </array>
   <key>RunAtLoad</key>
@@ -24,8 +24,8 @@
   <key>LimitLoadToSessionType</key>
   <string>Aqua</string>
   <key>StandardOutPath</key>
-  <string>/Users/austinarlint/Library/Logs/quaked.log</string>
+  <string>__HOME__/Library/Logs/quaked.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/austinarlint/Library/Logs/quaked.log</string>
+  <string>__HOME__/Library/Logs/quaked.log</string>
 </dict>
 </plist>

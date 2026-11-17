@@ -157,9 +157,10 @@ pub struct Ops {
 impl Default for Ops {
     fn default() -> Self {
         Ops {
-            hosts: ["workbench", "shebash-gpu", "spark.d3d.dev", "pi"].map(String::from).to_vec(),
+            // Yours live in config.json (the settings page's Ops options), not in the code.
+            hosts: Vec::new(),
             ssh_stats: true,
-            sites: ["https://arlint.dev", "https://digin.work", "https://ibtg.notdone.dev", "https://plcplayground.notdone.dev"].map(String::from).to_vec(),
+            sites: Vec::new(),
         }
     }
 }

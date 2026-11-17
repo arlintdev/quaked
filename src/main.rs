@@ -270,10 +270,10 @@ fn preview(dir: &str) {
     let opsd = ops::Status {
         net: ops::Network { warp: Some(true), appgate: true, ip: "104.28.40.17".into(), colo: "SLC".into() },
         hosts: vec![
-            ops::Host { load: Some(1.84), cpus: Some(16), mem: Some((12_884_901_888, 33_554_432_000)), disk: Some((1_210_000_000_000, 1_900_000_000_000)), uptime: "3 weeks, 2 days, 4 hours".into(), ..host("workbench", "workbench", Some(23)) },
-            ops::Host { load: Some(7.9), cpus: Some(8), mem: Some((58_000_000_000, 64_000_000_000)), disk: Some((400_000_000_000, 1_000_000_000_000)), uptime: "11 days, 2 hours".into(), gpu: Some((87.0, 21_400.0, 24_576.0, 71.0)), ..host("shebash-gpu", "dev.d3d.dev", Some(41)) },
-            host("spark.d3d.dev", "spark.d3d.dev", None),
-            ops::Host { stats_error: Some("Permission denied (publickey,password)".into()), ..host("pi", "192.168.68.72", Some(4)) },
+            ops::Host { load: Some(1.84), cpus: Some(16), mem: Some((12_884_901_888, 33_554_432_000)), disk: Some((1_210_000_000_000, 1_900_000_000_000)), uptime: "3 weeks, 2 days, 4 hours".into(), ..host("build-box", "build-box", Some(23)) },
+            ops::Host { load: Some(7.9), cpus: Some(8), mem: Some((58_000_000_000, 64_000_000_000)), disk: Some((400_000_000_000, 1_000_000_000_000)), uptime: "11 days, 2 hours".into(), gpu: Some((87.0, 21_400.0, 24_576.0, 71.0)), ..host("gpu-box", "gpu.example.net", Some(41)) },
+            host("lab.example.net", "lab.example.net", None),
+            ops::Host { stats_error: Some("Permission denied (publickey,password)".into()), ..host("pi", "10.0.0.20", Some(4)) },
         ],
         sites: vec![
             ops::Site { url: "https://arlint.dev".into(), code: Some(200), ms: Some(182), tls_days: Some(54), error: None },
@@ -294,16 +294,16 @@ fn preview(dir: &str) {
         ..Default::default()
     };
     let code = github::Status {
-        login: "aarlint".into(),
+        login: "you".into(),
         mine: vec![
-            pr("shebashio/thestack", 412, "Move the ingest workers onto the shared job queue", "FAILURE", "REVIEW_REQUIRED", 14),
+            pr("acme/platform", 412, "Move the ingest workers onto the shared job queue", "FAILURE", "REVIEW_REQUIRED", 14),
             pr("arlintdev/digin", 288, "Bot kinds: hands mode for runners", "SUCCESS", "APPROVED", 95),
             github::Pr { mergeable: "CONFLICTING".into(), ..pr("arlintdev/plcplayground", 61, "TON / TOF timers in the simulator", "PENDING", "", 300) },
             github::Pr { draft: true, ..pr("arlintdev/quaked", 3, "OPS and CODE pages", "", "", 2) },
-            pr("shebashio/thestack", 405, "Bump tokio and hyper", "SUCCESS", "CHANGES_REQUESTED", 2 * 1440),
+            pr("acme/platform", 405, "Bump tokio and hyper", "SUCCESS", "CHANGES_REQUESTED", 2 * 1440),
         ],
         reviews: vec![
-            github::Pr { author: "kestrel-dev".into(), ..pr("shebashio/thestack", 418, "Retry S3 uploads with jitter", "SUCCESS", "", 40) },
+            github::Pr { author: "kestrel-dev".into(), ..pr("acme/platform", 418, "Retry S3 uploads with jitter", "SUCCESS", "", 40) },
             github::Pr { author: "jdoe".into(), gitlab: true, ..pr("platform/infra", 92, "Pin the runner image digest", "PENDING", "", 75) },
         ],
         error: None,

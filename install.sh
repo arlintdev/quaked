@@ -27,7 +27,8 @@ mkdir -p "$SETTINGS/Contents/MacOS"
 cp bundle/settings/Info.plist "$SETTINGS/Contents/Info.plist"
 install -m 755 bundle/settings/quaked-settings "$SETTINGS/Contents/MacOS/quaked-settings"
 codesign --force --sign "${IDENTITY:--}" --identifier dev.arlint.quaked.settings "$SETTINGS" 2>/dev/null || true
-cp launchd/dev.arlint.quaked.plist "$HOME/Library/LaunchAgents/"
+# The LaunchAgent in the repo says __HOME__ where your home folder goes.
+sed "s|__HOME__|$HOME|g" launchd/dev.arlint.quaked.plist > "$HOME/Library/LaunchAgents/dev.arlint.quaked.plist"
 launchctl bootout "gui/$(id -u)/dev.arlint.quaked" 2>/dev/null || true
 # bootout returns before the old instance has exited; bootstrap fails until it has.
 for _ in 1 2 3 4 5 6 7 8 9 10; do

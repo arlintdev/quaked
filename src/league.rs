@@ -1341,9 +1341,9 @@ mod tests {
     #[test]
     fn live_game_reads_from_your_side() {
         let d: Value = serde_json::from_str(r#"{
-          "activePlayer": {"riotId": "Stoic Otter#PBE", "summonerName": "Stoic Otter#PBE", "level": 13, "currentGold": 1350.5},
+          "activePlayer": {"riotId": "Sample Otter#PBE", "summonerName": "Sample Otter#PBE", "level": 13, "currentGold": 1350.5},
           "allPlayers": [
-            {"riotId": "Stoic Otter#PBE", "summonerName": "Stoic Otter#PBE", "championName": "Ahri", "team": "ORDER", "isDead": true, "respawnTimer": 23.4, "scores": {"kills": 4, "deaths": 2, "assists": 7, "creepScore": 142}},
+            {"riotId": "Sample Otter#PBE", "summonerName": "Sample Otter#PBE", "championName": "Ahri", "team": "ORDER", "isDead": true, "respawnTimer": 23.4, "scores": {"kills": 4, "deaths": 2, "assists": 7, "creepScore": 142}},
             {"riotId": "Ally#1", "summonerName": "Ally#1", "championName": "Leona", "team": "ORDER", "isDead": false, "respawnTimer": 0, "scores": {"kills": 8, "deaths": 1, "assists": 3, "creepScore": 20}},
             {"riotId": "Foe#1", "summonerName": "Foe#1", "championName": "Jinx", "team": "CHAOS", "isDead": false, "respawnTimer": 0, "scores": {"kills": 9, "deaths": 5, "assists": 2, "creepScore": 180}}
           ],
@@ -1352,7 +1352,7 @@ mod tests {
             {"EventName": "FirstBlood", "EventTime": 190.0, "Recipient": "Ally#1"},
             {"EventName": "DragonKill", "EventTime": 400.0, "KillerName": "Foe#1", "DragonType": "Fire", "Stolen": "False"},
             {"EventName": "TurretKilled", "EventTime": 600.0, "KillerName": "Ally#1", "TurretKilled": "Turret_T2_R_03_A"},
-            {"EventName": "ChampionKill", "EventTime": 700.0, "KillerName": "Foe#1", "VictimName": "Stoic Otter#PBE", "Assisters": []},
+            {"EventName": "ChampionKill", "EventTime": 700.0, "KillerName": "Foe#1", "VictimName": "Sample Otter#PBE", "Assisters": []},
             {"EventName": "Multikill", "EventTime": 701.0, "KillerName": "Foe#1", "KillStreak": 3}
           ]},
           "gameData": {"gameMode": "CLASSIC", "gameTime": 712.0, "mapNumber": 11}

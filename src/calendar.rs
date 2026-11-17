@@ -837,7 +837,7 @@ pub fn sample() -> Status {
         ev("lunch", "Lunch with Dana", mark + 75 * MIN, 60, "Personal", "#2F9E5B", "Pita Jungle", ""),
         ev("planning", "Sprint planning", mark + 165 * MIN, 60, "Work", "#4C8DFF", "Microsoft Teams Meeting", "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0"),
         ev("dentist", "Dentist", mark + 285 * MIN, 45, "Personal", "#2F9E5B", "Smile Dental, 4th Ave", ""),
-        ev("deploy", "Deploy window: thestack", mark + 360 * MIN, 30, "On call", "#B36BFF", "", ""),
+        ev("deploy", "Deploy window: platform", mark + 360 * MIN, 30, "On call", "#B36BFF", "", ""),
         ev("gym", "Climbing", mark + 465 * MIN, 90, "Personal", "#2F9E5B", "Momentum", ""),
     ];
     Status { loaded: true, authorized: true, events, error: None, ..Default::default() }

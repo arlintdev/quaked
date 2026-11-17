@@ -4497,7 +4497,7 @@ fn short_repo(repo: &str) -> &str {
     repo.rsplit('/').next().unwrap_or(repo)
 }
 
-/// "thestack #412" for a GitHub PR, "infra !92" for a GitLab merge request.
+/// "platform #412" for a GitHub PR, "infra !92" for a GitLab merge request.
 fn pr_ref(p: &github::Pr) -> String {
     format!("{} {}{}", short_repo(&p.repo), if p.gitlab { '!' } else { '#' }, p.number)
 }
