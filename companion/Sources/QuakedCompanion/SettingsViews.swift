@@ -52,7 +52,7 @@ struct LightingView: View {
 
 struct GeneralView: View {
     @EnvironmentObject var store: ConfigStore
-    /// All four pages in display order, shown pages first; hidden ones keep their place
+    /// All pages in display order, shown pages first; hidden ones keep their place
     /// here while the window is open.
     @State private var order: [PageId] = []
 
@@ -123,11 +123,96 @@ struct GeneralView: View {
             }
 
             Section {
+                LabeledContent("Hosts") {
+                    LinesEditor(lines: $store.config.ops.hosts)
+                }
+                Toggle("Read load, memory, disk and GPU over SSH", isOn: $store.config.ops.sshStats)
+                LabeledContent("Sites") {
+                    LinesEditor(lines: $store.config.ops.sites)
+                }
+            } header: {
+                Text("Ops")
+            } footer: {
+                Text("Hosts are SSH aliases from ~/.ssh/config, one per line; stats use key login only. Sites are checked for status, response time and certificate expiry.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section {
+                Toggle("Blink the ring when something is new", isOn: $store.config.alerts.blink)
+                Toggle("Jump to the page that has it", isOn: $store.config.alerts.jump)
+                Stepper(value: $store.config.alerts.seconds, in: 10...3600, step: 30) {
+                    LabeledContent("Stop blinking after") {
+                        Text("\(store.config.alerts.seconds / 60) min \(store.config.alerts.seconds % 60) s").monospacedDigit()
+                    }
+                }
+                Toggle("Claude sessions waiting on you", isOn: $store.config.alerts.ai)
+                Toggle("Review requests, failing CI, approvals, conflicts", isOn: $store.config.alerts.code)
+                Toggle("Hosts going down, sites failing", isOn: $store.config.alerts.ops)
+                Toggle("Containers stopping", isOn: $store.config.alerts.docker)
+            } header: {
+                Text("New stuff")
+            } footer: {
+                Text("Touching the board stops the blinking. It won't jump while you've used the board in the last 15 seconds.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section {
+                Toggle("Share sessions with my other Mac", isOn: $store.config.sync.enabled)
+                LabeledContent("Pairing key") {
+                    HStack {
+                        TextField("", text: $store.config.sync.key, prompt: Text("paste the other Mac's key"))
+                            .font(.system(.body, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 200)
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(store.config.sync.key, forType: .string)
+                        }
+                        .disabled(store.config.sync.key.isEmpty)
+                    }
+                }
+                TextField("Name on the network", text: $store.config.sync.name, prompt: Text("This Mac's computer name"))
+            } header: {
+                Text("Sync")
+            } footer: {
+                Text("Both Macs run quaked and find each other with Bonjour on the local network. Give them the same pairing key; the Mac with the Quake attached shows the other's Claude sessions too.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section {
+                Toggle("Include GitLab merge requests (glab)", isOn: $store.config.code.gitlab)
+                Stepper(value: $store.config.code.refreshSeconds, in: 15...900, step: 15) {
+                    LabeledContent("Refresh every") {
+                        Text("\(store.config.code.refreshSeconds) s").monospacedDigit()
+                    }
+                }
+            } header: {
+                Text("Code")
+            } footer: {
+                Text("Your open pull requests and review requests through the gh CLI's login, and GitLab merge requests through glab's. Twice as often while the page is showing.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section {
+                LabeledContent("Screen brightness") {
+                    HStack {
+                        Slider(value: Binding(get: { Double(store.config.device.screenBrightness ?? 255) },
+                                              set: { store.config.device.screenBrightness = Int($0.rounded()) }),
+                               in: 10...255)
+                        Text("\(Int((Double(store.config.device.screenBrightness ?? 255) / 255 * 100).rounded()))%")
+                            .monospacedDigit()
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
                 Toggle("Built-in microphone", isOn: $store.config.device.mic)
             } header: {
                 Text("Quake")
             } footer: {
-                Text("The Quake's own mic. Turning it off also turns off its indicator light. Your call mic is set on the Soundboard page.")
+                Text("Brightness also lives on the board's settings page (the gear). The Quake's own mic: turning it off also turns off its indicator light. Your call mic is set on the Soundboard page.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -192,5 +277,31 @@ struct GeneralView: View {
     private func commit() {
         let next = order.filter(shown.contains)
         if !next.isEmpty && next != shown { store.config.pages = next }
+    }
+}
+
+/// One entry per line; blank lines are dropped when saved. Keeps its own text so a
+/// newline being typed isn't trimmed away mid-edit.
+struct LinesEditor: View {
+    @Binding var lines: [String]
+    @State private var text = ""
+    @State private var loaded = false
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.system(.body, design: .monospaced))
+            .frame(minHeight: 84)
+            .onAppear {
+                if !loaded {
+                    text = lines.joined(separator: "\n")
+                    loaded = true
+                }
+            }
+            .onChange(of: text) { value in
+                let parsed = value.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                if parsed != lines {
+                    lines = parsed
+                }
+            }
     }
 }

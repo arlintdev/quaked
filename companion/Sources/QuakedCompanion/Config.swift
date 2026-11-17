@@ -4,7 +4,7 @@
 import Foundation
 
 enum PageId: String, Codable, CaseIterable, Identifiable {
-    case ai, music, shortcuts, soundboard, league, docker
+    case ai, music, shortcuts, soundboard, league, docker, ops, code, settings
 
     var id: String { rawValue }
 
@@ -16,6 +16,9 @@ enum PageId: String, Codable, CaseIterable, Identifiable {
         case .soundboard: return "Sounds"
         case .league: return "League"
         case .docker: return "Docker"
+        case .ops: return "Ops"
+        case .code: return "Code"
+        case .settings: return "Settings"
         }
     }
 }
@@ -34,6 +37,10 @@ struct Config: Codable, Equatable {
     var soundboard = Soundboard()
     var league = League()
     var docker = Docker()
+    var ops = Ops()
+    var code = Code()
+    var alerts = Alerts()
+    var sync = SyncSettings()
     var device = DeviceSettings()
 
     static let maxShortcuts = 16
@@ -56,6 +63,10 @@ struct Config: Codable, Equatable {
         soundboard = c.value(.soundboard, d.soundboard)
         league = c.value(.league, d.league)
         docker = c.value(.docker, d.docker)
+        ops = c.value(.ops, d.ops)
+        code = c.value(.code, d.code)
+        alerts = c.value(.alerts, d.alerts)
+        sync = c.value(.sync, d.sync)
         device = c.value(.device, d.device)
     }
 }
@@ -89,16 +100,96 @@ struct Docker: Codable, Equatable {
     }
 }
 
+/// OPS page: SSH host aliases, whether to read their load / memory / disk / GPU, and sites.
+struct Ops: Codable, Equatable {
+    var hosts = ["workbench", "shebash-gpu", "spark.d3d.dev", "pi"]
+    var sshStats = true
+    var sites = ["https://arlint.dev", "https://digin.work", "https://ibtg.notdone.dev", "https://plcplayground.notdone.dev"]
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Ops()
+        hosts = c.value(.hosts, d.hosts)
+        sshStats = c.value(.sshStats, d.sshStats)
+        sites = c.value(.sites, d.sites)
+    }
+}
+
+/// CODE page: GitHub pull requests through the gh CLI.
+struct Code: Codable, Equatable {
+    var refreshSeconds = 60
+    /// Include GitLab merge requests (through glab).
+    var gitlab = true
+    /// Empty = every host in glab's config.
+    var gitlabHosts: [String] = []
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        refreshSeconds = c.value(.refreshSeconds, 60)
+        gitlab = c.value(.gitlab, true)
+        gitlabHosts = c.value(.gitlabHosts, [])
+    }
+}
+
+/// Blink the ring and jump to the page when something new shows up.
+struct Alerts: Codable, Equatable {
+    var blink = true
+    var jump = true
+    var seconds = 300
+    var ai = true
+    var code = true
+    var ops = true
+    var docker = true
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Alerts()
+        blink = c.value(.blink, d.blink)
+        jump = c.value(.jump, d.jump)
+        seconds = c.value(.seconds, d.seconds)
+        ai = c.value(.ai, d.ai)
+        code = c.value(.code, d.code)
+        ops = c.value(.ops, d.ops)
+        docker = c.value(.docker, d.docker)
+    }
+}
+
+/// Bonjour sync between your Macs; both need the same key.
+struct SyncSettings: Codable, Equatable {
+    var enabled = true
+    var key = ""
+    /// Empty = this Mac's computer name.
+    var name = ""
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = c.value(.enabled, true)
+        key = c.value(.key, "")
+        name = c.value(.name, "")
+    }
+}
+
 /// Hardware settings applied whenever the Quake connects.
 struct DeviceSettings: Codable, Equatable {
     /// The Quake's own microphone; off also turns off its indicator light.
     var mic = false
+    /// Screen luminance (10-255) applied on connect; nil leaves the device's own.
+    var screenBrightness: Int?
 
     init() {}
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         mic = c.value(.mic, false)
+        screenBrightness = try? c.decodeIfPresent(Int.self, forKey: .screenBrightness)
     }
 }
 
@@ -112,6 +203,9 @@ struct Ring: Codable, Equatable {
     var soundboard = "#B36BFF"
     var league = "#C89B3C"
     var docker = "#2496ED"
+    var ops = "#7FD1B9"
+    var code = "#A371F7"
+    var settings = "#D0D0D8"
     /// Breathe in `alertColor` while a Claude session needs you.
     var alert = true
     var alertColor = "#F2B705"
@@ -129,6 +223,9 @@ struct Ring: Codable, Equatable {
         soundboard = c.value(.soundboard, d.soundboard)
         league = c.value(.league, d.league)
         docker = c.value(.docker, d.docker)
+        ops = c.value(.ops, d.ops)
+        code = c.value(.code, d.code)
+        settings = c.value(.settings, d.settings)
         alert = c.value(.alert, d.alert)
         alertColor = c.value(.alertColor, d.alertColor)
     }
@@ -141,6 +238,9 @@ struct Ring: Codable, Equatable {
         case .soundboard: return soundboard
         case .league: return league
         case .docker: return docker
+        case .ops: return ops
+        case .code: return code
+        case .settings: return settings
         }
     }
 
@@ -152,6 +252,9 @@ struct Ring: Codable, Equatable {
         case .soundboard: return \.soundboard
         case .league: return \.league
         case .docker: return \.docker
+        case .ops: return \.ops
+        case .code: return \.code
+        case .settings: return \.settings
         }
     }
 }

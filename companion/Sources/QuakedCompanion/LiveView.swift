@@ -150,6 +150,7 @@ private struct StatusGrid: View {
                         item("Clips playing", playing.joined(separator: ", "))
                     }
                     if s.soundboard?.micMuted == true { item("Mic", "Muted", tint: .red) }
+                    if let sync = s.sync { item("Sync", syncText(sync), tint: syncTint(sync)) }
                     if let v = s.version { item("quaked", v) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -161,6 +162,21 @@ private struct StatusGrid: View {
         } label: {
             Text("Status")
         }
+    }
+
+    private func syncText(_ s: DaemonStatus.SyncState) -> String {
+        guard s.enabled != false else { return "Off" }
+        let peers = s.peers ?? []
+        if peers.isEmpty { return "No other Mac found on this network" }
+        return peers.map { p in
+            if p.ok == true { return "\(p.name): \(p.sessions ?? 0) sessions" }
+            return "\(p.name): \(p.error ?? "waiting")"
+        }.joined(separator: "  ·  ")
+    }
+
+    private func syncTint(_ s: DaemonStatus.SyncState) -> Color? {
+        guard s.enabled != false, let peers = s.peers, !peers.isEmpty else { return nil }
+        return peers.allSatisfy { $0.ok == true } ? .green : .orange
     }
 
     private func item(_ label: String, _ value: String, tint: Color? = nil) -> some View {

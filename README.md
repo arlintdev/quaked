@@ -1,6 +1,6 @@
 # quaked
 
-Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Four pages (order and
+Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Nine pages (order and
 visibility set in the config), each with its own color on the knob's light ring:
 
 - **AI**: a column per Claude Code session showing state (working / needs you / done / idle),
@@ -22,9 +22,37 @@ visibility set in the config), each with its own color on the knob's light ring:
 - **Docker**: containers on Kiri (its Docker-compatible socket, `~/.kiri/run/docker.sock`)
   or any Docker engine: state, CPU, memory, ports, engine summary; open one for logs and
   Start / Stop / Restart / Pause.
+- **Ops**: WARP on/off (tap to toggle), AppGate, public IP and Cloudflare colo; a card per
+  SSH host (reachability and latency, plus load / memory / disk / GPU over SSH with key
+  login; hosts behind a ProxyCommand are checked over SSH only); and your sites with HTTP
+  status, response time and days until the TLS certificate expires. Tap a host to SSH in,
+  a site to open it.
+- **Code**: your open GitHub pull requests (CI, review, conflicts, drafts) and the reviews
+  waiting on you, through `gh`; GitLab merge requests too, through `glab`, for every host
+  it is signed in to. Tap one to open it.
+- **Settings** (the gear): screen brightness, ring brightness, idle timeout, and switches
+  for the ring, the alert pulse, blink / jump on new stuff, buzzer, the Quake's mic,
+  League auto-accept and snap.
 
 The ring shows the page color, and breathes amber while a Claude session needs you (the
 buzzer chirps too).
+
+**New stuff**: when a session starts waiting on you, a review is requested, CI fails, a PR
+is approved / gets changes requested / conflicts, a host goes down, a site starts failing
+or a container stops, the ring blinks in that page's color, the top bar says what
+happened, and the board jumps to the page (unless you used it in the last 15 seconds).
+Touching the board stops the blinking. `quaked ctl alert code "test"` tries it.
+
+## Two Macs
+
+Every quaked advertises `_quaked._tcp` with Bonjour and serves its Claude sessions to
+peers that know the pairing key (`sync.key`, made on first run). The Mac with the Quake
+attached pulls the other's sessions every 2 seconds and shows them with the Mac's name;
+a session waiting on the other Mac alerts here like a local one. To set up the second
+Mac: install quaked there (`./install.sh`; it runs fine with no Quake attached), then put
+the same key in both configs (the companion's General tab has it, with a Copy button).
+macOS asks once to allow Quaked on the local network; that is needed for this and for
+the Ops page's LAN hosts.
 
 ## Soundboard setup
 
@@ -55,8 +83,9 @@ top level. The top bar always shows where you are and what the knob does there.
 
 Everything is in `~/Library/Application Support/Quaked/config.json` (pages, ring colors,
 shortcuts, soundboard devices and clips, League auto-accept, Docker socket, the Quake's
-own mic (off by default, which also turns its indicator light off), touch mapping,
-buzzer, idle timeout). quaked reloads it when it
+own mic (off by default, which also turns its indicator light off), screen brightness,
+touch mapping, buzzer, idle timeout, Ops hosts and sites, Code refresh and GitLab, new
+stuff alerts, two-Mac sync). quaked reloads it when it
 changes. **Quaked Companion** (`companion/`, a small SwiftUI app) edits it and shows a live
 mirror of the screen you can click on, with knob buttons.
 
@@ -97,10 +126,11 @@ DK-Suite must not run at the same time: both want the same display and HID devic
 quaked ctl turn 1|-1         drive the running board like the knob
 quaked ctl press|double|hold
 quaked ctl tap X Y           tap at screen coordinates (1920x480)
-quaked ctl page <id>         ai | music | shortcuts | soundboard
+quaked ctl page <id>         ai | music | shortcuts | soundboard | league | docker | ops | code | settings
 quaked ctl shortcut <n>      run shortcut tile n (from 0)
 quaked ctl play <title>      play a clip; `ctl stop` stops all
-quaked ctl status            JSON status; `ctl frame` = PNG of the screen
+quaked ctl status            JSON status; `ctl frame [page]` = PNG of the screen (or another page, off-screen)
+quaked ctl alert <page> [why]  blink the ring and jump like new stuff does
 quaked ctl audio-devices     input / output device names
 quaked ctl reload            re-read the config now
 quaked via                   read the light ring's current settings

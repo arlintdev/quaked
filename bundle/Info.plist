@@ -20,6 +20,12 @@
   <string>13.0</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Quaked mixes your microphone with soundboard clips so people on your call hear both.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Quaked checks whether your servers on the local network are up and reads their load for the OPS page.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_quaked._tcp</string>
+  </array>
   <key>NSAppleEventsUsageDescription</key>
   <string>Quaked shows what Spotify or Music is playing and controls playback from the knob.</string>
   <!-- Background app: no Dock icon, no menu bar. -->

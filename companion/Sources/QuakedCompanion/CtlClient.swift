@@ -109,6 +109,20 @@ struct DaemonStatus: Decodable, Equatable {
     var working: Int?
     var track: Track?
     var soundboard: SoundboardState?
+    var sync: SyncState?
+
+    struct SyncState: Decodable, Equatable {
+        struct Peer: Decodable, Equatable {
+            var name: String
+            var host: String?
+            var ok: Bool?
+            var error: String?
+            var sessions: Int?
+        }
+        var enabled: Bool?
+        var name: String?
+        var peers: [Peer]?
+    }
 }
 
 struct AudioDevices: Decodable, Equatable {

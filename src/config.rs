@@ -33,6 +33,9 @@ pub enum PageId {
     Soundboard,
     League,
     Docker,
+    Ops,
+    Code,
+    Settings,
 }
 
 impl PageId {
@@ -44,6 +47,9 @@ impl PageId {
             PageId::Soundboard => "SOUNDS",
             PageId::League => "LEAGUE",
             PageId::Docker => "DOCKER",
+            PageId::Ops => "OPS",
+            PageId::Code => "CODE",
+            PageId::Settings => "SETTINGS",
         }
     }
 }
@@ -64,7 +70,90 @@ pub struct Config {
     pub soundboard: Soundboard,
     pub league: League,
     pub docker: Docker,
+    pub ops: Ops,
+    pub code: Code,
+    pub alerts: Alerts,
+    pub sync: SyncSettings,
     pub device: DeviceSettings,
+}
+
+/// Servers, sites and network for the OPS page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Ops {
+    /// SSH host aliases (from ~/.ssh/config). Checked for reachability; with `sshStats`
+    /// also load, memory, disk and GPU over one shared SSH connection per host.
+    pub hosts: Vec<String>,
+    pub ssh_stats: bool,
+    /// URLs checked for HTTP status, response time and TLS expiry.
+    pub sites: Vec<String>,
+}
+
+impl Default for Ops {
+    fn default() -> Self {
+        Ops {
+            hosts: ["workbench", "shebash-gpu", "spark.d3d.dev", "pi"].map(String::from).to_vec(),
+            ssh_stats: true,
+            sites: ["https://arlint.dev", "https://digin.work", "https://ibtg.notdone.dev", "https://plcplayground.notdone.dev"].map(String::from).to_vec(),
+        }
+    }
+}
+
+/// GitHub pull requests for the CODE page (through the `gh` CLI's login).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Code {
+    pub refresh_seconds: u64,
+    /// Include GitLab merge requests (through glab).
+    pub gitlab: bool,
+    /// GitLab hosts to ask; empty = every host in glab's config.
+    pub gitlab_hosts: Vec<String>,
+}
+
+impl Default for Code {
+    fn default() -> Self {
+        Code { refresh_seconds: 60, gitlab: true, gitlab_hosts: Vec::new() }
+    }
+}
+
+/// Bonjour sync between your Macs: each quaked advertises itself on the local network
+/// and the one with the Quake attached shows the others' Claude sessions too. Both Macs
+/// need the same key; the first run makes one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SyncSettings {
+    pub enabled: bool,
+    pub key: String,
+    /// The name other Macs see; empty = this Mac's computer name.
+    pub name: String,
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        SyncSettings { enabled: true, key: String::new(), name: String::new() }
+    }
+}
+
+/// When something new shows up (a session waiting, a review request, failing CI, a host
+/// or site going down, a container stopping): blink the ring and jump to its page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Alerts {
+    pub blink: bool,
+    /// Jump to the page, unless you touched the board in the last 15 seconds.
+    pub jump: bool,
+    /// Stop blinking after this long without input.
+    pub seconds: u64,
+    pub ai: bool,
+    pub code: bool,
+    pub ops: bool,
+    pub docker: bool,
+}
+
+impl Default for Alerts {
+    fn default() -> Self {
+        Alerts { blink: true, jump: true, seconds: 300, ai: true, code: true, ops: true, docker: true }
+    }
 }
 
 /// Hardware settings applied whenever the Quake connects.
@@ -74,6 +163,9 @@ pub struct DeviceSettings {
     /// The Quake's own microphone. Off also turns off its (bright) indicator light;
     /// your call mic is chosen separately under soundboard.input.
     pub mic: bool,
+    /// Screen brightness (luminance, 10-255) set on every connect; unset leaves whatever
+    /// the device has. The SETTINGS page and the companion write it.
+    pub screen_brightness: Option<u8>,
 }
 
 /// League of Legends client.
@@ -115,6 +207,9 @@ pub struct Ring {
     pub soundboard: String,
     pub league: String,
     pub docker: String,
+    pub ops: String,
+    pub code: String,
+    pub settings: String,
     /// Breathe in this color while a Claude session needs you.
     pub alert: bool,
     pub alert_color: String,
@@ -221,7 +316,7 @@ impl Default for Config {
             version: 1,
             buzzer: true,
             idle_seconds: 45,
-            pages: vec![PageId::Ai, PageId::Music, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker],
+            pages: vec![PageId::Ai, PageId::Music, PageId::Shortcuts, PageId::Soundboard, PageId::League, PageId::Docker, PageId::Ops, PageId::Code, PageId::Settings],
             ring: Ring::default(),
             touch: Touch::default(),
             shortcuts: vec![
@@ -237,6 +332,10 @@ impl Default for Config {
             soundboard: Soundboard::default(),
             league: League::default(),
             docker: Docker::default(),
+            ops: Ops::default(),
+            code: Code::default(),
+            alerts: Alerts::default(),
+            sync: SyncSettings::default(),
             device: DeviceSettings::default(),
         }
     }
@@ -253,6 +352,9 @@ impl Default for Ring {
             soundboard: "#B36BFF".into(),
             league: "#C89B3C".into(),
             docker: "#2496ED".into(),
+            ops: "#7FD1B9".into(),
+            code: "#A371F7".into(),
+            settings: "#D0D0D8".into(),
             alert: true,
             alert_color: "#F2B705".into(),
         }
@@ -284,6 +386,9 @@ impl Ring {
             PageId::Soundboard => &self.soundboard,
             PageId::League => &self.league,
             PageId::Docker => &self.docker,
+            PageId::Ops => &self.ops,
+            PageId::Code => &self.code,
+            PageId::Settings => &self.settings,
         }
     }
 }
@@ -337,6 +442,17 @@ pub fn load() -> Config {
     }
 }
 
+/// Writes the config atomically (temp file + rename).
+pub fn save(cfg: &Config) -> bool {
+    let path = path();
+    let tmp = path.with_extension("json.tmp");
+    let Ok(text) = serde_json::to_string_pretty(cfg) else { return false };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_ok()
+}
+
 pub fn modified() -> Option<SystemTime> {
     std::fs::metadata(path()).and_then(|m| m.modified()).ok()
 }
@@ -354,7 +470,7 @@ mod tests {
         assert!(!partial.buzzer);
         assert_eq!(partial.ring.ai, "#112233");
         assert_eq!(partial.ring.music, Ring::default().music);
-        assert_eq!(partial.pages.len(), 6);
+        assert_eq!(partial.pages.len(), 9);
     }
 
     #[test]

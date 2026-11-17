@@ -3,7 +3,8 @@
 //!   quaked [run]                 the board (what the LaunchAgent runs); settings live in
 //!                                ~/Library/Application Support/Quaked/config.json
 //!   quaked hook                  Claude Code hook: records session state from stdin
-//!   quaked ctl <cmd>             drive the running board: turn 1|-1, press, double, hold, tap X Y
+//!   quaked ctl <cmd>             drive the running board: turn 1|-1, press, double, hold, tap X Y;
+//!                                status, frame [page] (PNG on stdout), alert <page> [why]
 //!   quaked probe [secs]          prints raw HID traffic from the device
 //!   quaked preview <dir>         renders every view with sample data to PNGs
 //!   quaked beep                  plays the "needs you" chirp
@@ -14,14 +15,17 @@ mod audio;
 mod config;
 mod device;
 mod docker;
+mod github;
 mod http;
 mod keys;
 mod league;
 mod music;
+mod ops;
 mod proto;
 mod render;
 mod status;
 mod symbols;
+mod sync;
 
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -54,6 +58,7 @@ fn sample_sessions(now: u64) -> Vec<status::Session> {
         step_count: 0,
         steps: Vec::new(),
         transcript: String::new(),
+        machine: String::new(),
     };
     let mut a = base("a", "digin", State::Working, 4 * m);
     a.prompt = "The publish job OOMs on workbench again, cap its memory and rerun with -p 4".into();
@@ -79,6 +84,7 @@ fn sample_sessions(now: u64) -> Vec<status::Session> {
         step(50 * s, "needs", "Claude needs your permission to use Bash", StepStatus::Info),
     ];
     let mut c = base("c", "ibtg", State::Done, 2 * m);
+    c.machine = "MacBook Pro".into();
     c.prompt = "Why does the shotgun pickup double-fire on mobile?".into();
     c.last_message = "Found it: the touchstart and click handlers both fire. I removed the click listener on touch devices and added a test.".into();
     c.step_count = 21;
@@ -153,7 +159,54 @@ fn preview(dir: &str) {
         logs: Some(("9b62926f50e3aa".into(), (1..40).map(|i| format!("2026-11-16 17:{i:02}:00 UTC [1] LOG:  checkpoint complete: wrote {i} buffers")).chain(["ERROR:  relation \"missing\" does not exist".to_string()]).collect())),
         error: None,
     };
-    let shots: [(&str, Page, Level, usize, usize, usize); 11] = [
+    let host = |name: &str, address: &str, ms: Option<u32>| ops::Host { name: name.into(), address: address.into(), up: ms.is_some(), latency_ms: ms, ..Default::default() };
+    let opsd = ops::Status {
+        net: ops::Network { warp: Some(true), appgate: true, ip: "104.28.40.17".into(), colo: "SLC".into() },
+        hosts: vec![
+            ops::Host { load: Some(1.84), cpus: Some(16), mem: Some((12_884_901_888, 33_554_432_000)), disk: Some((1_210_000_000_000, 1_900_000_000_000)), uptime: "3 weeks, 2 days, 4 hours".into(), ..host("workbench", "workbench", Some(23)) },
+            ops::Host { load: Some(7.9), cpus: Some(8), mem: Some((58_000_000_000, 64_000_000_000)), disk: Some((400_000_000_000, 1_000_000_000_000)), uptime: "11 days, 2 hours".into(), gpu: Some((87.0, 21_400.0, 24_576.0, 71.0)), ..host("shebash-gpu", "dev.d3d.dev", Some(41)) },
+            host("spark.d3d.dev", "spark.d3d.dev", None),
+            ops::Host { stats_error: Some("Permission denied (publickey,password)".into()), ..host("pi", "192.168.68.72", Some(4)) },
+        ],
+        sites: vec![
+            ops::Site { url: "https://arlint.dev".into(), code: Some(200), ms: Some(182), tls_days: Some(54), error: None },
+            ops::Site { url: "https://digin.work".into(), code: Some(200), ms: Some(240), tls_days: Some(71), error: None },
+            ops::Site { url: "https://ibtg.notdone.dev".into(), code: Some(502), ms: Some(95), tls_days: Some(9), error: None },
+            ops::Site { url: "https://plcplayground.notdone.dev".into(), code: None, ms: None, tls_days: None, error: Some("Could not resolve host".into()) },
+        ],
+    };
+    let pr = |repo: &str, number: u64, title: &str, ci: &str, review: &str, mins: u64| github::Pr {
+        repo: repo.into(),
+        number,
+        title: title.into(),
+        url: format!("https://github.com/{repo}/pull/{number}"),
+        ci: ci.into(),
+        review: review.into(),
+        mergeable: "MERGEABLE".into(),
+        updated: now - mins * 60_000,
+        ..Default::default()
+    };
+    let code = github::Status {
+        login: "aarlint".into(),
+        mine: vec![
+            pr("shebashio/thestack", 412, "Move the ingest workers onto the shared job queue", "FAILURE", "REVIEW_REQUIRED", 14),
+            pr("arlintdev/digin", 288, "Bot kinds: hands mode for runners", "SUCCESS", "APPROVED", 95),
+            github::Pr { mergeable: "CONFLICTING".into(), ..pr("arlintdev/plcplayground", 61, "TON / TOF timers in the simulator", "PENDING", "", 300) },
+            github::Pr { draft: true, ..pr("arlintdev/quaked", 3, "OPS and CODE pages", "", "", 2) },
+            pr("shebashio/thestack", 405, "Bump tokio and hyper", "SUCCESS", "CHANGES_REQUESTED", 2 * 1440),
+        ],
+        reviews: vec![
+            github::Pr { author: "kestrel-dev".into(), ..pr("shebashio/thestack", 418, "Retry S3 uploads with jitter", "SUCCESS", "", 40) },
+            github::Pr { author: "jdoe".into(), gitlab: true, ..pr("platform/infra", 92, "Pin the runner image digest", "PENDING", "", 75) },
+        ],
+        error: None,
+        ok: true,
+        gitlab_hosts: vec!["gitlab.com".into()],
+        gitlab_ok: true,
+        gitlab_error: None,
+    };
+    let settings = render::SettingsView { screen: 200, ring: 169, idle: 45, ring_on: true, alert: true, buzzer: true, mic: false, auto_accept: true, snap: true, blink: true, jump: true };
+    let shots: [(&str, Page, Level, usize, usize, usize); 15] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -165,6 +218,10 @@ fn preview(dir: &str) {
         ("9-league-queue", Page::League, Level::Top, 0, 0, 0),
         ("10-league-pop", Page::League, Level::Focus, 0, 0, 0),
         ("11-docker", Page::Docker, Level::Focus, 0, 0, 0),
+        ("13-ops", Page::Ops, Level::Focus, 0, 0, 2),
+        ("14-code", Page::Code, Level::Focus, 0, 0, 1),
+        ("15-settings", Page::Settings, Level::Focus, 0, 0, 6),
+        ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
     let empty = audio::Status::default();
@@ -180,6 +237,9 @@ fn preview(dir: &str) {
             league: if name.contains("pop") { &lg_pop } else { &lg_lobby },
             league_cfg: &cfg.league,
             docker: &dk,
+            ops: &opsd,
+            code: &code,
+            settings,
             level: &level,
             sessions: &sessions,
             sel,
@@ -193,6 +253,7 @@ fn preview(dir: &str) {
             clock: "4:21",
             connected: true,
             flash: None,
+            notice: if name == "14-code" { Some(("review requested  ·  infra !92  Pin the runner image digest", config::hex(cfg.ring.color_for(Page::Code), 0), Page::Code)) } else { None },
             tick: true,
         };
         render::draw(&mut c, &view);

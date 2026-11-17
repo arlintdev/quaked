@@ -6,7 +6,7 @@
 
 use crate::audio;
 use crate::config::{Action, PageId, Shortcut};
-use crate::{docker, league};
+use crate::{docker, github, league, ops};
 use crate::music::Track;
 use crate::status::{Session, State, Step, StepStatus};
 use crate::symbols::Symbols;
@@ -57,6 +57,30 @@ pub enum Hit {
     Container(usize),
     DockerAction(&'static str),
     DockerBack,
+    Warp,
+    Host(usize),
+    Site(usize),
+    /// Index into `github::Status::all()` (your PRs, then review requests).
+    Pr(usize),
+    /// A SETTINGS card; for the sliders, where along the bar it was touched.
+    Setting(usize, Option<f32>),
+}
+
+/// What the SETTINGS page shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SettingsView {
+    /// Screen luminance, 10-255.
+    pub screen: u8,
+    pub ring: u8,
+    pub idle: u64,
+    pub ring_on: bool,
+    pub alert: bool,
+    pub blink: bool,
+    pub jump: bool,
+    pub buzzer: bool,
+    pub mic: bool,
+    pub auto_accept: bool,
+    pub snap: bool,
 }
 
 pub struct View<'a> {
@@ -71,6 +95,11 @@ pub struct View<'a> {
     pub league: &'a league::Status,
     pub league_cfg: &'a crate::config::League,
     pub docker: &'a docker::Status,
+    /// On OPS, `tile` 0 is the WARP toggle, then hosts, then sites. On CODE it walks
+    /// your PRs, then review requests.
+    pub ops: &'a ops::Status,
+    pub code: &'a github::Status,
+    pub settings: SettingsView,
     pub level: &'a Level,
     pub sessions: &'a [Session],
     pub sel: usize,
@@ -84,6 +113,8 @@ pub struct View<'a> {
     pub clock: &'a str,
     pub connected: bool,
     pub flash: Option<Hit>,
+    /// Something new: (why, its page's color, its page). Shown in the top bar.
+    pub notice: Option<(&'a str, u32, Page)>,
     /// Alternates every second; drives the "running" pulse.
     pub tick: bool,
 }
@@ -209,7 +240,7 @@ impl Fonts {
             bold: load_font(&[("/System/Library/Fonts/HelveticaNeue.ttc", 1), ("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 0)]),
             medium: load_font(&[("/System/Library/Fonts/HelveticaNeue.ttc", 10), ("/System/Library/Fonts/Supplemental/Arial.ttf", 0)]),
             regular: load_font(&[("/System/Library/Fonts/HelveticaNeue.ttc", 0), ("/System/Library/Fonts/Supplemental/Arial.ttf", 0)]),
-            mono: load_font(&[("/System/Library/Fonts/Menlo.ttc", 0), ("/System/Library/Fonts/SFNSMono.ttf", 0)]),
+            mono: load_font(&[("/System/Library/Fonts/SFNSMono.ttf", 0), ("/System/Library/Fonts/Menlo.ttc", 0)]),
             cache: RefCell::new(HashMap::new()),
             advances: RefCell::new(HashMap::new()),
         }
@@ -546,6 +577,9 @@ fn tab_width(p: Page) -> f32 {
         Page::Soundboard => 112.0,
         Page::League => 104.0,
         Page::Docker => 108.0,
+        Page::Ops => 80.0,
+        Page::Code => 92.0,
+        Page::Settings => 56.0, // a gear, not a word
     }
 }
 
@@ -621,6 +655,102 @@ fn docker_actions() -> [(R, &'static str); 3] {
 fn docker_back() -> R {
     (M + 24.0, CY + CH - 112.0, 120.0, 42.0)
 }
+// Ops: network strip, host cards on the left, sites on the right.
+const OPS_STRIP_H: f32 = 48.0;
+const OPS_TOP: f32 = CY + OPS_STRIP_H + 6.0;
+const SITES_W: f32 = 560.0;
+const SITE_ROW_H: f32 = 50.0;
+pub const SITE_ROWS: usize = ((CY + CH - OPS_TOP - 48.0) / SITE_ROW_H) as usize;
+fn warp_button() -> R {
+    (M, CY, 214.0, OPS_STRIP_H - 6.0)
+}
+fn host_rect(slot: usize, cols: usize) -> R {
+    let area = W - 2.0 * M - SITES_W - G;
+    let w = (area - (cols as f32 - 1.0) * G) / cols as f32;
+    (M + slot as f32 * (w + G), OPS_TOP, w, CY + CH - OPS_TOP)
+}
+fn sites_panel() -> R {
+    (W - M - SITES_W, OPS_TOP, SITES_W, CY + CH - OPS_TOP)
+}
+fn site_rect(slot: usize) -> R {
+    let (x, y, w, _) = sites_panel();
+    (x + 8.0, y + 40.0 + slot as f32 * SITE_ROW_H, w - 16.0, SITE_ROW_H)
+}
+/// First visible host and the number of card columns; hosts start at tile 1.
+fn host_window(n: usize, tile: usize) -> (usize, usize) {
+    let cols = n.clamp(3, 4);
+    (list_window(n, tile.saturating_sub(1).min(n.saturating_sub(1)), cols), cols)
+}
+fn site_window(o: &ops::Status, tile: usize) -> usize {
+    list_window(o.sites.len(), tile.saturating_sub(1 + o.hosts.len()), SITE_ROWS)
+}
+
+// Code: your PRs on the left, review requests on the right.
+const CODE_STRIP_H: f32 = 48.0;
+const CODE_TOP: f32 = CY + CODE_STRIP_H + 6.0;
+const REVIEWS_W: f32 = 640.0;
+const PR_ROW_H: f32 = 44.0;
+pub const PR_ROWS: usize = ((CY + CH - CODE_TOP - 48.0) / PR_ROW_H) as usize;
+fn mine_panel() -> R {
+    (M, CODE_TOP, W - 2.0 * M - REVIEWS_W - G, CY + CH - CODE_TOP)
+}
+fn reviews_panel() -> R {
+    (W - M - REVIEWS_W, CODE_TOP, REVIEWS_W, CY + CH - CODE_TOP)
+}
+fn pr_rect(panel: R, slot: usize) -> R {
+    (panel.0 + 8.0, panel.1 + 40.0 + slot as f32 * PR_ROW_H, panel.2 - 16.0, PR_ROW_H)
+}
+/// (panel, first visible row, index offset into `all()`) for both lists.
+fn pr_lists(g: &github::Status, tile: usize) -> [(R, usize, usize, usize); 2] {
+    let m = g.mine.len();
+    [
+        (mine_panel(), list_window(m, tile.min(m.saturating_sub(1)), PR_ROWS), 0, m),
+        (reviews_panel(), list_window(g.reviews.len(), tile.saturating_sub(m), PR_ROWS), m, g.reviews.len()),
+    ]
+}
+
+// Settings: three sliders on top, eight switches below.
+pub const SETTING_COUNT: usize = 11;
+pub const SETTING_SLIDERS: usize = 3;
+pub const SCREEN_MIN: u8 = 10;
+/// Idle timeout choices, in seconds.
+pub const IDLE_STEPS: [u64; 9] = [15, 30, 45, 60, 90, 120, 180, 300, 600];
+const SET_ROW_H: f32 = (CH - G) / 2.0;
+fn setting_rect(i: usize) -> R {
+    if i < SETTING_SLIDERS {
+        let w = (W - 2.0 * M - 2.0 * G) / 3.0;
+        (M + i as f32 * (w + G), CY, w, SET_ROW_H)
+    } else {
+        let j = (i - SETTING_SLIDERS) as f32;
+        let w = (W - 2.0 * M - 7.0 * G) / 8.0;
+        (M + j * (w + G), CY + SET_ROW_H + G, w, SET_ROW_H)
+    }
+}
+fn setting_bar(i: usize) -> R {
+    let (x, y, w, h) = setting_rect(i);
+    (x + 28.0, y + h - 44.0, w - 56.0, 14.0)
+}
+/// Touching the lower part of a slider card sets the value there.
+fn setting_bar_hit(i: usize) -> R {
+    let (x, y, w, h) = setting_rect(i);
+    (x, y + h - 86.0, w, 86.0)
+}
+pub fn idle_index(secs: u64) -> usize {
+    IDLE_STEPS.iter().enumerate().min_by_key(|(_, s)| s.abs_diff(secs)).map(|(i, _)| i).unwrap_or(2)
+}
+pub fn setting_name(i: usize) -> &'static str {
+    ["Screen brightness", "Ring brightness", "Back to top after", "Ring light", "Alert pulse", "Blink on new", "Jump to new", "Buzzer", "Quake mic", "Auto-accept", "Snap to League"].get(i).copied().unwrap_or("")
+}
+
+/// First row of a scrolling list so that `sel` stays visible.
+fn list_window(n: usize, sel: usize, rows: usize) -> usize {
+    if n <= rows {
+        0
+    } else {
+        sel.saturating_sub(rows - 1).min(n - rows)
+    }
+}
+
 pub const LOG_ROW_H: f32 = 21.0;
 pub const LOG_ROWS: usize = ((CH - 56.0) / LOG_ROW_H) as usize;
 
@@ -733,6 +863,28 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
             let (first, cols) = window(n, v.tile);
             (0..cols).find(|&slot| inside(container_rect(slot, cols), x, y)).map(|slot| first + slot).filter(|&i| i < n).map(Hit::Container)
         }
+        (Page::Ops, _) => {
+            if inside(warp_button(), x, y) {
+                return Some(Hit::Warp);
+            }
+            let o = v.ops;
+            let (first, cols) = host_window(o.hosts.len(), v.tile);
+            if let Some(i) = (0..cols).find(|&s| inside(host_rect(s, cols), x, y)).map(|s| first + s).filter(|&i| i < o.hosts.len()) {
+                return Some(Hit::Host(i));
+            }
+            let first = site_window(o, v.tile);
+            (0..SITE_ROWS).find(|&s| inside(site_rect(s), x, y)).map(|s| first + s).filter(|&i| i < o.sites.len()).map(Hit::Site)
+        }
+        (Page::Code, _) => pr_lists(v.code, v.tile).into_iter().find_map(|(panel, first, offset, n)| {
+            (0..PR_ROWS).find(|&s| inside(pr_rect(panel, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::Pr(offset + i))
+        }),
+        (Page::Settings, _) => (0..SETTING_COUNT).find(|&i| inside(setting_rect(i), x, y)).map(|i| {
+            let frac = (i < SETTING_SLIDERS && inside(setting_bar_hit(i), x, y)).then(|| {
+                let (bx, _, bw, _) = setting_bar(i);
+                ((x - bx) / bw).clamp(0.0, 1.0)
+            });
+            Hit::Setting(i, frac)
+        }),
         (Page::Shortcuts, _) => (0..v.shortcuts.len().min(SC_COLS * SC_ROWS)).find(|&i| inside(shortcut_rect(i), x, y)).map(Hit::Shortcut),
         (Page::Soundboard, _) => {
             if inside(stop_all_button(), x, y) {
@@ -790,6 +942,18 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
         }
         Hit::DockerAction(_) => return None,
         Hit::DockerBack => docker_back(),
+        Hit::Warp => warp_button(),
+        Hit::Host(i) => {
+            let (first, cols) = host_window(v.ops.hosts.len(), v.tile);
+            host_rect(i.checked_sub(first)?, cols)
+        }
+        Hit::Site(i) => site_rect(i.checked_sub(site_window(v.ops, v.tile))?),
+        Hit::Pr(i) => {
+            let (panel, first, offset, n) = pr_lists(v.code, v.tile).into_iter().find(|(_, _, off, n)| i >= *off && i < off + n)?;
+            let _ = n;
+            pr_rect(panel, (i - offset).checked_sub(first)?)
+        }
+        Hit::Setting(i, _) => setting_rect(i),
         Hit::Session(i) => {
             let (first, cols) = window(v.sessions.len(), v.sel);
             col_rect(i.checked_sub(first)?, cols)
@@ -823,6 +987,9 @@ pub fn draw(c: &mut Canvas, v: &View) {
             None => docker_page(c, v),
         },
         (Page::Docker, _) => docker_page(c, v),
+        (Page::Ops, _) => ops_page(c, v),
+        (Page::Code, _) => code_page(c, v),
+        (Page::Settings, _) => settings_page(c, v),
     }
     if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
         c.rrect(r, 14.0, 0xFFFFFF, 0.22);
@@ -845,6 +1012,13 @@ fn hints(v: &View) -> &'static str {
         (Page::Docker, Level::Top) => "turn  switch page   ·   press  pick a container",
         (Page::Docker, Level::Focus) => "turn  choose   ·   press  open   ·   double-click  back",
         (Page::Docker, Level::Detail(_)) => "turn  scroll logs   ·   press  refresh   ·   double-click  back",
+        (Page::Ops, Level::Top) => "turn  switch page   ·   press  pick a host or site   ·   tap  open",
+        (Page::Ops, _) => "turn  choose   ·   press  open / toggle   ·   double-click  back",
+        (Page::Code, Level::Top) => "turn  switch page   ·   press  pick a pull request   ·   tap  open",
+        (Page::Code, _) => "turn  choose   ·   press  open in browser   ·   double-click  back",
+        (Page::Settings, Level::Top) => "turn  switch page   ·   press  change settings",
+        (Page::Settings, Level::Focus) => "turn  choose   ·   press  adjust / switch   ·   double-click  back",
+        (Page::Settings, Level::Detail(_)) => "turn  change   ·   press  done",
     }
 }
 
@@ -855,7 +1029,12 @@ fn top_bar(c: &mut Canvas, v: &View) {
         let r = tab_rect(v.pages, p);
         let active = v.page == p;
         c.rrect(r, 17.0, if active { TEXT } else { 0x1C1C21 }, 1.0);
-        c.text(F::Bold, p.label(), 16.0, r.0 + r.2 / 2.0, r.1 + 23.0, if active { 0x111114 } else { MUTED }, Align::Center);
+        let fg = if active { 0x111114 } else { MUTED };
+        if p == Page::Settings {
+            c.symbol("gearshape.fill", 18.0, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, fg);
+        } else {
+            c.text(F::Bold, p.label(), 16.0, r.0 + r.2 / 2.0, r.1 + 23.0, fg, Align::Center);
+        }
         if active {
             c.rrect((r.0 + 14.0, r.1 + r.3 + 3.0, r.2 - 28.0, 3.0), 1.5, v.accent, 1.0);
         }
@@ -880,6 +1059,10 @@ fn top_bar(c: &mut Canvas, v: &View) {
         (Page::Soundboard, Level::Focus) => v.sounds.clips.get(v.tile).map(|s| format!("›  {}", s.title)),
         (Page::Docker, Level::Focus) => v.docker.containers.get(v.tile).map(|c| format!("›  choose  ·  {}", c.name)),
         (Page::Docker, Level::Detail(id)) => v.docker.containers.iter().find(|c| &c.id == id).map(|c| format!("›  {}", c.name)),
+        (Page::Ops, Level::Focus) => ops_item_name(v.ops, v.tile).map(|n| format!("›  {n}")),
+        (Page::Code, Level::Focus) => v.code.all().get(v.tile).map(|p| format!("›  {}", pr_ref(p))),
+        (Page::Settings, Level::Focus) => Some(format!("›  {}", setting_name(v.tile))),
+        (Page::Settings, Level::Detail(_)) => Some(format!("›  {}", setting_name(v.tile))),
         _ => None,
     };
     // Right side first (clock, counts, now playing), so the hints know how much room is left.
@@ -900,7 +1083,7 @@ fn top_bar(c: &mut Canvas, v: &View) {
     }
     // Keep at least ~420px for the breadcrumb and hints.
     let room_for_track = rx - (crumb_x + 420.0);
-    if v.page != Page::Music && room_for_track > 140.0 {
+    if v.page != Page::Music && v.notice.is_none() && room_for_track > 140.0 {
         if let Some(t) = v.track.filter(|t| t.playing) {
             let label = format!("{} — {}", t.title, t.artist);
             let max = room_for_track.min(320.0);
@@ -915,6 +1098,15 @@ fn top_bar(c: &mut Canvas, v: &View) {
 
     if let Some(cb) = crumb {
         x += c.fit(F::Bold, &cb, 20.0, (limit - x).clamp(80.0, 360.0), x, 33.0, TEXT, Align::Left) + 24.0;
+    }
+    if let Some((why, color, page)) = v.notice {
+        let r = tab_rect(v.pages, page);
+        c.circle(r.0 + r.2 - 4.0, r.1 + 4.0, 7.0, color, 1.0);
+        let nx = x.max(crumb_x);
+        let pw = c.pill(nx, 15.0, "NEW", 13.0, color, 0x101013);
+        c.fit(F::Bold, why, 17.0, (limit - nx - pw - 12.0).max(40.0), nx + pw + 12.0, 33.0, TEXT, Align::Left);
+        c.rect((M, CY - 6.0, W - 2.0 * M, 1.0), LINE, 1.0);
+        return;
     }
     let mut hx = x.max(crumb_x);
     for (i, part) in hints(v).split("   ·   ").enumerate() {
@@ -1001,7 +1193,13 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
     c.fit(F::Bold, &s.name, 26.0, iw - ew - 12.0, ix, y + 35.0, TEXT, Align::Left);
     let pw = c.pill(ix, y + 48.0, st.label, 13.0, st.accent, st.on_accent);
     let steps = if s.step_count == 1 { "1 step".to_string() } else { format!("{} steps", s.step_count) };
-    c.text(F::Medium, &steps, 15.0, ix + pw + 10.0, y + 66.0, MUTED, Align::Left);
+    let sw = c.text(F::Medium, &steps, 15.0, ix + pw + 10.0, y + 66.0, MUTED, Align::Left);
+    if !s.machine.is_empty() {
+        // Synced from another Mac
+        let mx = ix + pw + sw + 22.0;
+        c.symbol("laptopcomputer", 15.0, mx + 9.0, y + 61.0, 0x8AB4F8);
+        c.fit(F::Medium, &s.machine, 15.0, (x + w - 16.0 - mx - 24.0).max(30.0), mx + 24.0, y + 66.0, 0x8AB4F8, Align::Left);
+    }
 
     let mut cy = y + 98.0;
     if !s.prompt.is_empty() {
@@ -1044,7 +1242,8 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
         age(v.now_ms.saturating_sub(s.started_at))
     );
     c.fit(F::Medium, &meta, 16.0, iw - pw - 12.0, ix + pw + 12.0, y + 78.0, MUTED, Align::Left);
-    c.fit(F::Mono, &short_path(&s.cwd), 14.0, iw, ix, y + 110.0, FAINT, Align::Left);
+    let path = if s.machine.is_empty() { short_path(&s.cwd) } else { format!("{}  ·  {}", s.machine, short_path(&s.cwd)) };
+    c.fit(F::Mono, &path, 14.0, iw, ix, y + 110.0, if s.machine.is_empty() { FAINT } else { 0x8AB4F8 }, Align::Left);
 
     let mut cy = y + 144.0;
     c.text(F::Bold, "PROMPT", 12.0, ix, cy, FAINT, Align::Left);
@@ -1066,9 +1265,10 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
         let lines = ((back_button().1 - 14.0 - cy) / 22.0).floor().max(1.0) as usize;
         c.paragraph(if waiting { F::Bold } else { F::Regular }, body, 17.0, ix, cy, iw, lines.min(5), 22.0, col);
     }
-    for (r, label) in [(back_button(), "‹  Back"), (open_button(), "Open in Claude")] {
+    let open_label = if s.machine.is_empty() { "Open in Claude".to_string() } else { format!("On {}", s.machine) };
+    for (r, label, fg) in [(back_button(), "‹  Back".to_string(), TEXT), (open_button(), open_label, if s.machine.is_empty() { TEXT } else { MUTED })] {
         c.rrect(r, 10.0, 0x26262D, 1.0);
-        c.text(F::Medium, label, 17.0, r.0 + r.2 / 2.0, r.1 + 25.0, TEXT, Align::Center);
+        c.fit(F::Medium, &label, 17.0, r.2 - 16.0, r.0 + r.2 / 2.0, r.1 + 25.0, fg, Align::Center);
     }
 
     // Timeline
@@ -1642,6 +1842,408 @@ fn docker_detail(c: &mut Canvas, v: &View, ct: &docker::Container) {
     }
 }
 
+// ---------------------------------------------------------------- OPS
+
+/// What the knob has selected on the OPS page, for the breadcrumb.
+fn ops_item_name(o: &ops::Status, tile: usize) -> Option<String> {
+    if tile == 0 {
+        return Some("WARP".into());
+    }
+    if let Some(h) = o.hosts.get(tile - 1) {
+        return Some(h.name.clone());
+    }
+    o.sites.get(tile - 1 - o.hosts.len()).map(|s| site_host(&s.url).to_string())
+}
+
+fn site_host(url: &str) -> &str {
+    url.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/')
+}
+
+/// Bar color: the page accent, amber past 85%, red past 95%.
+fn usage_color(frac: f32, accent: u32) -> u32 {
+    if frac > 0.95 {
+        RED
+    } else if frac > 0.85 {
+        AMBER
+    } else {
+        accent
+    }
+}
+
+fn ops_page(c: &mut Canvas, v: &View) {
+    let o = v.ops;
+    let focus = v.level != &Level::Top;
+    // Strip: WARP toggle, AppGate, public IP and Cloudflare colo
+    let wr = warp_button();
+    let (label, bg, fg, sym) = match o.net.warp {
+        Some(true) => ("WARP  ON", v.accent, 0x0B1F19, "lock.shield.fill"),
+        Some(false) => ("WARP  OFF", 0x26262D, TEXT_2, "shield.slash"),
+        None => ("WARP  ?", 0x1C1C21, FAINT, "shield"),
+    };
+    c.rrect(wr, 12.0, bg, 1.0);
+    c.symbol(sym, 20.0, wr.0 + 30.0, wr.1 + wr.3 / 2.0, fg);
+    c.text(F::Bold, label, 18.0, wr.0 + 54.0, wr.1 + 28.0, fg, Align::Left);
+    if focus && v.tile == 0 {
+        c.outline(wr, 12.0, TEXT, 3.0);
+    }
+    let mut x = wr.0 + wr.2 + 16.0;
+    if o.net.appgate {
+        x += c.pill(x, CY + 8.0, "APPGATE", 14.0, 0x1A3A5C, 0xCFE3FF) + 14.0;
+    }
+    let ip = match (o.net.ip.as_str(), o.net.colo.as_str()) {
+        ("", _) => "no internet".to_string(),
+        (ip, "") => ip.to_string(),
+        (ip, colo) => format!("{ip}   ·   {colo}"),
+    };
+    c.text(F::Mono, &ip, 17.0, x, CY + 27.0, TEXT_2, Align::Left);
+    let up = o.hosts.iter().filter(|h| h.up).count();
+    let ok_sites = o.sites.iter().filter(|s| s.code.is_some_and(|code| code < 400)).count();
+    let summary = format!("{up} of {} hosts up   ·   {ok_sites} of {} sites OK", o.hosts.len(), o.sites.len());
+    c.text(F::Medium, &summary, 17.0, W - M, CY + 27.0, MUTED, Align::Right);
+
+    // Hosts
+    let (first, cols) = host_window(o.hosts.len(), v.tile);
+    for slot in 0..cols {
+        let r = host_rect(slot, cols);
+        let i = first + slot;
+        match o.hosts.get(i) {
+            Some(h) => {
+                host_card(c, v, h, r);
+                if focus && v.tile == i + 1 {
+                    c.outline(r, 14.0, TEXT, 3.0);
+                }
+            }
+            None => {
+                c.rrect(r, 14.0, PANEL_DEEP, 1.0);
+                if o.hosts.is_empty() && slot == 0 {
+                    c.text(F::Medium, "No hosts configured", 20.0, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, FAINT, Align::Center);
+                }
+            }
+        }
+    }
+    if first > 0 {
+        let r = host_rect(0, cols);
+        c.pill(r.0 + 8.0, r.1 + r.3 - 40.0, &format!("‹ {first}"), 16.0, 0x2A2A31, TEXT);
+    }
+    let right = o.hosts.len().saturating_sub(first + cols);
+    if right > 0 {
+        let r = host_rect(cols - 1, cols);
+        let label = format!("{right} ›");
+        let w = c.measure(F::Bold, &label, 16.0) + 16.0 * 1.4;
+        c.pill(r.0 + r.2 - w - 8.0, r.1 + r.3 - 40.0, &label, 16.0, 0x2A2A31, TEXT);
+    }
+
+    // Sites
+    let p = sites_panel();
+    c.rrect(p, 14.0, PANEL_DEEP, 1.0);
+    c.text(F::Bold, "SITES", 12.0, p.0 + 22.0, p.1 + 26.0, FAINT, Align::Left);
+    c.text(F::Bold, "STATUS      TIME        TLS", 12.0, p.0 + p.2 - 22.0, p.1 + 26.0, FAINT, Align::Right);
+    if o.sites.is_empty() {
+        c.text(F::Medium, "No sites configured", 20.0, p.0 + p.2 / 2.0, p.1 + p.3 / 2.0, FAINT, Align::Center);
+    }
+    let first = site_window(o, v.tile);
+    for slot in 0..SITE_ROWS {
+        let i = first + slot;
+        let Some(s) = o.sites.get(i) else { break };
+        let r = site_rect(slot);
+        let selected = focus && v.tile == 1 + o.hosts.len() + i;
+        if selected {
+            c.rrect(r, 10.0, 0x22222A, 1.0);
+            c.outline(r, 10.0, TEXT, 2.0);
+        } else if slot > 0 {
+            c.rect((r.0 + 14.0, r.1, r.2 - 28.0, 1.0), LINE, 0.7);
+        }
+        let mid = r.1 + r.3 / 2.0;
+        let (dot, code) = match s.code {
+            Some(code) if code < 400 => (GREEN, code.to_string()),
+            Some(code) if code < 500 => (AMBER, code.to_string()),
+            Some(code) => (RED, code.to_string()),
+            None => (RED, "ERR".to_string()),
+        };
+        c.circle(r.0 + 22.0, mid, 6.0, dot, 1.0);
+        let rx = r.0 + r.2 - 14.0;
+        match s.tls_days {
+            Some(d) => {
+                let col = if d < 3 { RED } else if d < 14 { AMBER } else { MUTED };
+                c.text(F::Mono, &format!("{d}d"), 16.0, rx, mid + 6.0, col, Align::Right);
+            }
+            None => {
+                c.text(F::Mono, "—", 16.0, rx, mid + 6.0, FAINT, Align::Right);
+            }
+        }
+        match &s.error {
+            Some(e) if s.code.is_none() => {
+                c.text(F::Mono, &code, 16.0, rx - 196.0, mid + 6.0, dot, Align::Right);
+                c.clip(F::Medium, e, 13.0, 150.0, rx - 180.0, mid + 5.0, FAINT);
+            }
+            _ => {
+                c.text(F::Mono, &code, 16.0, rx - 196.0, mid + 6.0, if dot == GREEN { TEXT } else { dot }, Align::Right);
+                if let Some(ms) = s.ms {
+                    let col = if ms > 2000 { AMBER } else { TEXT_2 };
+                    c.text(F::Mono, &format!("{ms} ms"), 16.0, rx - 82.0, mid + 6.0, col, Align::Right);
+                }
+            }
+        }
+        c.clip(F::Bold, site_host(&s.url), 19.0, r.2 - 40.0 - 250.0, r.0 + 40.0, mid + 7.0, TEXT);
+    }
+}
+
+fn host_card(c: &mut Canvas, v: &View, h: &ops::Host, r: R) {
+    let (x, y, w, hh) = r;
+    c.rrect(r, 14.0, PANEL, 1.0);
+    c.rrect((x, y, 6.0, hh), 3.0, if h.up { GREEN } else { 0x6B2A2A }, 1.0);
+    let ix = x + 22.0;
+    let iw = w - 40.0;
+    c.fit(F::Bold, &h.name, 26.0, iw, ix, y + 38.0, if h.up { TEXT } else { TEXT_2 }, Align::Left);
+    c.clip(F::Mono, &h.address, 14.0, iw, ix, y + 61.0, MUTED);
+    let pill = match (h.up, h.latency_ms) {
+        (true, Some(ms)) => format!("UP  ·  {ms} ms"),
+        (true, None) => "UP".to_string(),
+        _ => "DOWN".to_string(),
+    };
+    let pw = c.pill(ix, y + 74.0, &pill, 13.0, if h.up { GREEN } else { 0x4A1A1A }, if h.up { 0xFFFFFF } else { 0xFFD0D0 });
+    if !h.up {
+        let why = h.reason.as_deref().unwrap_or("checking…");
+        c.paragraph(F::Medium, why, 18.0, ix, y + 150.0, iw, 3, 24.0, FAINT);
+        let via = if h.proxied { "via ProxyCommand" } else { "SSH port" };
+        c.text(F::Medium, via, 14.0, ix, y + hh - 18.0, FAINT, Align::Left);
+        return;
+    }
+    // "3 weeks, 2 days, 4 hours" -> "3 weeks, 2 days"
+    let uptime: Vec<&str> = h.uptime.split(", ").take(2).collect();
+    if !h.uptime.is_empty() {
+        c.clip(F::Medium, &format!("up {}", uptime.join(", ")), 15.0, iw - pw - 10.0, ix + pw + 10.0, y + 92.0, MUTED);
+    }
+    if let Some(e) = &h.stats_error {
+        c.paragraph(F::Medium, e, 15.0, ix, y + 140.0, iw, 3, 20.0, AMBER);
+        return;
+    }
+    let mut cy = y + 134.0;
+    let mut metric = |c: &mut Canvas, label: &str, value: String, frac: f32| {
+        c.text(F::Bold, label, 13.0, ix, cy, FAINT, Align::Left);
+        c.fit(F::Mono, &value, 15.0, iw - 50.0, ix + iw, cy, TEXT, Align::Right);
+        bar(c, ix, cy + 10.0, iw, frac, usage_color(frac, v.accent));
+        cy += 46.0;
+    };
+    if let Some(load) = h.load {
+        let cpus = h.cpus.unwrap_or(1).max(1);
+        metric(c, "LOAD", format!("{load:.2}  /  {cpus} cpu"), load / cpus as f32);
+    }
+    if let Some((used, total)) = h.mem {
+        metric(c, "MEMORY", format!("{} / {}", bytes(used), bytes(total)), used as f32 / total.max(1) as f32);
+    }
+    if let Some((used, total)) = h.disk {
+        metric(c, "DISK", format!("{} / {}", bytes(used), bytes(total)), used as f32 / total.max(1) as f32);
+    }
+    if let Some((util, mem_used, mem_total, temp)) = h.gpu {
+        metric(c, "GPU", format!("{util:.0}%  ·  {:.0}/{:.0} GB  ·  {temp:.0}°C", mem_used / 1024.0, mem_total / 1024.0), util / 100.0);
+    }
+}
+
+// ---------------------------------------------------------------- SETTINGS
+
+fn settings_page(c: &mut Canvas, v: &View) {
+    let st = v.settings;
+    let focus = v.level != &Level::Top;
+    let adjusting = matches!(v.level, Level::Detail(_));
+    let idle_i = idle_index(st.idle);
+    let idle_label = if st.idle >= 120 { format!("{} min", st.idle / 60) } else { format!("{} s", st.idle) };
+    let sliders: [(&str, String, f32, &str); SETTING_SLIDERS] = [
+        ("sun.max.fill", format!("{}%", (st.screen as f32 / 255.0 * 100.0).round()), (st.screen.saturating_sub(SCREEN_MIN)) as f32 / (255 - SCREEN_MIN) as f32, "the Quake's screen"),
+        ("circle.circle.fill", format!("{}%", (st.ring as f32 / 255.0 * 100.0).round()), st.ring as f32 / 255.0, if st.ring_on { "the knob's light ring" } else { "ring light is off" }),
+        ("timer", idle_label, idle_i as f32 / (IDLE_STEPS.len() - 1) as f32, "without input"),
+    ];
+    for (i, (sym, value, frac, sub)) in sliders.iter().enumerate() {
+        let r = setting_rect(i);
+        let (x, y, w, _) = r;
+        let editing = adjusting && v.tile == i;
+        c.rrect(r, 16.0, if editing { 0x1E1E24 } else { PANEL }, 1.0);
+        c.symbol(sym, 22.0, x + 42.0, y + 40.0, if editing { v.accent } else { MUTED });
+        c.text(F::Bold, &setting_name(i).to_uppercase(), 14.0, x + 66.0, y + 46.0, FAINT, Align::Left);
+        c.text(F::Medium, sub, 15.0, x + w - 28.0, y + 46.0, FAINT, Align::Right);
+        c.text(F::Bold, value, 62.0, x + 28.0, y + 124.0, TEXT, Align::Left);
+        if editing {
+            c.text(F::Medium, "turn to change  ·  press when done", 16.0, x + w - 28.0, y + 118.0, v.accent, Align::Right);
+        }
+        let (bx, by, bw, bh) = setting_bar(i);
+        c.rrect((bx, by, bw, bh), bh / 2.0, 0x2A2A31, 1.0);
+        let fill = (bw * frac.clamp(0.0, 1.0)).max(bh);
+        let dim = i == 1 && !st.ring_on;
+        c.rrect((bx, by, fill, bh), bh / 2.0, if dim { FAINT } else { v.accent }, 1.0);
+        c.circle(bx + fill - bh / 2.0, by + bh / 2.0, 13.0, TEXT, 1.0);
+        if i == 2 {
+            // tick marks for the fixed steps
+            for k in 0..IDLE_STEPS.len() {
+                let tx = bx + bh / 2.0 + (bw - bh) * k as f32 / (IDLE_STEPS.len() - 1) as f32;
+                c.rect((tx - 1.0, by + bh + 6.0, 2.0, 6.0), FAINT, 1.0);
+            }
+        }
+        if focus && v.tile == i {
+            c.outline(r, 16.0, if editing { v.accent } else { TEXT }, 3.0);
+        }
+    }
+    let switches: [(bool, &str, &str); SETTING_COUNT - SETTING_SLIDERS] = [
+        (st.ring_on, "rays", "page colors on the knob"),
+        (st.alert, "bell.badge.fill", "breathe when Claude needs you"),
+        (st.blink, "light.beacon.max.fill", "flash the ring when something is new"),
+        (st.jump, "arrow.uturn.forward.circle.fill", "go to the page that has it"),
+        (st.buzzer, "speaker.wave.2.fill", "chirp on alerts"),
+        (st.mic, "mic.fill", "built-in mic and its light"),
+        (st.auto_accept, "checkmark.seal.fill", "League ready checks"),
+        (st.snap, "bolt.fill", "jump there on queue pop"),
+    ];
+    for (j, (on, sym, sub)) in switches.iter().enumerate() {
+        let i = SETTING_SLIDERS + j;
+        let r = setting_rect(i);
+        let (x, y, w, h) = r;
+        c.rrect(r, 16.0, PANEL, 1.0);
+        c.symbol(sym, 28.0, x + 40.0, y + 44.0, if *on { v.accent } else { FAINT });
+        c.fit(F::Bold, setting_name(i), 22.0, w - 40.0, x + 20.0, y + 102.0, if *on { TEXT } else { TEXT_2 }, Align::Left);
+        c.paragraph(F::Medium, sub, 14.0, x + 20.0, y + 126.0, w - 40.0, 2, 18.0, MUTED);
+        // switch
+        let (sw, sh) = (60.0, 32.0);
+        let (sx, sy) = (x + w - sw - 22.0, y + h - sh - 20.0);
+        c.rrect((sx, sy, sw, sh), sh / 2.0, if *on { GREEN } else { 0x3A3A42 }, 1.0);
+        let knob_x = if *on { sx + sw - sh / 2.0 } else { sx + sh / 2.0 };
+        c.circle(knob_x, sy + sh / 2.0, sh / 2.0 - 4.0, 0xFFFFFF, 1.0);
+        c.text(F::Bold, if *on { "ON" } else { "OFF" }, 14.0, x + 20.0, y + h - 30.0, if *on { GREEN } else { FAINT }, Align::Left);
+        if focus && v.tile == i {
+            c.outline(r, 16.0, TEXT, 3.0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- CODE
+
+fn short_repo(repo: &str) -> &str {
+    repo.rsplit('/').next().unwrap_or(repo)
+}
+
+/// "thestack #412" for a GitHub PR, "infra !92" for a GitLab merge request.
+fn pr_ref(p: &github::Pr) -> String {
+    format!("{} {}{}", short_repo(&p.repo), if p.gitlab { '!' } else { '#' }, p.number)
+}
+
+const GITLAB_ORANGE: u32 = 0xFC6D26;
+
+fn code_page(c: &mut Canvas, v: &View) {
+    let g = v.code;
+    let mut pw = c.pill(M, CY + 8.0, "GITHUB", 14.0, v.accent, 0xFFFFFF);
+    if !g.gitlab_hosts.is_empty() {
+        let (bg, fg) = if g.gitlab_ok { (GITLAB_ORANGE, 0xFFFFFF) } else { (0x3A2A22, 0xB88A70) };
+        pw += 8.0 + c.pill(M + pw + 8.0, CY + 8.0, "GITLAB", 14.0, bg, fg);
+    }
+    let tx = M + pw + 16.0;
+    if !g.ok {
+        let msg = g.error.as_deref().unwrap_or("Loading pull requests…");
+        c.fit(F::Medium, msg, 18.0, W - 2.0 * M - pw - 30.0, tx, CY + 27.0, if g.error.is_some() { AMBER } else { MUTED }, Align::Left);
+    } else {
+        let failing = g.mine.iter().filter(|p| matches!(p.ci.as_str(), "FAILURE" | "ERROR")).count();
+        let approved = g.mine.iter().filter(|p| p.review == "APPROVED").count();
+        let conflicts = g.mine.iter().filter(|p| p.mergeable == "CONFLICTING").count();
+        let mut x = tx;
+        x += c.text(F::Bold, &format!("@{}", g.login), 18.0, x, CY + 27.0, TEXT, Align::Left) + 22.0;
+        let parts = [
+            (format!("{} open", g.mine.len()), TEXT_2),
+            (format!("{failing} failing"), if failing > 0 { RED } else { MUTED }),
+            (format!("{approved} approved"), if approved > 0 { GREEN } else { MUTED }),
+            (format!("{conflicts} conflicting"), if conflicts > 0 { AMBER } else { MUTED }),
+            (format!("{} waiting on you", g.reviews.len()), if g.reviews.is_empty() { MUTED } else { v.accent }),
+        ];
+        for (i, (t, col)) in parts.iter().enumerate() {
+            if i > 0 {
+                x += c.text(F::Medium, "·", 18.0, x + 4.0, CY + 27.0, FAINT, Align::Left) + 18.0;
+            }
+            x += c.text(F::Medium, t, 18.0, x, CY + 27.0, *col, Align::Left) + 10.0;
+        }
+        let note = match (&g.error, &g.gitlab_error) {
+            (Some(e), _) => Some(format!("GitHub stale: {e}")),
+            (None, Some(e)) if e.contains("not signed in") => Some("GitLab: sign in with  glab auth login".to_string()),
+            (None, Some(e)) => Some(format!("GitLab: {e}")),
+            _ => None,
+        };
+        if let Some(n) = note {
+            c.fit(F::Medium, &n, 15.0, (W - M - x - 30.0).max(60.0), W - M, CY + 27.0, AMBER, Align::Right);
+        }
+    }
+    let titles = ["YOUR PULL REQUESTS", "REVIEW REQUESTS"];
+    for (k, (panel, first, offset, n)) in pr_lists(g, v.tile).into_iter().enumerate() {
+        let prs = if k == 0 { &g.mine } else { &g.reviews };
+        let reviews = k == 1;
+        let (x, y, w, h) = panel;
+        c.rrect(panel, 14.0, PANEL_DEEP, 1.0);
+        c.text(F::Bold, titles[k], 12.0, x + 22.0, y + 26.0, FAINT, Align::Left);
+        let count = if n > PR_ROWS { format!("{}–{} of {n}", first + 1, (first + PR_ROWS).min(n)) } else { n.to_string() };
+        c.text(F::Bold, &count, 12.0, x + w - 22.0, y + 26.0, FAINT, Align::Right);
+        if n == 0 {
+            let msg = match (g.ok, reviews) {
+                (false, _) => "",
+                (true, true) => "Nothing waiting on you",
+                (true, false) => "No open pull requests",
+            };
+            c.text(F::Medium, msg, 20.0, x + w / 2.0, y + h / 2.0 + 10.0, FAINT, Align::Center);
+            continue;
+        }
+        for slot in 0..PR_ROWS {
+            let i = first + slot;
+            let Some(p) = prs.get(i) else { break };
+            let r = pr_rect(panel, slot);
+            let selected = v.level != &Level::Top && v.tile == offset + i;
+            if selected {
+                c.rrect(r, 10.0, 0x22222A, 1.0);
+                c.outline(r, 10.0, TEXT, 2.0);
+            } else if slot > 0 {
+                c.rect((r.0 + 14.0, r.1, r.2 - 28.0, 1.0), LINE, 0.7);
+            }
+            pr_line(c, v, p, r, reviews);
+        }
+    }
+}
+
+fn pr_line(c: &mut Canvas, v: &View, p: &github::Pr, r: R, reviews: bool) {
+    let (x, y, w, h) = r;
+    let mid = y + h / 2.0;
+    let (sym, col) = match p.ci.as_str() {
+        "SUCCESS" => ("checkmark.circle.fill", GREEN),
+        "FAILURE" | "ERROR" => ("xmark.circle.fill", RED),
+        "PENDING" | "EXPECTED" => ("clock.fill", AMBER),
+        _ => ("circle.dashed", FAINT),
+    };
+    c.symbol(sym, 18.0, x + 24.0, mid, col);
+    let tag_w = if reviews { 172.0 } else { 214.0 };
+    c.clip(F::Mono, &pr_ref(p), 14.0, tag_w - 12.0, x + 46.0, mid + 5.0, if p.gitlab { 0xE8A27C } else { MUTED });
+    // Right edge, right to left: age, then author (reviews) or review / merge badges.
+    let mut rx = x + w - 14.0;
+    rx -= c.text(F::Medium, &age(v.now_ms.saturating_sub(p.updated)), 15.0, rx, mid + 5.0, FAINT, Align::Right) + 14.0;
+    let mut badge = |c: &mut Canvas, label: &str, bg: u32, fg: u32| {
+        let bw = c.measure(F::Bold, label, 12.0) + 12.0 * 1.4;
+        c.pill(rx - bw, mid - 10.8, label, 12.0, bg, fg);
+        rx -= bw + 8.0;
+    };
+    if reviews {
+        if p.draft {
+            badge(c, "DRAFT", 0x2A2A31, MUTED);
+        }
+    } else {
+        match p.review.as_str() {
+            "APPROVED" => badge(c, "APPROVED", GREEN, 0xFFFFFF),
+            "CHANGES_REQUESTED" => badge(c, "CHANGES", 0x4A1A1A, 0xFFD0D0),
+            _ => {}
+        }
+        if p.mergeable == "CONFLICTING" {
+            badge(c, "CONFLICT", AMBER, 0x1C1500);
+        }
+        if p.draft {
+            badge(c, "DRAFT", 0x2A2A31, MUTED);
+        }
+    }
+    if reviews && !p.author.is_empty() {
+        rx -= c.fit(F::Medium, &format!("@{}", p.author), 15.0, 130.0, rx, mid + 5.0, TEXT_2, Align::Right) + 12.0;
+    }
+    let tx = x + 46.0 + tag_w;
+    c.clip(F::Medium, &p.title, 18.0, (rx - tx - 8.0).max(0.0), tx, mid + 6.0, if p.draft { MUTED } else { TEXT });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,6 +2263,18 @@ mod tests {
         assert_eq!(age(75 * 60_000), "1h15");
         assert_eq!(age_short(12_000), "12s");
         assert_eq!(mmss(86.4), "1:26");
+    }
+
+    #[test]
+    fn list_windows_keep_the_selection_visible() {
+        assert_eq!(list_window(5, 4, 7), 0);
+        assert_eq!(list_window(20, 0, 7), 0);
+        assert_eq!(list_window(20, 9, 7), 3);
+        assert_eq!(list_window(20, 19, 7), 13);
+        // OPS: tile 0 is WARP, hosts from 1; tiles past the hosts keep the last ones shown
+        assert_eq!(host_window(6, 0), (0, 4));
+        assert_eq!(host_window(6, 6), (2, 4));
+        assert_eq!(host_window(6, 9), (2, 4));
     }
 
     #[test]

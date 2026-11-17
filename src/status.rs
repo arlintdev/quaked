@@ -76,6 +76,9 @@ pub struct Session {
     pub steps: Vec<Step>,
     #[serde(default)]
     pub transcript: String,
+    /// Which Mac it runs on, for sessions synced from another one ("" = this Mac).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine: String,
 }
 
 impl Session {
@@ -358,6 +361,7 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
         step_count: 0,
         steps: Vec::new(),
         transcript: String::new(),
+        machine: String::new(),
     });
     s.cwd = cwd.clone();
     s.name = project_name(&cwd);

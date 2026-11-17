@@ -11,7 +11,7 @@
 use crate::audio::{self, Audio};
 use crate::config::{self, Action, Config, PageId};
 use crate::device::{self, Command, Input};
-use crate::{docker, league};
+use crate::{docker, github, league, ops, sync};
 use crate::keys;
 use crate::music::{self, MusicCmd, MusicEvent, Track};
 use crate::proto;
@@ -46,6 +46,12 @@ const FLASH: Duration = Duration::from_millis(180);
 const NEEDS_YOU_TONE: &[(u8, u64)] = &[(70, 70), (0, 60), (70, 70)];
 /// Rising triple chirp when a League queue pops.
 const MATCH_TONE: &[(u8, u64)] = &[(60, 90), (0, 50), (75, 90), (0, 50), (90, 220)];
+/// One short blip when something new shows up on another page.
+const NEW_STUFF_TONE: &[(u8, u64)] = &[(55, 60)];
+/// Ring blink half-period while something new is waiting to be seen.
+const BLINK: Duration = Duration::from_millis(420);
+/// Don't yank the board away if it was used this recently.
+const JUMP_QUIET: Duration = Duration::from_secs(15);
 const LOG_REFRESH: Duration = Duration::from_secs(3);
 const LUMINANCE_DIM: u8 = 24;
 const VOLUME_STEP: i32 = 4;
@@ -64,8 +70,18 @@ pub enum Event {
     Sounds,
     League(league::Event),
     Docker(docker::Status),
+    Ops(ops::Status),
+    Code(github::Status),
+    Sync(sync::Status),
     /// A control-socket request and where to send the reply.
     Ctl(String, Sender<Vec<u8>>),
+}
+
+/// Something new to look at: the ring blinks in its page's color until you touch the board.
+struct Attention {
+    page: PageId,
+    reason: String,
+    until: Instant,
 }
 
 struct Gfx {
@@ -91,6 +107,16 @@ struct App {
     docker: docker::Status,
     docker_fast: Arc<AtomicBool>,
     next_logs: Instant,
+    ops_cmd: Sender<ops::Cmd>,
+    ops: ops::Status,
+    ops_fast: Arc<AtomicBool>,
+    code_cmd: Sender<github::Cmd>,
+    code: github::Status,
+    code_fast: Arc<AtomicBool>,
+    sync_cmd: Sender<sync::Cmd>,
+    peers: sync::Status,
+    /// Poll the other Macs only while the Quake is attached here.
+    sync_want: Arc<AtomicBool>,
     // AI
     sessions: Vec<Session>,
     states: HashMap<String, State>,
@@ -115,6 +141,9 @@ struct App {
     undim_to: Option<u8>,
     cursor: (f64, f64),
     flash: Option<(Hit, Instant)>,
+    attention: Option<Attention>,
+    blink_on: bool,
+    next_blink: Instant,
     next_poll: Instant,
     next_display: Instant,
     drawn_second: u64,
@@ -254,6 +283,21 @@ impl App {
             league: &self.league,
             league_cfg: &self.cfg.league,
             docker: &self.docker,
+            ops: &self.ops,
+            code: &self.code,
+            settings: render::SettingsView {
+                screen: self.undim_to.unwrap_or(self.luminance),
+                ring: self.cfg.ring.brightness,
+                idle: self.cfg.idle_seconds,
+                ring_on: self.cfg.ring.enabled,
+                alert: self.cfg.ring.alert,
+                blink: self.cfg.alerts.blink,
+                jump: self.cfg.alerts.jump,
+                buzzer: self.cfg.buzzer,
+                mic: self.cfg.device.mic,
+                auto_accept: self.cfg.league.auto_accept,
+                snap: self.cfg.league.snap,
+            },
             level: &self.level,
             sessions: &self.sessions,
             sel: self.sel,
@@ -267,6 +311,7 @@ impl App {
             clock,
             connected: self.connected,
             flash: self.flash.filter(|(_, at)| at.elapsed() < FLASH).map(|(h, _)| h),
+            notice: self.attention.as_ref().map(|a| (a.reason.as_str(), config::hex(self.cfg.ring.color_for(a.page), 0xF2B705), a.page)),
             tick: second % 2 == 0,
         }
     }
@@ -324,9 +369,24 @@ impl App {
             }
             if cfg.device != self.cfg.device && self.connected {
                 let _ = self.commands.send(Command::Mic(cfg.device.mic));
+                if cfg.device.screen_brightness != self.cfg.device.screen_brightness {
+                    if let Some(b) = cfg.device.screen_brightness {
+                        self.undim_to = None;
+                        self.set_luminance(b.max(render::SCREEN_MIN));
+                    }
+                }
             }
             if cfg.docker != self.cfg.docker || force {
                 let _ = self.docker_cmd.send(docker::Cmd::Configure(cfg.docker.clone()));
+            }
+            if cfg.ops != self.cfg.ops || force {
+                let _ = self.ops_cmd.send(ops::Cmd::Configure(cfg.ops.clone()));
+            }
+            if cfg.code != self.cfg.code || force {
+                let _ = self.code_cmd.send(github::Cmd::Configure(cfg.code.clone()));
+            }
+            if cfg.sync != self.cfg.sync || force {
+                let _ = self.sync_cmd.send(sync::Cmd::Configure(cfg.sync.clone()));
             }
             self.cfg = cfg;
             device::set_touch_flip(self.cfg.touch.flip_x, self.cfg.touch.flip_y);
@@ -356,6 +416,10 @@ impl App {
         } else if self.league.phase == "ReadyCheck" {
             let (hue, sat) = config::hue_sat(config::hex(&r.league, 0xC89B3C));
             Command::Ring { effect: proto::EFFECT_BREATHING, hue, sat, brightness: r.brightness.max(180), speed: 220 }
+        } else if let Some(a) = self.attention.as_ref().filter(|_| self.cfg.alerts.blink) {
+            let (hue, sat) = config::hue_sat(config::hex(r.color_for(a.page), 0xF2B705));
+            let brightness = if self.blink_on { r.brightness.max(160) } else { 0 };
+            Command::Ring { effect: proto::EFFECT_SOLID, hue, sat, brightness, speed: 128 }
         } else if r.alert && self.sessions.iter().any(|s| s.state == State::Waiting) {
             let (hue, sat) = config::hue_sat(config::hex(&r.alert_color, 0xF2B705));
             Command::Ring { effect: proto::EFFECT_BREATHING, hue, sat, brightness: r.brightness, speed: 170 }
@@ -372,13 +436,26 @@ impl App {
     // ------------------------------------------------------------ data
 
     fn poll_status(&mut self) {
-        let sessions = status::load(status::now_ms());
+        let mut sessions = status::load(status::now_ms());
+        // Sessions on the other Macs, tagged with where they run.
+        for p in &self.peers.peers {
+            sessions.extend(p.sessions.iter().cloned().map(|mut s| {
+                s.machine = p.name.clone();
+                s
+            }));
+        }
+        sessions.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)));
         let states: HashMap<String, State> = sessions.iter().map(|s| (s.id.clone(), s.state)).collect();
         let chirp = self.loaded_once
             && states.iter().any(|(id, st)| *st == State::Waiting && self.states.get(id) != Some(&State::Waiting));
         if chirp && self.cfg.buzzer {
             let _ = self.commands.send(Command::Tone(NEEDS_YOU_TONE.to_vec()));
         }
+        let newly_waiting = if self.loaded_once {
+            sessions.iter().position(|s| s.state == State::Waiting && self.states.get(&s.id) != Some(&State::Waiting))
+        } else {
+            None
+        };
         if sessions != self.sessions {
             let selected = self.sessions.get(self.sel).map(|s| s.id.clone());
             self.sessions = sessions;
@@ -397,7 +474,63 @@ impl App {
         }
         self.states = states;
         self.loaded_once = true;
+        if let Some(i) = newly_waiting {
+            if let Some(name) = self.sessions.get(i).map(|s| s.name.clone()) {
+                if self.alert(PageId::Ai, format!("{name} needs you"), false) {
+                    self.sel = i;
+                }
+            }
+        }
         self.update_ring();
+    }
+
+    // ------------------------------------------------------------ new stuff
+
+    /// Flags something new on `page`: blink the ring, show why, and jump there unless
+    /// the board is in use. Returns whether it jumped.
+    fn alert(&mut self, page: PageId, reason: String, chirp: bool) -> bool {
+        let a = self.cfg.alerts.clone();
+        let wanted = match page {
+            PageId::Ai => a.ai,
+            PageId::Code => a.code,
+            PageId::Ops => a.ops,
+            PageId::Docker => a.docker,
+            _ => true,
+        };
+        if !wanted || !self.cfg.pages.contains(&page) {
+            return false;
+        }
+        device::log(format!("new: {reason}"));
+        let jump = a.jump && self.page != page && self.last_input.elapsed() > JUMP_QUIET;
+        if jump {
+            self.set_page(page);
+        }
+        self.attention = Some(Attention { page, reason, until: Instant::now() + Duration::from_secs(a.seconds.max(10)) });
+        self.blink_on = true;
+        self.next_blink = Instant::now() + BLINK;
+        if chirp && self.cfg.buzzer {
+            let _ = self.commands.send(Command::Tone(NEW_STUFF_TONE.to_vec()));
+        }
+        self.update_ring();
+        self.redraw();
+        jump
+    }
+
+    /// One line for several new things: the first, plus how many more.
+    fn summarize(mut news: Vec<String>) -> Option<String> {
+        let n = news.len();
+        match n {
+            0 => None,
+            1 => news.pop(),
+            _ => Some(format!("{}  (+{} more)", news[0], n - 1)),
+        }
+    }
+
+    fn clear_attention(&mut self) {
+        if self.attention.take().is_some() {
+            self.update_ring();
+            self.redraw();
+        }
     }
 
     // ------------------------------------------------------------ navigation
@@ -409,6 +542,11 @@ impl App {
         self.tile = 0;
         self.music_fast.store(p == PageId::Music, Ordering::Relaxed);
         self.docker_fast.store(p == PageId::Docker, Ordering::Relaxed);
+        self.ops_fast.store(p == PageId::Ops, Ordering::Relaxed);
+        self.code_fast.store(p == PageId::Code, Ordering::Relaxed);
+        if p == PageId::Code {
+            let _ = self.code_cmd.send(github::Cmd::Refresh);
+        }
         self.update_ring();
     }
 
@@ -453,6 +591,101 @@ impl App {
         }
     }
 
+    /// OPS: tile 0 toggles WARP, hosts open an SSH session, sites open in the browser.
+    fn ops_activate(&mut self, tile: usize) {
+        if tile == 0 {
+            return self.toggle_warp();
+        }
+        if let Some(h) = self.ops.hosts.get(tile - 1) {
+            device::log(format!("ops: ssh {}", h.name));
+            open_target(&format!("ssh://{}", h.name));
+        } else if let Some(s) = self.ops.sites.get(tile - 1 - self.ops.hosts.len()) {
+            open_target(&s.url);
+        }
+    }
+
+    fn toggle_warp(&mut self) {
+        let Some(on) = self.ops.net.warp else { return };
+        // Show the new state right away; the poller confirms it a few seconds later.
+        self.ops.net.warp = Some(!on);
+        let _ = self.ops_cmd.send(ops::Cmd::SetWarp(!on));
+        device::log(format!("ops: warp {}", if on { "off" } else { "on" }));
+    }
+
+    fn open_pr(&mut self, i: usize) {
+        if let Some(p) = self.code.all().get(i) {
+            open_target(&p.url);
+        }
+    }
+
+    // ------------------------------------------------------------ settings page
+
+    /// Knob turn while adjusting a slider (screen, ring, idle timeout).
+    fn adjust_setting(&mut self, i: usize, d: i32) {
+        match i {
+            0 => {
+                let cur = self.undim_to.unwrap_or(self.luminance) as i32;
+                self.set_screen((cur + d * 8).clamp(render::SCREEN_MIN as i32, 255) as u8);
+            }
+            1 => self.set_ring_brightness((self.cfg.ring.brightness as i32 + d * 8).clamp(0, 255) as u8),
+            2 => {
+                let k = (render::idle_index(self.cfg.idle_seconds) as i32 + d).clamp(0, render::IDLE_STEPS.len() as i32 - 1);
+                self.cfg.idle_seconds = render::IDLE_STEPS[k as usize];
+                self.save_config();
+            }
+            _ => {}
+        }
+    }
+
+    /// Touch on a slider's bar, 0.0-1.0.
+    fn set_setting_frac(&mut self, i: usize, f: f32) {
+        match i {
+            0 => self.set_screen((render::SCREEN_MIN as f32 + f * (255 - render::SCREEN_MIN) as f32).round() as u8),
+            1 => self.set_ring_brightness((f * 255.0).round() as u8),
+            2 => {
+                self.cfg.idle_seconds = render::IDLE_STEPS[(f * (render::IDLE_STEPS.len() - 1) as f32).round() as usize];
+                self.save_config();
+            }
+            _ => {}
+        }
+    }
+
+    fn set_screen(&mut self, v: u8) {
+        self.undim_to = None;
+        self.set_luminance(v);
+        self.cfg.device.screen_brightness = Some(v);
+        self.save_config();
+    }
+
+    fn set_ring_brightness(&mut self, v: u8) {
+        self.cfg.ring.brightness = v;
+        self.update_ring();
+        self.save_config();
+    }
+
+    fn toggle_setting(&mut self, i: usize) {
+        match i {
+            3 => self.cfg.ring.enabled = !self.cfg.ring.enabled,
+            4 => self.cfg.ring.alert = !self.cfg.ring.alert,
+            5 => self.cfg.alerts.blink = !self.cfg.alerts.blink,
+            6 => self.cfg.alerts.jump = !self.cfg.alerts.jump,
+            7 => self.cfg.buzzer = !self.cfg.buzzer,
+            8 => {
+                self.cfg.device.mic = !self.cfg.device.mic;
+                let _ = self.commands.send(Command::Mic(self.cfg.device.mic));
+            }
+            9 => return self.toggle_auto_accept(),
+            10 => {
+                self.cfg.league.snap = !self.cfg.league.snap;
+                let _ = self.league_cmd.send(league::Cmd::Configure(self.cfg.league.clone()));
+            }
+            _ => return,
+        }
+        device::log(format!("settings: {} toggled", render::setting_name(i)));
+        self.update_ring();
+        self.save_config();
+    }
+
     fn set_luminance(&mut self, v: u8) {
         self.luminance = v;
         let _ = self.commands.send(Command::Luminance(v));
@@ -471,6 +704,9 @@ impl App {
             PageId::Shortcuts => self.cfg.shortcuts.len().min(render::SC_COLS * render::SC_ROWS),
             PageId::Soundboard => self.sounds.clips.len(),
             PageId::Docker => self.docker.containers.len(),
+            PageId::Ops => 1 + self.ops.hosts.len() + self.ops.sites.len(),
+            PageId::Code => self.code.mine.len() + self.code.reviews.len(),
+            PageId::Settings => render::SETTING_COUNT,
             _ => 0,
         }
     }
@@ -504,7 +740,8 @@ impl App {
                 // Logs: newest at the bottom; turning left goes back in time.
                 self.scroll = (self.scroll as i32 - d).max(0) as usize;
             }
-            (PageId::Shortcuts | PageId::Soundboard | PageId::Docker, _) => {
+            (PageId::Settings, Level::Detail(_)) => self.adjust_setting(self.tile, d),
+            (PageId::Shortcuts | PageId::Soundboard | PageId::Docker | PageId::Ops | PageId::Code | PageId::Settings, _) => {
                 let n = self.tile_count() as i32;
                 if n > 0 {
                     self.tile = (self.tile as i32 + d).clamp(0, n - 1) as usize;
@@ -536,7 +773,12 @@ impl App {
                         self.scroll = 0;
                     }
                 }
-                (PageId::Ai, Level::Detail(_)) => open_target("claude://"),
+                (PageId::Ai, Level::Detail(_)) => {
+                    // A session on another Mac can't be opened from here.
+                    if self.detail_session().is_some_and(|s| s.machine.is_empty()) {
+                        open_target("claude://");
+                    }
+                }
                 (PageId::League, Level::Top) => self.level = Level::Focus,
                 (PageId::League, _) => self.league_primary(),
                 (PageId::Docker, Level::Focus) => self.open_container(self.tile),
@@ -550,6 +792,16 @@ impl App {
                 (PageId::Music, _) => self.play_pause(),
                 (PageId::Shortcuts, _) => self.run_shortcut(self.tile),
                 (PageId::Soundboard, _) => self.toggle_clip(self.tile),
+                (PageId::Ops, _) => self.ops_activate(self.tile),
+                (PageId::Code, _) => self.open_pr(self.tile),
+                (PageId::Settings, Level::Detail(_)) => self.level = Level::Focus,
+                (PageId::Settings, _) => {
+                    if self.tile < render::SETTING_SLIDERS {
+                        self.level = Level::Detail("adjust".into());
+                    } else {
+                        self.toggle_setting(self.tile);
+                    }
+                }
             },
             KNOB_DOUBLE => self.back(),
             KNOB_HOLD => {
@@ -653,7 +905,11 @@ impl App {
                 self.level = Level::Top;
                 self.scroll = 0;
             }
-            Hit::OpenClaude => open_target("claude://"),
+            Hit::OpenClaude => {
+                if self.detail_session().is_some_and(|s| s.machine.is_empty()) {
+                    open_target("claude://");
+                }
+            }
             Hit::Prev => {
                 let _ = self.music_cmd.send(MusicCmd::Previous);
             }
@@ -703,26 +959,60 @@ impl App {
                 self.level = Level::Top;
                 self.scroll = 0;
             }
+            Hit::Warp => {
+                self.tile = 0;
+                self.toggle_warp();
+            }
+            Hit::Host(i) => {
+                self.tile = 1 + i;
+                self.ops_activate(self.tile);
+            }
+            Hit::Site(i) => {
+                self.tile = 1 + self.ops.hosts.len() + i;
+                self.ops_activate(self.tile);
+            }
+            Hit::Pr(i) => {
+                self.tile = i;
+                self.open_pr(i);
+            }
+            Hit::Setting(i, frac) => {
+                self.tile = i;
+                if i < render::SETTING_SLIDERS {
+                    // Bar: set it there. Elsewhere on the card: the knob now adjusts it.
+                    match frac {
+                        Some(f) => self.set_setting_frac(i, f),
+                        None => self.level = Level::Detail("adjust".into()),
+                    }
+                } else {
+                    self.toggle_setting(i);
+                }
+            }
         }
     }
 
     fn on_device(&mut self, input: Input) {
         if matches!(input, Input::Tap { .. } | Input::KnobTurn(_) | Input::KnobPress(_)) {
             self.last_input = Instant::now();
+            self.clear_attention();
         }
         match input {
             Input::Connected { luminance, firmware } => {
                 device::log(format!("device: Quake firmware {}", firmware.as_deref().unwrap_or("?")));
                 self.connected = true;
+                self.sync_want.store(true, Ordering::Relaxed);
                 self.ring_sent = None;
                 let _ = self.commands.send(Command::Mic(self.cfg.device.mic));
-                if let Some(l) = luminance {
+                if let Some(b) = self.cfg.device.screen_brightness {
+                    self.luminance = b.max(render::SCREEN_MIN);
+                    let _ = self.commands.send(Command::Luminance(self.luminance));
+                } else if let Some(l) = luminance {
                     self.luminance = l;
                 }
                 self.update_ring();
             }
             Input::Disconnected => {
                 self.connected = false;
+                self.sync_want.store(false, Ordering::Relaxed);
                 self.ring_sent = None;
             }
             Input::Tap { x, y } => self.tap(x, y),
@@ -769,6 +1059,29 @@ impl App {
             "track": self.track.as_ref().map(|t| serde_json::json!({"title": t.title, "artist": t.artist, "playing": t.playing})),
             "league": {"running": self.league.running, "phase": self.league.phase, "autoAccept": self.cfg.league.auto_accept},
             "docker": {"ok": self.docker.ok, "engine": self.docker.engine, "running": self.docker.containers.iter().filter(|c| c.state == "running").count(), "containers": self.docker.containers.len()},
+            "ops": {
+                "warp": self.ops.net.warp,
+                "appgate": self.ops.net.appgate,
+                "colo": self.ops.net.colo,
+                "hosts": self.ops.hosts.iter().map(|h| serde_json::json!({"name": h.name, "up": h.up, "ms": h.latency_ms, "load": h.load, "reason": h.reason, "statsError": h.stats_error})).collect::<Vec<_>>(),
+                "sites": self.ops.sites.iter().map(|s| serde_json::json!({"url": s.url, "code": s.code, "ms": s.ms, "tlsDays": s.tls_days, "error": s.error})).collect::<Vec<_>>(),
+            },
+            "sync": {
+                "enabled": self.cfg.sync.enabled,
+                "name": self.peers.name,
+                "port": self.peers.port,
+                "peers": self.peers.peers.iter().map(|p| serde_json::json!({"name": p.name, "host": p.host, "ok": p.ok, "error": p.error, "sessions": p.sessions.len()})).collect::<Vec<_>>(),
+            },
+            "code": {
+                "ok": self.code.ok,
+                "gitlabOk": self.code.gitlab_ok,
+                "gitlabError": self.code.gitlab_error,
+                "login": self.code.login,
+                "open": self.code.mine.len(),
+                "failing": self.code.mine.iter().filter(|p| matches!(p.ci.as_str(), "FAILURE" | "ERROR")).count(),
+                "reviewRequests": self.code.reviews.len(),
+                "error": self.code.error,
+            },
             "soundboard": {
                 "routing": self.sounds.live,
                 "listener": self.sounds.listener,
@@ -803,6 +1116,24 @@ impl App {
         match parts.as_slice() {
             ["status"] => (self.status_json() + "\n").into_bytes(),
             ["frame"] => self.render(render::W as u32, render::H as u32).pixmap.encode_png().unwrap_or_default(),
+            // Renders another page at its top level without switching the board to it.
+            ["frame", p] => match serde_json::from_value::<PageId>(serde_json::Value::String(p.to_string())) {
+                Ok(page) => {
+                    let (clock, second) = clock();
+                    let mut canvas = Canvas::new(render::W as u32, render::H as u32, &self.fonts, &self.symbols);
+                    let mut view = self.view(&clock, status::now_ms(), second);
+                    let top = Level::Top;
+                    if page != self.page {
+                        view.page = page;
+                        view.level = &top;
+                        view.tile = 0;
+                        view.accent = config::hex(self.cfg.ring.color_for(page), 0xD97757);
+                    }
+                    render::draw(&mut canvas, &view);
+                    canvas.pixmap.encode_png().unwrap_or_default()
+                }
+                Err(_) => format!("error: no page {p}\n").into_bytes(),
+            },
             ["reload"] => {
                 self.reload_config(true);
                 ok
@@ -822,6 +1153,15 @@ impl App {
                     ok
                 }
                 _ => b"error: no such shortcut\n".to_vec(),
+            },
+            // Try the "new stuff" alert: quaked ctl alert code "review requested"
+            ["alert", p, ..] => match serde_json::from_value::<PageId>(serde_json::Value::String(p.to_string())) {
+                Ok(page) => {
+                    let why = if parts.len() > 2 { parts[2..].join(" ") } else { "test alert".into() };
+                    self.alert(page, why, true);
+                    ok
+                }
+                Err(_) => format!("error: no page {p}\n").into_bytes(),
             },
             ["play", ..] => {
                 let _ = self.audio.cmd.send(audio::Cmd::PlayTitle(parts[1..].join(" ")));
@@ -870,7 +1210,11 @@ impl ApplicationHandler<Event> for App {
                 self.redraw();
             }
             Event::Docker(st) => {
+                let news = if self.docker.ok && st.ok { docker_news(&self.docker, &st) } else { Vec::new() };
                 self.docker = st;
+                if let Some(r) = Self::summarize(news) {
+                    self.alert(PageId::Docker, r, true);
+                }
                 if let Level::Detail(id) = &self.level {
                     if self.page == PageId::Docker && !self.docker.containers.iter().any(|c| &c.id == id) {
                         self.level = Level::Focus;
@@ -880,6 +1224,33 @@ impl ApplicationHandler<Event> for App {
                 if self.page == PageId::Docker {
                     self.redraw();
                 }
+            }
+            Event::Ops(st) => {
+                let news = ops_news(&self.ops, &st);
+                self.ops = st;
+                if let Some(r) = Self::summarize(news) {
+                    self.alert(PageId::Ops, r, true);
+                }
+                self.tile = self.tile.min(self.tile_count().saturating_sub(1));
+                if self.page == PageId::Ops {
+                    self.redraw();
+                }
+            }
+            Event::Code(st) => {
+                let news = code_news(&self.code, &st);
+                self.code = st;
+                if let Some(r) = Self::summarize(news) {
+                    self.alert(PageId::Code, r, true);
+                }
+                self.tile = self.tile.min(self.tile_count().saturating_sub(1));
+                if self.page == PageId::Code {
+                    self.redraw();
+                }
+            }
+            Event::Sync(st) => {
+                self.peers = st;
+                self.poll_status();
+                self.redraw();
             }
             Event::Ctl(line, reply) => {
                 let out = self.on_ctl(&line);
@@ -934,6 +1305,18 @@ impl ApplicationHandler<Event> for App {
         if self.page == PageId::Docker && matches!(self.level, Level::Detail(_)) {
             wake = wake.min(self.next_logs);
         }
+        if let Some(a) = &self.attention {
+            if now >= a.until {
+                self.clear_attention();
+            } else if self.cfg.alerts.blink && self.cfg.ring.enabled {
+                if now >= self.next_blink {
+                    self.blink_on = !self.blink_on;
+                    self.next_blink = now + BLINK;
+                    self.update_ring();
+                }
+                wake = wake.min(self.next_blink);
+            }
+        }
         if let Some((_, at)) = self.flash {
             if at.elapsed() >= FLASH {
                 self.flash = None;
@@ -944,6 +1327,75 @@ impl ApplicationHandler<Event> for App {
         }
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
+}
+
+// ---------------------------------------------------------------- what's new
+
+fn pr_label(p: &github::Pr) -> String {
+    let repo = p.repo.rsplit('/').next().unwrap_or(&p.repo);
+    format!("{repo} {}{}", if p.gitlab { '!' } else { '#' }, p.number)
+}
+
+/// New review requests, and your PRs turning red, getting a review, or conflicting.
+/// A source only counts once it had answered before, so signing in isn't news.
+fn code_news(old: &github::Status, new: &github::Status) -> Vec<String> {
+    let comparable = |p: &github::Pr| if p.gitlab { old.gitlab_ok } else { old.ok };
+    let mut news = Vec::new();
+    for p in new.reviews.iter().filter(|p| comparable(p)) {
+        if !old.reviews.iter().any(|o| o.url == p.url) {
+            news.push(format!("review requested  ·  {}  {}", pr_label(p), p.title));
+        }
+    }
+    for p in new.mine.iter().filter(|p| comparable(p)) {
+        let Some(o) = old.mine.iter().find(|o| o.url == p.url) else { continue };
+        let red = |ci: &str| matches!(ci, "FAILURE" | "ERROR");
+        if red(&p.ci) && !red(&o.ci) {
+            news.push(format!("CI failed  ·  {}", pr_label(p)));
+        }
+        if p.review != o.review {
+            match p.review.as_str() {
+                "APPROVED" => news.push(format!("approved  ·  {}", pr_label(p))),
+                "CHANGES_REQUESTED" => news.push(format!("changes requested  ·  {}", pr_label(p))),
+                _ => {}
+            }
+        }
+        if p.mergeable == "CONFLICTING" && o.mergeable != "CONFLICTING" {
+            news.push(format!("merge conflict  ·  {}", pr_label(p)));
+        }
+    }
+    news
+}
+
+/// Hosts going down and sites starting to fail (not while this Mac is offline).
+fn ops_news(old: &ops::Status, new: &ops::Status) -> Vec<String> {
+    if new.net.ip.is_empty() || old.net.ip.is_empty() {
+        return Vec::new();
+    }
+    let mut news = Vec::new();
+    for h in &new.hosts {
+        if !h.up && old.hosts.iter().any(|o| o.name == h.name && o.up) {
+            news.push(format!("{} is down", h.name));
+        }
+    }
+    let ok = |s: &ops::Site| s.code.is_some_and(|c| c < 400);
+    for s in &new.sites {
+        if !ok(s) && old.sites.iter().any(|o| o.url == s.url && ok(o)) {
+            let why = s.code.map(|c| c.to_string()).or(s.error.clone()).unwrap_or_default();
+            news.push(format!("{} is failing  ·  {why}", s.url.trim_start_matches("https://").trim_start_matches("http://")));
+        }
+    }
+    news
+}
+
+/// Running containers that stopped or started restarting.
+fn docker_news(old: &docker::Status, new: &docker::Status) -> Vec<String> {
+    new.containers
+        .iter()
+        .filter_map(|c| {
+            let o = old.containers.iter().find(|o| o.id == c.id)?;
+            (o.state == "running" && c.state != "running" && c.state != "paused").then(|| format!("{} {}", c.name, if c.state == "restarting" { "is restarting" } else { "stopped" }))
+        })
+        .collect()
 }
 
 pub fn ctl_socket_path() -> std::path::PathBuf {
@@ -992,7 +1444,14 @@ fn ctl_thread(proxy: winit::event_loop::EventLoopProxy<Event>, audio: Sender<aud
 }
 
 pub fn run() {
-    let cfg = config::load();
+    let mut cfg = config::load();
+    if cfg.sync.key.is_empty() {
+        // First run: make the pairing key the other Mac will need.
+        cfg.sync.key = sync::new_key();
+        if config::save(&cfg) {
+            device::log("sync: created a pairing key");
+        }
+    }
     device::set_touch_flip(cfg.touch.flip_x, cfg.touch.flip_y);
     let event_loop = EventLoop::<Event>::with_user_event()
         .with_activation_policy(ActivationPolicy::Accessory)
@@ -1021,6 +1480,21 @@ pub fn run() {
     let docker_cmd = docker::spawn(cfg.docker.clone(), docker_fast.clone(), move |st| {
         let _ = p6.send_event(Event::Docker(st));
     });
+    let ops_fast = Arc::new(AtomicBool::new(false));
+    let p7 = proxy.clone();
+    let ops_cmd = ops::spawn(cfg.ops.clone(), ops_fast.clone(), move |st| {
+        let _ = p7.send_event(Event::Ops(st));
+    });
+    let code_fast = Arc::new(AtomicBool::new(false));
+    let p8 = proxy.clone();
+    let code_cmd = github::spawn(cfg.code.clone(), code_fast.clone(), move |st| {
+        let _ = p8.send_event(Event::Code(st));
+    });
+    let sync_want = Arc::new(AtomicBool::new(false));
+    let p9 = proxy.clone();
+    let sync_cmd = sync::spawn(cfg.sync.clone(), sync_want.clone(), move |st| {
+        let _ = p9.send_event(Event::Sync(st));
+    });
     let p4 = proxy.clone();
     let audio_cmd = audio.cmd.clone();
     std::thread::Builder::new().name("ctl".into()).spawn(move || ctl_thread(p4, audio_cmd)).unwrap();
@@ -1042,6 +1516,15 @@ pub fn run() {
         docker: docker::Status::default(),
         docker_fast,
         next_logs: Instant::now(),
+        ops_cmd,
+        ops: ops::Status::default(),
+        ops_fast,
+        code_cmd,
+        code: github::Status::default(),
+        code_fast,
+        sync_cmd,
+        peers: sync::Status::default(),
+        sync_want,
         sessions: Vec::new(),
         states: HashMap::new(),
         loaded_once: false,
@@ -1062,9 +1545,50 @@ pub fn run() {
         undim_to: None,
         cursor: (0.0, 0.0),
         flash: None,
+        attention: None,
+        blink_on: false,
+        next_blink: Instant::now(),
         next_poll: Instant::now(),
         next_display: Instant::now() + DISPLAY_POLL,
         drawn_second: 0,
     };
     event_loop.run_app(&mut app).expect("event loop run");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pr(url: &str, ci: &str, review: &str) -> github::Pr {
+        github::Pr { repo: "o/r".into(), number: 1, url: url.into(), ci: ci.into(), review: review.into(), mergeable: "MERGEABLE".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn code_news_spots_new_reviews_and_red_ci() {
+        let old = github::Status { ok: true, mine: vec![pr("a", "PENDING", "")], reviews: vec![], ..Default::default() };
+        let new = github::Status { ok: true, mine: vec![pr("a", "FAILURE", "APPROVED")], reviews: vec![pr("b", "", "")], ..Default::default() };
+        let news = code_news(&old, &new);
+        assert_eq!(news.len(), 3, "{news:?}");
+        // The first answer after startup (or after signing in) is not news.
+        assert!(code_news(&github::Status::default(), &new).is_empty());
+        let gl = github::Pr { gitlab: true, ..pr("c", "", "") };
+        let signed_in = github::Status { gitlab_ok: true, reviews: vec![gl], ..new.clone() };
+        assert_eq!(code_news(&new, &signed_in).len(), 0);
+    }
+
+    #[test]
+    fn ops_and_docker_news() {
+        let host = |up| ops::Host { name: "workbench".into(), up, ..Default::default() };
+        let net = ops::Network { ip: "1.2.3.4".into(), ..Default::default() };
+        let old = ops::Status { net: net.clone(), hosts: vec![host(true)], sites: vec![ops::Site { url: "https://x.dev".into(), code: Some(200), ..Default::default() }] };
+        let new = ops::Status { net, hosts: vec![host(false)], sites: vec![ops::Site { url: "https://x.dev".into(), code: Some(502), ..Default::default() }] };
+        assert_eq!(ops_news(&old, &new), vec!["workbench is down".to_string(), "x.dev is failing  ·  502".to_string()]);
+        let offline = ops::Status { net: ops::Network::default(), ..new.clone() };
+        assert!(ops_news(&old, &offline).is_empty());
+
+        let ct = |state: &str| docker::Container { id: "1".into(), name: "db".into(), state: state.into(), ..Default::default() };
+        let d = |state| docker::Status { ok: true, containers: vec![ct(state)], ..Default::default() };
+        assert_eq!(docker_news(&d("running"), &d("exited")), vec!["db stopped".to_string()]);
+        assert!(docker_news(&d("exited"), &d("running")).is_empty());
+    }
 }
