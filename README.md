@@ -135,6 +135,16 @@ what matters): your game, a meeting about to start or just started, a Claude ses
 waiting on you, a meeting in the next 15 minutes, a running deploy, a focus block, and
 otherwise the dashboard.
 
+## Install
+
+**From a release** (Apple Silicon, macOS 13+): download `quaked-<version>-macos-arm64.zip`
+from [Releases](https://github.com/arlintdev/quaked/releases), unzip it, and run
+`./install.sh` in that folder. The apps are signed but not notarized, so the installer
+clears the download quarantine on them.
+
+**From source**: `./install.sh` in a clone (needs Rust). `scripts/package.sh` builds a
+release zip into `dist/` the same way.
+
 ## Claude's questions and permissions on the Quake
 
 When Claude asks you to choose (merge or hold, which approach...) or needs permission
@@ -269,6 +279,7 @@ DK-Suite must not run at the same time: both want the same display and HID devic
 
 ```
 ./install.sh                 build, bundle, sign, add Claude Code hooks, (re)start the LaunchAgent
+scripts/package.sh           build the Apple Silicon release zip into dist/
 quaked settings              open the settings page (http://127.0.0.1:47380)
 quaked hooks                 add the Claude Code hooks to ~/.claude/settings.json
 quaked ctl turn 1|-1         drive the running board like the knob

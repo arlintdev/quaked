@@ -2,3 +2,4 @@ target/
 *.png
 .DS_Store
 .claude/worktrees/
+dist/
