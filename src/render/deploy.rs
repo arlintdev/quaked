@@ -748,6 +748,7 @@ mod tests {
         let (sounds, league, docker, ops, code, digin) = Default::default();
         let history = History::default();
         let (call, focus, paste, windows, calendar, health, night, viz) = Default::default();
+        let stocks = crate::stocks::Status::default();
         for (name, st, level, tile) in shots {
             let mut c = Canvas::new(1920, 480, &fonts, &symbols);
             let v = View {
@@ -774,6 +775,7 @@ mod tests {
                 windows: &windows,
                 calendar: &calendar,
                 health: &health,
+                stocks: &stocks,
                 night: &night,
                 viz: &viz,
                 level: &level,

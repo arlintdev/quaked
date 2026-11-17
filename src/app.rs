@@ -17,6 +17,7 @@ mod relevance;
 use relevance::Urgency;
 mod focus;
 mod health;
+mod stocks;
 mod night;
 mod paste;
 mod viz;
@@ -113,6 +114,7 @@ pub enum FeatureEvent {
     Windows(crate::windows::Update),
     Calendar(crate::calendar::Update),
     Health(crate::health::Update),
+    Stocks(crate::stocks::Update),
     Night(crate::night::Update),
     Viz(crate::viz::Update),
 }
@@ -219,6 +221,8 @@ struct App {
     calendar_cmd: Sender<crate::calendar::Cmd>,
     health: crate::health::Status,
     health_cmd: Sender<crate::health::Cmd>,
+    stocks: crate::stocks::Status,
+    stocks_cmd: Sender<crate::stocks::Cmd>,
     night: crate::night::Status,
     night_cmd: Sender<crate::night::Cmd>,
     viz: crate::viz::Status,
@@ -442,6 +446,7 @@ impl App {
             windows: &self.windows,
             calendar: &self.calendar,
             health: &self.health,
+            stocks: &self.stocks,
             night: &self.night,
             viz: &self.viz,
             level: &self.level,
@@ -577,6 +582,9 @@ impl App {
             }
             if cfg.health != self.cfg.health || force {
                 let _ = self.health_cmd.send(crate::health::Cmd::Configure(cfg.health.clone()));
+            }
+            if cfg.stocks != self.cfg.stocks || force {
+                let _ = self.stocks_cmd.send(crate::stocks::Cmd::Configure(cfg.stocks.clone()));
             }
             if cfg.night != self.cfg.night || force {
                 let _ = self.night_cmd.send(crate::night::Cmd::Configure(cfg.night.clone()));
@@ -782,6 +790,7 @@ impl App {
             FeatureEvent::Windows(u) => self.on_windows(u),
             FeatureEvent::Calendar(u) => self.on_calendar(u),
             FeatureEvent::Health(u) => self.on_health(u),
+            FeatureEvent::Stocks(u) => self.on_stocks(u),
             FeatureEvent::Night(u) => self.on_night(u),
             FeatureEvent::Viz(u) => self.on_viz(u),
         }
@@ -825,6 +834,7 @@ impl App {
             PageId::Windows => self.windows_tap(i),
             PageId::Calendar => self.calendar_tap(i),
             PageId::Health => self.health_tap(i),
+            PageId::Stocks => self.stocks_tap(i),
             _ => {}
         }
     }
@@ -838,6 +848,7 @@ impl App {
             "windows": self.windows_json(),
             "calendar": self.calendar_json(),
             "health": self.health_json(),
+            "stocks": self.stocks_json(),
             "night": self.night_json(),
             "viz": self.viz_json(),
         })
@@ -1208,6 +1219,7 @@ impl App {
         self.windows_page_shown(p == PageId::Windows);
         self.calendar_page_shown(p == PageId::Calendar);
         self.health_page_shown(p == PageId::Health);
+        self.stocks_page_shown(p == PageId::Stocks);
         if p == PageId::Code {
             let _ = self.code_cmd.send(github::Cmd::Refresh);
         }
@@ -1440,6 +1452,7 @@ impl App {
             PageId::Paste => self.paste.items.len(),
             PageId::Windows => self.windows.apps.len(),
             PageId::Health => self.health.macs.len(),
+            PageId::Stocks => self.stocks.quotes.len(),
             _ => 0,
         }
     }
@@ -1499,6 +1512,7 @@ impl App {
             (PageId::Windows, _) => self.windows_turn(d),
             (PageId::Calendar, _) => self.calendar_turn(d),
             (PageId::Health, _) => self.health_turn(d),
+            (PageId::Stocks, _) => self.stocks_turn(d),
         }
     }
 
@@ -1578,6 +1592,7 @@ impl App {
                 (PageId::Windows, _) => self.windows_press(),
                 (PageId::Calendar, _) => self.calendar_press(),
                 (PageId::Health, _) => self.health_press(),
+                (PageId::Stocks, _) => self.stocks_press(),
                 (PageId::Settings, Level::Detail(_)) => self.level = Level::Focus,
                 (PageId::Settings, _) => {
                     if self.tile < render::SETTING_SLIDERS {
@@ -2499,6 +2514,10 @@ pub fn run() {
         let _ = pf.send_event(Event::Feature(FeatureEvent::Health(u)));
     });
     let pf = proxy.clone();
+    let stocks_cmd = crate::stocks::spawn(cfg.stocks.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Stocks(u)));
+    });
+    let pf = proxy.clone();
     let night_cmd = crate::night::spawn(cfg.night.clone(), move |u| {
         let _ = pf.send_event(Event::Feature(FeatureEvent::Night(u)));
     });
@@ -2595,6 +2614,8 @@ pub fn run() {
         calendar_cmd,
         health: crate::health::Status::default(),
         health_cmd,
+        stocks: crate::stocks::Status::default(),
+        stocks_cmd,
         night: crate::night::Status::default(),
         night_cmd,
         viz: crate::viz::Status::default(),

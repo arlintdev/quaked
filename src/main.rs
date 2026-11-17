@@ -38,6 +38,7 @@ mod proto;
 mod render;
 mod secret;
 mod status;
+mod stocks;
 mod symbols;
 mod sync;
 mod viz;
@@ -432,7 +433,8 @@ fn preview(dir: &str) {
     let (call_on, call_off) = (call::sample(), call::Status::default());
     let (night_on, night_off) = (night::sample(), night::Status::default());
     let (focus_s, deploy_s, paste_s, windows_s, calendar_s, health_s, viz_s) = (focus::sample(), deploy::sample(), clipboard::sample(), windows::sample(), calendar::sample(), health::sample(), viz::sample());
-    let shots: [(&str, Page, Level, usize, usize, usize); 37] = [
+    let stocks_s = stocks::sample();
+    let shots: [(&str, Page, Level, usize, usize, usize); 39] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -470,6 +472,8 @@ fn preview(dir: &str) {
         ("25-digin-issue", Page::Digin, Level::Detail("issue:0:4512".into()), 0, 0, 0),
         ("26-digin-note", Page::Digin, Level::Detail("note:0:1".into()), 0, 0, 4),
         ("27-digin-page", Page::Digin, Level::Detail("page:0:77".into()), 0, 0, 7),
+        ("39-stocks", Page::Stocks, Level::Focus, 0, 0, 5),
+        ("40-stocks-detail", Page::Stocks, Level::Detail("^GSPC".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
     let empty = audio::Status::default();
@@ -503,6 +507,7 @@ fn preview(dir: &str) {
             windows: &windows_s,
             calendar: &calendar_s,
             health: &health_s,
+            stocks: &stocks_s,
             viz: &viz_s,
             history: &history,
             ask: (name == "17-ask").then(|| render::AskView {

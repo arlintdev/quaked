@@ -44,6 +44,7 @@ pub enum PageId {
     Windows,
     Calendar,
     Health,
+    Stocks,
     Settings,
 }
 
@@ -67,6 +68,7 @@ impl PageId {
             PageId::Windows => "Windows",
             PageId::Calendar => "Calendar",
             PageId::Health => "Health",
+            PageId::Stocks => "Stocks",
             PageId::Settings => "Settings",
         }
     }
@@ -89,6 +91,7 @@ impl PageId {
             PageId::Windows => "WINDOWS",
             PageId::Calendar => "CAL",
             PageId::Health => "HEALTH",
+            PageId::Stocks => "STOCKS",
             PageId::Settings => "SETTINGS",
         }
     }
@@ -136,6 +139,7 @@ pub struct Config {
     pub windows: WindowsSettings,
     pub calendar: CalendarSettings,
     pub health: HealthSettings,
+    pub stocks: StocksSettings,
     pub night: NightSettings,
     pub viz: VizSettings,
     pub sync: SyncSettings,
@@ -309,6 +313,21 @@ pub struct HealthSettings {
 impl Default for HealthSettings {
     fn default() -> Self {
         HealthSettings { enabled: true }
+    }
+}
+
+/// The Stocks page: your symbols, as Yahoo Finance writes them (AAPL, SPY, ^GSPC, BTC-USD).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StocksSettings {
+    pub enabled: bool,
+    pub symbols: Vec<String>,
+    /// How often prices refresh while the page is on screen.
+    pub refresh_seconds: u64,
+}
+impl Default for StocksSettings {
+    fn default() -> Self {
+        StocksSettings { enabled: true, symbols: ["^GSPC", "^IXIC", "^DJI", "BTC-USD"].map(String::from).to_vec(), refresh_seconds: 60 }
     }
 }
 
@@ -500,6 +519,7 @@ pub struct Ring {
     pub windows: String,
     pub calendar: String,
     pub health: String,
+    pub stocks: String,
     /// Breathe in this color while a Claude session needs you.
     pub alert: bool,
     pub alert_color: String,
@@ -639,6 +659,7 @@ impl Default for Config {
             windows: WindowsSettings::default(),
             calendar: CalendarSettings::default(),
             health: HealthSettings::default(),
+            stocks: StocksSettings::default(),
             night: NightSettings::default(),
             viz: VizSettings::default(),
             sync: SyncSettings::default(),
@@ -669,6 +690,7 @@ impl Default for Ring {
             windows: "#BF5AF2".into(),
             calendar: "#FF453A".into(),
             health: "#66D4CF".into(),
+            stocks: "#34C759".into(),
             alert: true,
             alert_color: "#F2B705".into(),
         }
@@ -711,6 +733,7 @@ impl Ring {
             PageId::Windows => &self.windows,
             PageId::Calendar => &self.calendar,
             PageId::Health => &self.health,
+            PageId::Stocks => &self.stocks,
         }
     }
 }

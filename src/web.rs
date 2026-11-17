@@ -234,6 +234,10 @@ fn route(req: &Request, ctl: &Ctl) -> Response {
                 Err(e) => fail(502, e),
             }
         }
+        ("GET", "/api/stocks-search") => {
+            let found = crate::stocks::search(req.q("q").unwrap_or(""));
+            json(serde_json::Value::Array(found.into_iter().map(|(symbol, name, exchange, kind)| serde_json::json!({"symbol": symbol, "name": name, "exchange": exchange, "kind": kind})).collect()))
+        }
         ("GET", "/api/audio-devices") => {
             let Some(state) = local_state(ctl) else { return fail(500, "quaked didn't answer") };
             match on_board(ctl, &board_of(&state), "audio-devices") {

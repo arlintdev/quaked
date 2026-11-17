@@ -127,6 +127,7 @@ const PAGES = [
   ["code", "Code", "arrow.triangle.pull", "GitHub PRs and GitLab merge requests"],
   ["digin", "Digin", "bubble.left.and.text.bubble.right.fill", "Your issues, inbox, chat and pages from Digin"],
   ["calendar", "Calendar", "calendar", "Today's agenda, the next meeting and a join button"],
+  ["stocks", "Stocks", "chart.line.uptrend.xyaxis", "Your symbols with today's change and charts"],
   ["focus", "Focus", "timer", "A focus timer on the knob and ring"],
   ["deploy", "Deploy", "paperplane.fill", "Deploy your projects and watch CI"],
   ["paste", "Clipboard", "doc.on.clipboard.fill", "Pick a recent copy and paste it"],
@@ -547,6 +548,7 @@ function viewExtras(main) {
       h("input", { type: "text", value: p.repo, placeholder: "owner/repo (CI)", class: "mono", style: { width: "180px" }, oninput: (e) => { p.repo = e.target.value; changed(); } }),
       h("button", { class: "btn small danger", onclick: () => { projects.splice(i, 1); changed(); render(); } }, "Remove"))),
     h("div", { class: "row" }, h("button", { class: "btn small", onclick: () => { projects.push({ name: "", path: "", command: "./deploy.sh", repo: "" }); changed(); render(); } }, sym("plus", 12), "Add a project"))));
+  main.append(stocksCard());
   main.append(card("Calendar", "Uses the calendars in macOS Calendar (macOS asks once for access).",
     toggle("Calendar", "calendar.enabled"),
     lines("Only these calendars", "calendar.calendars", "One name per line; empty = all"),
@@ -666,6 +668,54 @@ function viewSync(main) {
   main.append(h("details", { class: "card", style: { padding: "0" } }, h("summary", { style: { padding: "14px 18px", cursor: "pointer", color: "var(--muted)" } }, "Pairing key (advanced)"),
     h("div", { class: "row" }, h("div", { class: "label" }, "Key", h("small", {}, "Paired Macs share it. Pairing sets it for you.")), key,
       h("button", { class: "btn small", onclick: () => navigator.clipboard.writeText(cfg.sync?.key || "").then(() => toast("Copied")) }, "Copy"))));
+}
+// The Stocks card: your symbols in order (with what each is and its price), search to add.
+function stocksCard() {
+  const st = cfg.stocks || (cfg.stocks = { enabled: true, symbols: [], refreshSeconds: 60 });
+  const symbols = st.symbols || (st.symbols = []);
+  const live = Object.fromEntries((state.status?.features?.stocks?.quotes || []).map((q) => [q.symbol, q]));
+  const add = (raw) => {
+    const s = (raw || "").trim().toUpperCase();
+    if (!s || symbols.includes(s)) return;
+    symbols.push(s);
+    changed();
+    render();
+  };
+  const move = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= symbols.length) return;
+    [symbols[i], symbols[j]] = [symbols[j], symbols[i]];
+    changed();
+    render();
+  };
+  const results = h("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "10px" } });
+  const input = h("input", { type: "text", placeholder: "Search a company or type a symbol: apple, AAPL, ^GSPC, BTC-USD", style: { width: "420px" } });
+  let timer;
+  const search = async () => {
+    const q = input.value.trim();
+    if (!q) return results.replaceChildren();
+    const found = await fetch(`/api/stocks-search?q=${encodeURIComponent(q)}`).then((r) => (r.ok ? r.json() : [])).catch(() => []);
+    if (input.value.trim() !== q) return;
+    results.replaceChildren(...(found.length ? found : [{ symbol: q.toUpperCase(), name: "add as typed" }]).map((x) =>
+      h("button", { class: "btn small", onclick: () => add(x.symbol) }, sym("plus", 11), `${x.symbol}`, h("span", { style: { color: "var(--muted)", marginLeft: "6px" } }, [x.name, x.exchange].filter(Boolean).join(" · ")))));
+  };
+  input.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 300); };
+  input.onkeydown = (e) => { if (e.key === "Enter") add(input.value); };
+  const row = (s, i) => {
+    const q = live[s];
+    const what = !q ? "Prices come in on the next refresh" : q.error ? q.error : `${q.name || s}  ·  ${q.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}  ·  ${q.changePct >= 0 ? "+" : ""}${q.changePct.toFixed(2)}%`;
+    return h("div", { class: "row" },
+      h("div", { class: "label" }, h("b", { class: "mono" }, s), h("small", { style: q?.error ? { color: "var(--amber)" } : {} }, what)),
+      h("div", { class: "ctl" },
+        h("button", { class: "btn small", disabled: i === 0, onclick: () => move(i, -1) }, "↑"),
+        h("button", { class: "btn small", disabled: i === symbols.length - 1, onclick: () => move(i, 1) }, "↓"),
+        h("button", { class: "btn small danger", onclick: () => { symbols.splice(i, 1); changed(); render(); } }, "Remove")));
+  };
+  return card("Stocks", "Prices from Yahoo Finance, delayed up to 15 minutes; no account needed, and only these symbols are sent. Indexes start with ^, crypto ends in -USD.",
+    toggle("Stocks page", "stocks.enabled"),
+    choice("Refresh every", "stocks.refreshSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], "While the Stocks page is on screen; every 15 minutes otherwise", true),
+    ...symbols.map(row),
+    h("div", { class: "row", style: { display: "block" } }, h("div", { style: { display: "flex", gap: "8px" } }, input, h("button", { class: "btn small primary", onclick: () => add(input.value) }, sym("plus", 12), "Add")), results));
 }
 async function pairWith(name) {
   pairing = name; render();
