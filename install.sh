@@ -19,5 +19,10 @@ fi
 ln -sf "$APP/Contents/MacOS/quaked" "$HOME/.local/bin/quaked"
 cp launchd/dev.arlint.quaked.plist "$HOME/Library/LaunchAgents/"
 launchctl bootout "gui/$(id -u)/dev.arlint.quaked" 2>/dev/null || true
+# bootout returns before the old instance has exited; bootstrap fails until it has.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  launchctl print "gui/$(id -u)/dev.arlint.quaked" >/dev/null 2>&1 || break
+  sleep 0.5
+done
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.arlint.quaked.plist"
 echo "quaked installed; log: ~/Library/Logs/quaked.log"
