@@ -1802,7 +1802,7 @@ impl ApplicationHandler<Event> for App {
             Event::League(league::Event::Status(st)) => {
                 self.league = st;
                 self.update_ring();
-                if self.page == PageId::League {
+                if self.page == PageId::League || self.page == PageId::Dash {
                     self.redraw();
                 }
             }

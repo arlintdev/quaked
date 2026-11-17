@@ -29,7 +29,26 @@ knob's light ring:
 - **League**: follows the League client (live or PBE) through its local API: lobby,
   time in queue, champ select countdown, in game. Auto-accepts the ready check (after a
   short, configurable delay) and jumps to this page with a chirp and a gold ring when the
-  queue pops. Accept / Decline / Find match / Cancel buttons.
+  queue pops. Accept / Decline / Find match / Cancel buttons. A **Played with** panel keeps
+  your record with the people you play with: every finished matched game from the
+  client's history is saved to `league-history.json` (so it grows past the client's short
+  history), your top partners (friends, or 3+ games together) show with wins, losses and
+  win rate, and in your party, champ select and the game the ones with you are on top
+  (the dashboard tile says "with Sam 12–7" while you play). Teammates you don't know stay
+  unnamed: the client hides their names in game.
+  The pane follows what you're playing (from the lobby, champ select and the game): ARAM
+  is icy blue, ARAM: Mayhem purple, Summoner's Rift gold, Arena coral, with your record in
+  that mode (ARAM and Mayhem together) on the left. During a game the middle shows the game
+  itself, from Riot's Live Client Data API (served by the game on 127.0.0.1:2999): clock,
+  team kill score, your K/D/A and gold, then per mode: kill participation and towers /
+  inhibitors in ARAM; CS per minute, vision, dragons by type, grubs, herald, baron and towers
+  on the Rift. Below that a feed of first blood, objectives, towers, aces, multikills and
+  your kills and deaths, colored by side. While you're dead it turns into a respawn
+  countdown with who killed you and your gold (in ARAM: "shop before you're back"). The
+  right side becomes a scoreboard of both teams (champion, level, K/D/A, respawn timers,
+  and your record next to people you know); between games it's back to Played with, with
+  this session's record and streak in the middle. Nothing it shows goes beyond what the
+  game shows you (no enemy cooldowns or timers).
 - **Docker**: containers on Kiri (its Docker-compatible socket, `~/.kiri/run/docker.sock`)
   or any Docker engine: state, CPU, memory, ports, engine summary; open one for logs and
   Start / Stop / Restart / Pause.

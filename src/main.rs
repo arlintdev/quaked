@@ -150,7 +150,58 @@ fn preview(dir: &str) {
         mic_muted: false,
         error: None,
     };
-    let lg_lobby = league::Status { running: true, phase: "Matchmaking".into(), summoner: Some(("Austin".into(), 187)), queue: Some("Ranked Solo/Duo".into()), search: Some((94.0, 120.0)), ..Default::default() };
+    let duo = |name: &str, games: u32, wins: u32, friend: bool| league::Duo { puuid: name.into(), name: name.into(), games, wins, friend };
+    let lg_lobby = league::Status {
+        running: true,
+        phase: "Matchmaking".into(),
+        summoner: Some(("Austin".into(), 187)),
+        queue: Some("Ranked Solo/Duo".into()),
+        search: Some((94.0, 120.0)),
+        record: (61, 48),
+        duos: vec![duo("Sam", 31, 19, true), duo("Priya", 22, 10, true), duo("kestrel", 9, 6, true), duo("Dmitri", 4, 1, false), duo("Lou", 3, 2, true)],
+        with_now: vec![duo("Sam", 31, 19, true), duo("Priya", 22, 10, true), duo("RandomTop", 0, 0, false)],
+        ..Default::default()
+    };
+    let lg_live = league::Status {
+        phase: "InProgress".into(),
+        session: (3, 1),
+        streak: 2,
+        live: Some(league::LiveGame {
+            time: 1122.0, mode: "CLASSIC".into(), map: 11, champion: "Ahri".into(), level: 13, gold: 1350.0, kills: 4, deaths: 2, assists: 7, cs: 142,
+            ally_kills: 18, enemy_kills: 11,
+            events: vec![
+                (190.0, "First blood: Leona".into(), 1), (400.0, "Enemy team took the Infernal drake".into(), -1),
+                (612.0, "Your team took a turret".into(), 1), (840.0, "You killed Jinx".into(), 1), (1101.0, "Your team took Baron".into(), 1),
+            ],
+            ..Default::default()
+        }),
+        ..lg_lobby.clone()
+    };
+    let lp = |champion: &str, name: &str, mine: bool, me: bool, level: u32, k: u32, d: u32, a: u32, dead: bool| league::LivePlayer { champion: champion.into(), name: name.into(), mine, me, level, kills: k, deaths: d, assists: a, cs: 0, dead, respawn: if dead { 14.0 } else { 0.0 } };
+    let players = vec![
+        lp("Ahri", "Austin", true, true, 13, 4, 2, 7, false), lp("Leona", "Sam", true, false, 12, 2, 4, 14, false), lp("Jinx", "x", true, false, 14, 8, 3, 5, false),
+        lp("Malphite", "Priya", true, false, 12, 1, 3, 9, true), lp("Lux", "y", true, false, 13, 3, 2, 10, false),
+        lp("Zed", "", false, false, 14, 6, 4, 2, false), lp("Brand", "", false, false, 13, 2, 5, 6, true), lp("Garen", "", false, false, 12, 2, 3, 3, false),
+        lp("Sona", "", false, false, 11, 0, 4, 8, false), lp("Ezreal", "", false, false, 13, 1, 2, 4, false),
+    ];
+    let lg_live = league::Status {
+        mode: league::Mode::Rift,
+        mode_name: "Ranked Solo/Duo".into(),
+        mode_record: (14, 12),
+        live: lg_live.live.clone().map(|g| league::LiveGame { players: players.clone(), turrets: (4, 2), dragons: (vec!["Infernal".into(), "Ocean".into()], vec!["Mountain".into()]), barons: (1, 0), heralds: (1, 0), grubs: (3, 3), ward_score: 21.0, ..g }),
+        ..lg_live
+    };
+    let lg_dead = league::Status {
+        mode: league::Mode::Mayhem,
+        mode_name: "ARAM: Mayhem".into(),
+        mode_record: (20, 15),
+        live: lg_live.live.clone().map(|g| league::LiveGame { dead: true, respawn: 23.4, killed_by: "Jinx".into(), map: 12, mode: "KIWI".into(), ..g }),
+        ..lg_live.clone()
+    };
+    let lg_aram = league::Status {
+        live: lg_dead.live.clone().map(|g| league::LiveGame { dead: false, events: vec![(400.0, "Your team took a turret".into(), 1), (512.0, "You killed Zed".into(), 1), (601.0, "Enemy team aced".into(), -1)], turrets: (2, 1), inhibs: (0, 0), ..g }),
+        ..lg_dead.clone()
+    };
     let lg_pop = league::Status { phase: "ReadyCheck".into(), ready: Some(league::ReadyCheck { state: "InProgress".into(), response: "Accepted".into(), timer: 3.0 }), accepted_by_quaked: true, ..lg_lobby.clone() };
     let dk = docker::Status {
         ok: true,
@@ -255,7 +306,7 @@ fn preview(dir: &str) {
         ("Always allow".to_string(), "don't ask again for Bash(./deploy.sh:*)".to_string()),
         ("Deny".to_string(), "tell Claude no".to_string()),
     ];
-    let shots: [(&str, Page, Level, usize, usize, usize); 19] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 22] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -274,6 +325,9 @@ fn preview(dir: &str) {
         ("17-ask", Page::Ai, Level::Top, 0, 0, 0),
         ("18-permit", Page::Ai, Level::Top, 0, 0, 0),
         ("19-digin", Page::Digin, Level::Focus, 0, 0, 4),
+        ("20-league-live", Page::League, Level::Top, 0, 0, 0),
+        ("21-league-dead", Page::League, Level::Top, 0, 0, 0),
+        ("22-league-aram", Page::League, Level::Top, 0, 0, 0),
         ("16-settings-adjust", Page::Settings, Level::Detail("adjust".into()), 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
@@ -287,7 +341,7 @@ fn preview(dir: &str) {
             shortcuts: &cfg.shortcuts,
             sounds: if name.ends_with("empty") { &empty } else { &sounds },
             tile,
-            league: if name.contains("pop") { &lg_pop } else { &lg_lobby },
+            league: if name.contains("pop") { &lg_pop } else if name.contains("live") { &lg_live } else if name.contains("dead") { &lg_dead } else if name.contains("aram") { &lg_aram } else { &lg_lobby },
             league_cfg: &cfg.league,
             docker: &dk,
             ops: &opsd,

@@ -707,8 +707,13 @@ const LEAGUE_LEFT_W: f32 = 430.0;
 fn league_auto_button() -> R {
     (M + 24.0, CY + CH - 132.0, LEAGUE_LEFT_W - 48.0, 70.0)
 }
+const LEAGUE_DUOS_W: f32 = 560.0;
 fn league_main() -> R {
-    (M + LEAGUE_LEFT_W + G, CY, W - 2.0 * M - LEAGUE_LEFT_W - G, CH)
+    (M + LEAGUE_LEFT_W + G, CY, W - 2.0 * M - LEAGUE_LEFT_W - LEAGUE_DUOS_W - 2.0 * G, CH)
+}
+/// Your record with the people you play with.
+fn league_duos() -> R {
+    (W - M - LEAGUE_DUOS_W, CY, LEAGUE_DUOS_W, CH)
 }
 fn league_primary() -> R {
     let (x, y, _, h) = league_main();
@@ -1728,13 +1733,15 @@ fn position_name(p: &str) -> &str {
 
 fn league_page(c: &mut Canvas, v: &View) {
     let l = v.league;
+    let (mode_label, accent, mode_sym) = mode_theme(l.mode);
     let focus = v.level == &Level::Focus;
     // Left: who, client, auto-accept
     let left = (M, CY, LEAGUE_LEFT_W, CH);
     c.rrect(left, 14.0, PANEL, 1.0);
-    c.rrect((M, CY, 6.0, CH), 3.0, GOLD, 1.0);
+    c.rrect((M, CY, 6.0, CH), 3.0, accent, 1.0);
     let ix = M + 28.0;
-    c.text(F::Bold, "LEAGUE OF LEGENDS", 13.0, ix, CY + 36.0, FAINT, Align::Left);
+    c.symbol(mode_sym, 14.0, ix + 7.0, CY + 31.0, accent);
+    c.text(F::Bold, mode_label, 13.0, ix + 22.0, CY + 36.0, if l.mode == league::Mode::None { FAINT } else { accent }, Align::Left);
     match &l.summoner {
         Some((name, level)) => {
             c.fit(F::Bold, name, 32.0, LEAGUE_LEFT_W - 56.0, ix, CY + 80.0, TEXT, Align::Left);
@@ -1746,15 +1753,32 @@ fn league_page(c: &mut Canvas, v: &View) {
     }
     let (pl, pbg, pfg) = if l.running { ("CLIENT OPEN", GREEN, 0xFFFFFF) } else { ("CLIENT CLOSED", 0x2A2A31, MUTED) };
     c.pill(ix, CY + 128.0, pl, 13.0, pbg, pfg);
+    // Your record in this kind of game (ARAM and Mayhem together).
+    let (mw_, ml_) = l.mode_record;
+    if l.mode != league::Mode::None && mw_ + ml_ > 0 {
+        let kind = match l.mode.family() {
+            league::Mode::Aram => "ARAM",
+            league::Mode::Rift => "Rift",
+            league::Mode::Arena => "Arena",
+            _ => "this mode",
+        };
+        c.text(F::Bold, &format!("{kind}  {mw_}W {ml_}L"), 20.0, ix, CY + 196.0, TEXT_2, Align::Left);
+        let rate = mw_ as f32 / (mw_ + ml_) as f32;
+        bar(c, ix, CY + 208.0, LEAGUE_LEFT_W - 140.0, rate, accent);
+        c.text(F::Medium, &format!("{:.0}%", rate * 100.0), 15.0, ix + LEAGUE_LEFT_W - 56.0, CY + 216.0, MUTED, Align::Right);
+    }
     let on = v.league_cfg.auto_accept;
     let ar = league_auto_button();
-    c.rrect(ar, 16.0, if on { 0x3A2E12 } else { 0x1C1C21 }, 1.0);
+    c.rrect(ar, 16.0, 0x1C1C21, 1.0);
     if on {
-        c.outline(ar, 16.0, GOLD, 2.0);
+        c.rrect(ar, 16.0, accent, 0.16);
+    }
+    if on {
+        c.outline(ar, 16.0, accent, 2.0);
     }
     // switch
     let (sx, sy) = (ar.0 + 22.0, ar.1 + ar.3 / 2.0 - 15.0);
-    c.rrect((sx, sy, 56.0, 30.0), 15.0, if on { GOLD } else { 0x3A3A42 }, 1.0);
+    c.rrect((sx, sy, 56.0, 30.0), 15.0, if on { accent } else { 0x3A3A42 }, 1.0);
     c.circle(if on { sx + 41.0 } else { sx + 15.0 }, sy + 15.0, 12.0, 0xFFFFFF, 1.0);
     c.text(F::Bold, if on { "Auto-accept on" } else { "Auto-accept off" }, 22.0, sx + 74.0, ar.1 + 32.0, TEXT, Align::Left);
     let sub = if on { format!("accepts after {:.1}s", v.league_cfg.accept_delay_ms as f32 / 1000.0) } else { "tap to turn on".to_string() };
@@ -1763,13 +1787,18 @@ fn league_page(c: &mut Canvas, v: &View) {
         c.text(F::Medium, "jumps here when the queue pops", 15.0, ix, CY + CH - 26.0, FAINT, Align::Left);
     }
 
+    match &l.live {
+        Some(g) => scoreboard(c, v, g, accent),
+        None => duos_panel(c, v),
+    }
+
     // Main: the phase
     let mr = league_main();
     let (mx, my, mw, mh) = mr;
     let ready = l.phase == "ReadyCheck";
     c.rrect(mr, 14.0, if ready { 0x2E2410 } else { PANEL_DEEP }, 1.0);
     if ready {
-        c.outline(mr, 14.0, GOLD, 3.0);
+        c.outline(mr, 14.0, accent, 3.0);
     }
     let tx = mx + 32.0;
     if !l.running {
@@ -1778,17 +1807,21 @@ fn league_page(c: &mut Canvas, v: &View) {
         return;
     }
     let queue = l.queue.clone().unwrap_or_default();
+    if let Some(g) = &l.live {
+        return live_game(c, v, g, mr, accent);
+    }
+    session_line(c, l, tx, my + mh - 24.0, mw - 64.0);
     match l.phase.as_str() {
         "Lobby" => {
-            c.text(F::Bold, "IN LOBBY", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, "IN LOBBY", 18.0, tx, my + 46.0, accent, Align::Left);
             c.fit(F::Bold, if queue.is_empty() { "Ready to queue" } else { &queue }, 48.0, mw - 64.0, tx, my + 110.0, TEXT, Align::Left);
-            button(c, league_primary(), "Find match", GOLD, 0x1A1408, "magnifyingglass");
+            button(c, league_primary(), "Find match", accent, 0x1A1408, "magnifyingglass");
             if focus {
                 c.outline(league_primary(), 14.0, TEXT, 3.0);
             }
         }
         "Matchmaking" => {
-            c.text(F::Bold, "IN QUEUE", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, "IN QUEUE", 18.0, tx, my + 46.0, accent, Align::Left);
             let (t, est) = l.search.unwrap_or((0.0, 0.0));
             c.text(F::Bold, &mmss(t), 110.0, tx, my + 160.0, TEXT, Align::Left);
             let detail = if est > 0.0 { format!("estimated {}   ·   {queue}", mmss(est)) } else { queue.clone() };
@@ -1800,7 +1833,7 @@ fn league_page(c: &mut Canvas, v: &View) {
         }
         "ReadyCheck" => {
             let rc = l.ready.clone().unwrap_or_default();
-            c.text(F::Bold, "MATCH FOUND", 76.0, tx, my + 110.0, GOLD, Align::Left);
+            c.text(F::Bold, "MATCH FOUND", 76.0, tx, my + 110.0, accent, Align::Left);
             let (label, col) = match rc.response.as_str() {
                 "Accepted" => (if l.accepted_by_quaked { "ACCEPTED  ·  by quaked".to_string() } else { "ACCEPTED".to_string() }, GREEN),
                 "Declined" => ("DECLINED".to_string(), RED),
@@ -1830,7 +1863,7 @@ fn league_page(c: &mut Canvas, v: &View) {
                 "GAME_STARTING" => "STARTING",
                 other => other,
             };
-            c.text(F::Bold, &format!("CHAMP SELECT  ·  {phase}"), 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, &format!("CHAMP SELECT  ·  {phase}"), 18.0, tx, my + 46.0, accent, Align::Left);
             let secs = (ch.time_left_ms / 1000.0).max(0.0).ceil();
             c.text(F::Bold, &format!("{secs:.0}s"), 110.0, tx, my + 160.0, TEXT, Align::Left);
             let mut line = Vec::new();
@@ -1846,19 +1879,301 @@ fn league_page(c: &mut Canvas, v: &View) {
             c.fit(F::Medium, &line.join("   ·   "), 26.0, mw - 64.0, tx, my + 206.0, TEXT_2, Align::Left);
         }
         "InProgress" | "GameStart" | "Reconnect" => {
-            c.text(F::Bold, "IN GAME", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, "IN GAME", 18.0, tx, my + 46.0, accent, Align::Left);
             c.text(F::Bold, if l.phase == "Reconnect" { "Reconnect needed" } else { "Good luck" }, 64.0, tx, my + 130.0, TEXT, Align::Left);
         }
         "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => {
-            c.text(F::Bold, "GAME OVER", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, "GAME OVER", 18.0, tx, my + 46.0, accent, Align::Left);
             c.text(F::Bold, "Back to the lobby when you're ready", 40.0, tx, my + 116.0, TEXT_2, Align::Left);
         }
         other => {
-            c.text(F::Bold, "CLIENT", 18.0, tx, my + 46.0, GOLD, Align::Left);
+            c.text(F::Bold, "CLIENT", 18.0, tx, my + 46.0, accent, Align::Left);
             c.text(F::Bold, if other.is_empty() || other == "None" { "Home screen" } else { other }, 48.0, tx, my + 110.0, TEXT_2, Align::Left);
         }
     }
     let _ = mh;
+}
+
+/// (label, accent, symbol) for the kind of game you're playing.
+fn mode_theme(m: league::Mode) -> (&'static str, u32, &'static str) {
+    match m {
+        league::Mode::Aram => ("ARAM  ·  HOWLING ABYSS", 0x7FB8FF, "snowflake"),
+        league::Mode::Mayhem => ("ARAM: MAYHEM", 0xC084FC, "sparkles"),
+        league::Mode::Rift => ("SUMMONER'S RIFT", GOLD, "map.fill"),
+        league::Mode::Arena => ("ARENA", 0xFF7A59, "trophy.fill"),
+        league::Mode::Other => ("LEAGUE OF LEGENDS", GOLD, "gamecontroller.fill"),
+        league::Mode::None => ("LEAGUE OF LEGENDS", GOLD, "gamecontroller.fill"),
+    }
+}
+
+fn dragon_color(kind: &str) -> u32 {
+    match kind {
+        "Infernal" => 0xFF6B3D,
+        "Ocean" => 0x3DB8FF,
+        "Mountain" => 0xB08850,
+        "Cloud" => 0xBFE3F2,
+        "Hextech" => 0x4FD1C5,
+        "Chemtech" => 0x9ACD32,
+        "Elder" => 0xF0E6D2,
+        _ => MUTED,
+    }
+}
+
+/// "This session 3W 2L · won 2 in a row"
+fn session_line(c: &mut Canvas, l: &league::Status, x: f32, y: f32, w: f32) {
+    let (sw, sl) = l.session;
+    let mut parts = Vec::new();
+    if sw + sl > 0 {
+        parts.push(format!("This session {sw}W {sl}L"));
+    }
+    match l.streak {
+        n if n >= 2 => parts.push(format!("won {n} in a row")),
+        n if n <= -2 => parts.push(format!("lost {} in a row", -n)),
+        _ => {}
+    }
+    if !parts.is_empty() {
+        c.clip(F::Medium, &parts.join("  ·  "), 17.0, w, x, y, if l.streak <= -2 { 0xE5534B } else { MUTED });
+    }
+}
+
+/// The middle of the League pane while a game runs (from the game's live data).
+fn live_game(c: &mut Canvas, v: &View, g: &league::LiveGame, r: R, accent: u32) {
+    let (x, y, w, h) = r;
+    let tx = x + 32.0;
+    let tw = w - 64.0;
+    let fmt_gold = |gold: f64| {
+        let n = gold.max(0.0) as u64;
+        if n >= 1000 { format!("{},{:03}", n / 1000, n % 1000) } else { n.to_string() }
+    };
+    let dead = g.dead && g.result.is_none();
+    if dead {
+        c.rrect(r, 14.0, 0x2A1214, 1.0);
+        c.outline(r, 14.0, 0x5A2328, 2.0);
+        let aram = v.league.mode.family() == league::Mode::Aram;
+        c.text(F::Bold, if aram { "SHOP NOW  ·  RESPAWNING IN" } else { "RESPAWNING IN" }, 18.0, tx, y + 46.0, 0xFF8A8A, Align::Left);
+        let secs = g.respawn.max(0.0).ceil();
+        c.text(F::Bold, &mmss(secs), 120.0, tx, y + 170.0, TEXT, Align::Left);
+        if !g.killed_by.is_empty() {
+            c.text(F::Medium, &format!("killed by {}", g.killed_by), 24.0, tx, y + 214.0, MUTED, Align::Left);
+        }
+        // In ARAM this is the only time you can buy: make the gold the headline.
+        let gold_line = if aram { format!("{} gold  ·  shop before you're back", fmt_gold(g.gold)) } else { format!("{} gold to spend", fmt_gold(g.gold)) };
+        c.text(F::Bold, &gold_line, if aram { 34.0 } else { 30.0 }, tx, y + 262.0, GOLD, Align::Left);
+    } else {
+        // Clock and score.
+        let header = match g.result.as_deref() {
+            Some("Win") => ("VICTORY".to_string(), GREEN),
+            Some(_) => ("DEFEAT".to_string(), 0xE5534B),
+            None => (format!("IN GAME  ·  {}", if g.champion.is_empty() { g.mode.clone() } else { g.champion.to_uppercase() }), accent),
+        };
+        c.text(F::Bold, &header.0, 18.0, tx, y + 42.0, header.1, Align::Left);
+        c.text(F::Bold, &mmss(g.time), 58.0, tx, y + 104.0, TEXT, Align::Left);
+        let rx = x + w - 32.0;
+        let ew = c.text(F::Bold, &g.enemy_kills.to_string(), 58.0, rx, y + 104.0, 0xE5534B, Align::Right);
+        let dw = c.text(F::Bold, "–", 40.0, rx - ew - 14.0, y + 98.0, FAINT, Align::Right);
+        let aw = c.text(F::Bold, &g.ally_kills.to_string(), 58.0, rx - ew - dw - 28.0, y + 104.0, GREEN, Align::Right);
+        c.text(F::Medium, "your team  ·  enemy", 13.0, rx, y + 124.0, FAINT, Align::Right);
+        let _ = aw;
+        // Your stats: what matters in this mode.
+        let mode = v.league.mode;
+        let kda = (format!("{} / {} / {}", g.kills, g.deaths, g.assists), "k / d / a".to_string());
+        let kp = if g.ally_kills > 0 { format!("{:.0}%", (g.kills + g.assists) as f32 / g.ally_kills as f32 * 100.0) } else { "–".into() };
+        let stats: Vec<(String, String)> = match mode.family() {
+            league::Mode::Aram => vec![kda, (kp, "kill participation".into()), (fmt_gold(g.gold), "gold".into()), (g.level.to_string(), "level".into())],
+            league::Mode::Rift => {
+                let per_min = if g.time > 60.0 { format!("{:.1} cs / min", g.cs as f64 / (g.time / 60.0)) } else { "cs".to_string() };
+                vec![kda, (g.cs.to_string(), per_min), (fmt_gold(g.gold), "gold".into()), (g.level.to_string(), "level".into()), (format!("{:.0}", g.ward_score), "vision".into())]
+            }
+            _ => vec![kda, (g.level.to_string(), "level".into()), (fmt_gold(g.gold), "gold".into()), (kp, "kill participation".into())],
+        };
+        let sw = tw / stats.len() as f32;
+        for (k, (val, label)) in stats.iter().enumerate() {
+            let sx = tx + k as f32 * sw;
+            c.fit(F::Bold, val, 36.0, sw - 16.0, sx, y + 182.0, TEXT, Align::Left);
+            c.text(F::Medium, label, 14.0, sx, y + 204.0, FAINT, Align::Left);
+        }
+    }
+    // Objectives (Rift) or towers (ARAM), per side.
+    let mut strip_h = 0.0;
+    if !dead {
+        let sy = y + 240.0;
+        let mut sx = tx;
+        let pair = |c: &mut Canvas, sx: &mut f32, label: &str, (a, b): (u32, u32)| {
+            *sx += c.text(F::Medium, label, 14.0, *sx, sy, FAINT, Align::Left) + 8.0;
+            *sx += c.text(F::Bold, &a.to_string(), 17.0, *sx, sy, GREEN, Align::Left) + 4.0;
+            *sx += c.text(F::Bold, "–", 14.0, *sx, sy, FAINT, Align::Left) + 4.0;
+            *sx += c.text(F::Bold, &b.to_string(), 17.0, *sx, sy, 0xE5534B, Align::Left) + 22.0;
+        };
+        match v.league.mode.family() {
+            league::Mode::Rift => {
+                // Dragons as colored pips: yours, then theirs.
+                sx += c.text(F::Medium, "drakes", 14.0, sx, sy, FAINT, Align::Left) + 10.0;
+                for (k, d) in g.dragons.0.iter().enumerate() {
+                    c.circle(sx + 7.0 + k as f32 * 18.0, sy - 5.0, 6.5, dragon_color(d), 1.0);
+                }
+                sx += (g.dragons.0.len().max(1) as f32) * 18.0 + 6.0;
+                sx += c.text(F::Bold, "vs", 13.0, sx, sy, FAINT, Align::Left) + 10.0;
+                for (k, d) in g.dragons.1.iter().enumerate() {
+                    c.circle(sx + 7.0 + k as f32 * 18.0, sy - 5.0, 6.5, dragon_color(d), 0.85);
+                    c.outline((sx + k as f32 * 18.0, sy - 12.0, 14.0, 14.0), 7.0, 0xE5534B, 1.5);
+                }
+                sx += (g.dragons.1.len().max(1) as f32) * 18.0 + 20.0;
+                pair(c, &mut sx, "grubs", g.grubs);
+                pair(c, &mut sx, "herald", g.heralds);
+                pair(c, &mut sx, "baron", g.barons);
+                pair(c, &mut sx, "towers", g.turrets);
+            }
+            _ => {
+                pair(c, &mut sx, "towers", g.turrets);
+                pair(c, &mut sx, "inhibitors", g.inhibs);
+            }
+        }
+        strip_h = 18.0;
+    }
+    // Event feed, newest first.
+    let top = if dead { y + 296.0 } else { y + 232.0 + strip_h + 8.0 };
+    let rows = ((y + h - 14.0 - top) / 30.0).floor().max(0.0) as usize;
+    if g.events.is_empty() {
+        if !dead {
+            c.text(F::Medium, "objectives, kills and towers show up here", 15.0, tx, top + 22.0, FAINT, Align::Left);
+        }
+        return;
+    }
+    c.rect((tx, top, tw, 1.0), LINE, 1.0);
+    for (k, (t, text, side)) in g.events.iter().rev().take(rows).enumerate() {
+        let ry = top + 24.0 + k as f32 * 30.0;
+        let col = match side {
+            1 => GREEN,
+            -1 => 0xE5534B,
+            _ => FAINT,
+        };
+        c.text(F::Mono, &mmss(*t), 14.0, tx, ry, FAINT, Align::Left);
+        c.circle(tx + 64.0, ry - 5.0, 4.5, col, 1.0);
+        c.clip(F::Medium, text, 18.0, tw - 84.0, tx + 78.0, ry, if k == 0 { TEXT } else { TEXT_2 });
+    }
+    let _ = v;
+}
+
+/// The right side during a game: both teams as the Tab screen shows them, with your record
+/// next to friends and people you've played with.
+fn scoreboard(c: &mut Canvas, v: &View, g: &league::LiveGame, accent: u32) {
+    let l = v.league;
+    let r = league_duos();
+    let (x, y, w, h) = r;
+    c.rrect(r, 14.0, PANEL, 1.0);
+    let ix = x + 18.0;
+    let iw = w - 36.0;
+    c.text(F::Bold, "SCOREBOARD", 13.0, ix, y + 30.0, FAINT, Align::Left);
+    let colw = (iw - 16.0) / 2.0;
+    let known = |name: &str| l.duos.iter().chain(l.with_now.iter()).find(|d| d.games > 0 && !name.is_empty() && d.name.eq_ignore_ascii_case(name));
+    for (k, (label, col)) in [("YOUR TEAM", GREEN), ("ENEMY", 0xE5534B)].iter().enumerate() {
+        let cx = ix + k as f32 * (colw + 16.0);
+        c.text(F::Bold, label, 11.0, cx, y + 56.0, *col, Align::Left);
+        let team: Vec<&league::LivePlayer> = g.players.iter().filter(|p| p.mine == (k == 0)).collect();
+        for (i, p) in team.iter().take(5).enumerate() {
+            let ry = y + 66.0 + i as f32 * 62.0;
+            let row = (cx - 6.0, ry, colw + 12.0, 56.0);
+            if p.me {
+                c.rrect(row, 10.0, 0x22222A, 1.0);
+                c.outline(row, 10.0, accent, 1.5);
+            }
+            let fg = if p.dead { FAINT } else { TEXT };
+            c.clip(F::Bold, &p.champion, 17.0, colw - 70.0, cx, ry + 22.0, fg);
+            c.text(F::Mono, &format!("{}", p.level), 13.0, cx + colw, ry + 21.0, MUTED, Align::Right);
+            let kda = format!("{}/{}/{}", p.kills, p.deaths, p.assists);
+            c.text(F::Mono, &kda, 15.0, cx, ry + 45.0, if p.dead { FAINT } else { TEXT_2 }, Align::Left);
+            if p.dead {
+                c.text(F::Bold, &format!("{:.0}s", p.respawn.max(0.0).ceil()), 15.0, cx + colw, ry + 45.0, 0xFF8A8A, Align::Right);
+            } else if let Some(d) = known(&p.name).filter(|_| p.mine && !p.me) {
+                c.symbol("person.2.fill", 11.0, cx + colw - 62.0, ry + 40.0, accent);
+                c.text(F::Bold, &format!("{}–{}", d.wins, d.games - d.wins), 14.0, cx + colw, ry + 45.0, accent, Align::Right);
+            }
+        }
+    }
+    let _ = h;
+}
+
+/// One person's record with you: name, W–L, a win-rate bar.
+fn duo_row(c: &mut Canvas, x: f32, y: f32, w: f32, d: &league::Duo, now: bool) {
+    let mid = y + 20.0;
+    if d.friend {
+        c.symbol("person.2.fill", 13.0, x + 10.0, mid, GOLD);
+    }
+    let name = if d.name.is_empty() { "teammate" } else { d.name.as_str() };
+    c.clip(F::Bold, name, 18.0, w - 250.0, x + 26.0, mid + 6.0, if now { TEXT } else { TEXT_2 });
+    if d.games == 0 {
+        c.text(F::Medium, "first game together", 14.0, x + w, mid + 5.0, FAINT, Align::Right);
+        return;
+    }
+    let rate = d.wins as f32 / d.games as f32;
+    let col = if rate >= 0.5 { GREEN } else { 0xE5534B };
+    c.text(F::Medium, &format!("{:.0}%", rate * 100.0), 14.0, x + w, mid + 5.0, col, Align::Right);
+    bar(c, x + w - 150.0, mid - 4.0, 96.0, rate, col);
+    c.text(F::Bold, &format!("{}W {}L", d.wins, d.games - d.wins), 16.0, x + w - 164.0, mid + 6.0, TEXT, Align::Right);
+}
+
+fn duos_panel(c: &mut Canvas, v: &View) {
+    let l = v.league;
+    let r = league_duos();
+    let (x, y, w, h) = r;
+    c.rrect(r, 14.0, PANEL, 1.0);
+    let ix = x + 22.0;
+    let iw = w - 44.0;
+    c.text(F::Bold, "PLAYED WITH", 13.0, ix, y + 30.0, FAINT, Align::Left);
+    let (wins, losses) = l.record;
+    if wins + losses > 0 {
+        let rate = wins as f32 / (wins + losses) as f32 * 100.0;
+        c.text(F::Medium, &format!("your record  {wins}W {losses}L  ·  {rate:.0}%"), 14.0, ix + iw, y + 30.0, MUTED, Align::Right);
+    }
+    let mut ry = y + 44.0;
+    let in_game = !l.with_now.is_empty();
+    // Only people you know: names of strangers are hidden in game, and they'd just be noise.
+    let known_now: Vec<&league::Duo> = l.with_now.iter().filter(|d| d.games > 0 || d.friend).collect();
+    let strangers = l.with_now.len() - known_now.len();
+    if in_game {
+        let label = match l.phase.as_str() {
+            "ChampSelect" => "IN CHAMP SELECT WITH YOU",
+            "InProgress" | "GameStart" | "Reconnect" => "IN THIS GAME WITH YOU",
+            _ => "IN YOUR PARTY",
+        };
+        c.text(F::Bold, label, 11.0, ix, ry + 14.0, GOLD, Align::Left);
+        ry += 22.0;
+        // Friends first, then the people you've played with most.
+        let mut now = known_now.clone();
+        now.sort_by_key(|d| (std::cmp::Reverse(d.friend), std::cmp::Reverse(d.games)));
+        for d in now.iter().take(4) {
+            c.rrect((ix - 8.0, ry + 2.0, iw + 16.0, 36.0), 9.0, 0x22222A, 1.0);
+            duo_row(c, ix, ry, iw, d, true);
+            ry += 40.0;
+        }
+        if strangers > 0 {
+            let line = if known_now.is_empty() {
+                format!("{} new teammate{}  ·  no one you've played with before", strangers, if strangers == 1 { "" } else { "s" })
+            } else {
+                format!("+ {} new teammate{}", strangers, if strangers == 1 { "" } else { "s" })
+            };
+            c.text(F::Medium, &line, 14.0, ix, ry + 22.0, FAINT, Align::Left);
+            ry += 32.0;
+        }
+        ry += 8.0;
+    }
+    let others: Vec<&league::Duo> = l.duos.iter().filter(|d| !l.with_now.iter().any(|n| n.puuid == d.puuid)).collect();
+    if others.is_empty() && !in_game {
+        let msg = if wins + losses == 0 { "Your record with friends shows here after your games are saved." } else { "Play with friends (or the same people 3+ times) and they show up here." };
+        c.paragraph(F::Medium, msg, 17.0, ix, y + h / 2.0 - 10.0, iw, 3, 23.0, FAINT);
+        return;
+    }
+    if !others.is_empty() {
+        c.text(F::Bold, "MOST PLAYED", 11.0, ix, ry + 14.0, FAINT, Align::Left);
+        ry += 22.0;
+    }
+    for d in others {
+        if ry + 40.0 > y + h - 8.0 {
+            break;
+        }
+        duo_row(c, ix, ry, iw, d, false);
+        ry += 40.0;
+    }
 }
 
 fn state_color(state: &str) -> (u32, u32) {
@@ -2690,6 +3005,7 @@ fn dash_sounds(c: &mut Canvas, v: &View, r: R) {
 fn dash_league(c: &mut Canvas, v: &View, r: R) {
     let (x, y, w, h) = r;
     let l = v.league;
+    let accent = mode_theme(l.mode).1;
     let steps = ["Lobby", "Queue", "Found", "Pick", "Game"];
     let at: i32 = match l.phase.as_str() {
         "Lobby" => 0,
@@ -2704,33 +3020,38 @@ fn dash_league(c: &mut Canvas, v: &View, r: R) {
     let px = |i: usize| x + 20.0 + span * i as f32 / (steps.len() - 1) as f32;
     c.rect((px(0), sy - 1.5, span, 3.0), 0x2A2A31, 1.0);
     if at > 0 && l.running {
-        c.rect((px(0), sy - 1.5, px(at as usize) - px(0), 3.0), GOLD, 1.0);
+        c.rect((px(0), sy - 1.5, px(at as usize) - px(0), 3.0), accent, 1.0);
     }
     for (i, name) in steps.iter().enumerate() {
         let done = l.running && (i as i32) < at;
         let now = l.running && i as i32 == at;
         if now {
-            c.circle(px(i), sy, 13.0, GOLD, if v.tick { 0.35 } else { 0.2 });
+            c.circle(px(i), sy, 13.0, accent, if v.tick { 0.35 } else { 0.2 });
         }
-        c.circle(px(i), sy, 8.0, if done || now { GOLD } else { 0x3A3A42 }, 1.0);
-        c.text(F::Medium, name, 12.0, px(i), sy + 26.0, if now { GOLD } else if done { TEXT_2 } else { FAINT }, Align::Center);
+        c.circle(px(i), sy, 8.0, if done || now { accent } else { 0x3A3A42 }, 1.0);
+        c.text(F::Medium, name, 12.0, px(i), sy + 26.0, if now { accent } else if done { TEXT_2 } else { FAINT }, Align::Center);
     }
     let auto = v.league_cfg.auto_accept;
     let pw = c.measure(F::Bold, if auto { "AUTO-ACCEPT" } else { "MANUAL" }, 11.0) + 11.0 * 1.4;
     c.pill(x + w - pw, y + h - 22.0, if auto { "AUTO-ACCEPT" } else { "MANUAL" }, 11.0, if auto { 0x1A3A24 } else { 0x2A2A31 }, if auto { 0x8EE0A8 } else { MUTED });
     let queue = l.queue.clone().unwrap_or_default();
-    let (big, col, sub) = if !l.running {
+    let live = l.live.as_ref();
+    let (big, col, sub) = if let Some(g) = live.filter(|g| g.dead && g.result.is_none()) {
+        (format!("Respawn {}", mmss(g.respawn.max(0.0).ceil())), 0xFF8A8A, format!("killed by {}", g.killed_by))
+    } else if let Some(g) = live {
+        (format!("{}  ·  {}/{}/{}", mmss(g.time), g.kills, g.deaths, g.assists), TEXT, format!("{}  ·  {} – {}  ·  {}", if l.mode_name.is_empty() { g.mode.clone() } else { l.mode_name.clone() }, g.ally_kills, g.enemy_kills, g.champion))
+    } else if !l.running {
         ("Client closed".to_string(), FAINT, String::new())
     } else {
         match l.phase.as_str() {
             "Matchmaking" => {
                 let (t, est) = l.search.unwrap_or((0.0, 0.0));
-                (mmss(t), GOLD, if est > 0.0 { format!("est {}  ·  {queue}", mmss(est)) } else { queue.clone() })
+                (mmss(t), accent, if est > 0.0 { format!("est {}  ·  {queue}", mmss(est)) } else { queue.clone() })
             }
-            "ReadyCheck" => ("Match found".to_string(), GOLD, queue.clone()),
+            "ReadyCheck" => ("Match found".to_string(), accent, queue.clone()),
             "ChampSelect" => {
                 let left = l.champ.as_ref().map(|c| (c.time_left_ms / 1000.0).max(0.0).ceil()).unwrap_or(0.0);
-                (format!("{left:.0}s to pick"), GOLD, l.champ.as_ref().map(|c| c.champion.clone()).unwrap_or_default())
+                (format!("{left:.0}s to pick"), accent, l.champ.as_ref().map(|c| c.champion.clone()).unwrap_or_default())
             }
             "Lobby" => ("In lobby".to_string(), TEXT, queue.clone()),
             "InProgress" | "GameStart" => ("In game".to_string(), TEXT, queue.clone()),
@@ -2739,9 +3060,12 @@ fn dash_league(c: &mut Canvas, v: &View, r: R) {
             _ => ("Home".to_string(), TEXT_2, String::new()),
         }
     };
+    // In a game with people you know: your record with them instead of the queue name.
+    let known: Vec<String> = l.with_now.iter().filter(|d| d.games > 0).take(3).map(|d| format!("{} {}–{}", d.name, d.wins, d.games - d.wins)).collect();
+    let (sub, sub_col) = if !known.is_empty() { (format!("with {}", known.join("  ·  ")), accent) } else { (sub, MUTED) };
     c.fit(F::Bold, &big, 30.0, w - pw - 16.0, x, y + h - 26.0, col, Align::Left);
     if !sub.is_empty() {
-        c.clip(F::Medium, &sub, 13.0, w - pw - 16.0, x, y + h - 4.0, MUTED);
+        c.clip(F::Medium, &sub, 13.0, w - pw - 16.0, x, y + h - 4.0, sub_col);
     }
 }
 
