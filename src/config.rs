@@ -232,10 +232,16 @@ pub struct PasteSettings {
     pub enabled: bool,
     /// How many recent copies to keep (in memory only).
     pub history: usize,
+    /// Also skip copies that look like API keys, tokens or private keys.
+    pub skip_secrets: bool,
+    /// Copies made while one of these apps is in front are never kept (matched without
+    /// case, as part of the app's name).
+    pub ignore_apps: Vec<String>,
 }
 impl Default for PasteSettings {
     fn default() -> Self {
-        PasteSettings { enabled: true, history: 20 }
+        let ignore = ["Passwords", "Keychain Access", "1Password", "Bitwarden", "KeePassXC", "Dashlane", "LastPass", "Enpass", "Strongbox"];
+        PasteSettings { enabled: true, history: 20, skip_secrets: true, ignore_apps: ignore.iter().map(|s| s.to_string()).collect() }
     }
 }
 
@@ -244,10 +250,12 @@ impl Default for PasteSettings {
 #[serde(rename_all = "camelCase", default)]
 pub struct WindowsSettings {
     pub enabled: bool,
+    /// Apps left off the switcher, by name or bundle id ("Finder", "com.apple.finder").
+    pub exclude: Vec<String>,
 }
 impl Default for WindowsSettings {
     fn default() -> Self {
-        WindowsSettings { enabled: true }
+        WindowsSettings { enabled: true, exclude: Vec::new() }
     }
 }
 
