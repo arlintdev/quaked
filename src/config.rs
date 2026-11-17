@@ -1,5 +1,6 @@
-//! User settings, shared with the companion app:
-//! ~/Library/Application Support/Quaked/config.json (camelCase JSON).
+//! User settings: ~/Library/Application Support/Quaked/config.json (camelCase JSON),
+//! edited on the board, in the settings page quaked serves, or by hand. Paired Macs keep
+//! the same settings: the newest `updatedAt` wins (each keeps its own `sync` section).
 //! The daemon writes defaults if the file is missing and reloads it when it changes.
 //! Unknown fields are ignored; missing fields take the defaults below.
 
@@ -60,6 +61,8 @@ impl PageId {
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
     pub version: u32,
+    /// When these settings last changed (unix ms); paired Macs take the newest.
+    pub updated_at: u64,
     /// Chirp when a Claude session starts waiting on you.
     pub buzzer: bool,
     /// Seconds without input before the board returns to the top level.
@@ -169,7 +172,7 @@ pub struct DeviceSettings {
     /// your call mic is chosen separately under soundboard.input.
     pub mic: bool,
     /// Screen brightness (luminance, 10-255) set on every connect; unset leaves whatever
-    /// the device has. The SETTINGS page and the companion write it.
+    /// the device has. The board's Settings page and the settings page write it.
     pub screen_brightness: Option<u8>,
 }
 
@@ -320,6 +323,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             version: 1,
+            updated_at: 0,
             buzzer: true,
             idle_seconds: 45,
             idle_home: true,
@@ -430,6 +434,15 @@ pub fn hue_sat(rgb: u32) -> (u8, u8) {
 }
 
 /// Loads the config, writing the defaults first if there is none.
+/// The saved settings; Err if the file exists but can't be read as settings.
+pub fn try_load() -> Result<Config, String> {
+    let p = path();
+    match std::fs::read_to_string(&p) {
+        Ok(text) => serde_json::from_str::<Config>(&text).map_err(|e| format!("{} is invalid ({e})", p.display())),
+        Err(_) => Ok(load()),
+    }
+}
+
 pub fn load() -> Config {
     let p = path();
     match std::fs::read_to_string(&p) {

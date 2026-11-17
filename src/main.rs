@@ -4,6 +4,7 @@
 //!                                ~/Library/Application Support/Quaked/config.json
 //!   quaked hook                  Claude Code hook: records session state from stdin
 //!   quaked hooks                 adds those hooks to ~/.claude/settings.json (install.sh runs it)
+//!   quaked settings              opens the settings page (http://127.0.0.1:47380)
 //!   quaked ctl <cmd>             drive the running board: turn 1|-1, press, double, hold, tap X Y;
 //!                                status, frame [page] (PNG on stdout), alert <page> [why]
 //!   quaked probe [secs]          prints raw HID traffic from the device
@@ -27,6 +28,7 @@ mod render;
 mod status;
 mod symbols;
 mod sync;
+mod web;
 
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -207,6 +209,14 @@ fn preview(dir: &str) {
         gitlab_error: None,
     };
     let settings = render::SettingsView { screen: 200, ring: 169, idle: 45, idle_home: true, ring_on: true, alert: true, buzzer: true, mic: false, auto_accept: true, snap: true, blink: true, jump: true };
+    let mut history = render::History::default();
+    for i in 0..34u32 {
+        render::History::push(&mut history.ai_steps, [0.0, 2.0, 5.0, 9.0, 4.0, 0.0, 0.0, 3.0, 12.0, 7.0, 6.0, 1.0][(i % 12) as usize]);
+        render::History::push(history.docker_cpu.entry("9b62926f50e3aa".into()).or_default(), 2.0 + ((i * 37) % 9) as f32 * 0.6);
+        for (url, base) in [("https://arlint.dev", 180.0), ("https://digin.work", 240.0), ("https://ibtg.notdone.dev", 120.0)] {
+            render::History::push(history.site_ms.entry(url.into()).or_default(), base + ((i * 53) % 13) as f32 * 9.0);
+        }
+    }
     let shots: [(&str, Page, Level, usize, usize, usize); 16] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
@@ -243,6 +253,7 @@ fn preview(dir: &str) {
             code: &code,
             settings,
             ring: &cfg.ring,
+            history: &history,
             level: &level,
             sessions: &sessions,
             sel,
@@ -305,6 +316,9 @@ fn main() {
     let sub = args.first().map(String::as_str).unwrap_or("run");
     match sub {
         "hook" => status::hook(),
+        "settings" | "ui" => {
+            let _ = std::process::Command::new("/usr/bin/open").arg(web::url()).status();
+        }
         "hooks" => match status::install_hooks() {
             Ok(msg) => println!("{msg}"),
             Err(e) => {

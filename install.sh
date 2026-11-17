@@ -19,6 +19,12 @@ fi
 ln -sf "$APP/Contents/MacOS/quaked" "$HOME/.local/bin/quaked"
 # Claude Code reports sessions through hooks in ~/.claude/settings.json.
 "$HOME/.local/bin/quaked" hooks
+# "Quaked Settings" in ~/Applications (and Spotlight) opens the settings page.
+SETTINGS="$HOME/Applications/Quaked Settings.app"
+mkdir -p "$SETTINGS/Contents/MacOS"
+cp bundle/settings/Info.plist "$SETTINGS/Contents/Info.plist"
+install -m 755 bundle/settings/quaked-settings "$SETTINGS/Contents/MacOS/quaked-settings"
+codesign --force --sign "${IDENTITY:--}" --identifier dev.arlint.quaked.settings "$SETTINGS" 2>/dev/null || true
 cp launchd/dev.arlint.quaked.plist "$HOME/Library/LaunchAgents/"
 launchctl bootout "gui/$(id -u)/dev.arlint.quaked" 2>/dev/null || true
 # bootout returns before the old instance has exited; bootstrap fails until it has.
@@ -27,4 +33,4 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.5
 done
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.arlint.quaked.plist"
-echo "quaked installed; log: ~/Library/Logs/quaked.log"
+echo "quaked installed; settings: http://127.0.0.1:47380 (or open Quaked Settings); log: ~/Library/Logs/quaked.log"

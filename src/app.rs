@@ -25,9 +25,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tiny_skia::Pixmap;
 use winit::application::ApplicationHandler;
@@ -73,8 +73,19 @@ pub enum Event {
     Ops(ops::Status),
     Code(github::Status),
     Sync(sync::Status),
+    /// A paired Mac has newer settings: (its name, its config JSON).
+    PeerConfig(String, String),
+    /// A Mac asks to pair; answer true to give it the key.
+    PairRequest(String, Sender<bool>),
     /// A control-socket request and where to send the reply.
     Ctl(String, Sender<Vec<u8>>),
+}
+
+/// A Mac waiting for you to allow pairing (on the board or the settings page).
+struct PairAsk {
+    name: String,
+    reply: Sender<bool>,
+    until: Instant,
 }
 
 /// Something new to look at: the ring blinks in its page's color until you touch the board.
@@ -117,6 +128,13 @@ struct App {
     peers: sync::Status,
     /// Poll the other Macs only while the Quake is attached here.
     sync_want: Arc<AtomicBool>,
+    /// `updatedAt` of the current settings, for the sync thread.
+    config_at: Arc<AtomicU64>,
+    pair_ask: Option<PairAsk>,
+    // Dashboard graphs
+    history: render::History,
+    ai_total: Option<u64>,
+    next_ai_sample: Instant,
     // AI
     sessions: Vec<Session>,
     states: HashMap<String, State>,
@@ -303,6 +321,7 @@ impl App {
                 snap: self.cfg.league.snap,
             },
             ring: &self.cfg.ring,
+            history: &self.history,
             level: &self.level,
             sessions: &self.sessions,
             sel: self.sel,
@@ -365,7 +384,26 @@ impl App {
             return;
         }
         self.cfg_mtime = mtime;
-        let cfg = config::load();
+        let mut cfg = match config::try_load() {
+            Ok(c) => c,
+            Err(e) => {
+                // Never fall back to defaults here: they'd be stamped and copied to the other Mac.
+                device::log(format!("config: {e}; keeping the current settings"));
+                return;
+            }
+        };
+        // Changed outside quaked (by hand): stamp it, so the other Mac takes it too.
+        if cfg.updated_at <= self.cfg.updated_at && !same_settings(&cfg, &self.cfg) {
+            cfg.updated_at = status::now_ms();
+            self.adopt(cfg, force);
+            self.write_config();
+            return;
+        }
+        self.adopt(cfg, force);
+    }
+
+    /// Applies settings: tells each part what changed, then keeps them.
+    fn adopt(&mut self, cfg: Config, force: bool) {
         if cfg != self.cfg || force {
             if cfg.soundboard != self.cfg.soundboard || force {
                 let _ = self.audio.cmd.send(audio::Cmd::Configure(cfg.soundboard.clone()));
@@ -406,6 +444,7 @@ impl App {
             self.update_ring();
             self.redraw();
         }
+        self.config_at.store(self.cfg.updated_at, Ordering::Relaxed);
     }
 
     fn update_ring(&mut self) {
@@ -480,6 +519,15 @@ impl App {
         }
         self.states = states;
         self.loaded_once = true;
+        // Dashboard: Claude steps per 30 seconds, across every Mac.
+        if Instant::now() >= self.next_ai_sample {
+            let total: u64 = self.sessions.iter().map(|s| s.step_count as u64).sum();
+            if let Some(prev) = self.ai_total {
+                render::History::push(&mut self.history.ai_steps, total.saturating_sub(prev) as f32);
+            }
+            self.ai_total = Some(total);
+            self.next_ai_sample = Instant::now() + Duration::from_secs(30);
+        }
         if let Some(i) = newly_waiting {
             if let Some(name) = self.sessions.get(i).map(|s| s.name.clone()) {
                 if self.alert(PageId::Ai, format!("{name} needs you"), false) {
@@ -532,6 +580,20 @@ impl App {
         }
     }
 
+    /// The pairing question in the top bar, with the ring blinking.
+    fn show_pair_ask(&mut self) {
+        let Some(a) = &self.pair_ask else { return };
+        let reason = format!("{} wants to pair  ·  press to allow  ·  double-click to refuse", a.name);
+        self.attention = Some(Attention { page: self.page, reason, until: a.until });
+        self.blink_on = true;
+        self.next_blink = Instant::now() + BLINK;
+        if self.cfg.buzzer {
+            let _ = self.commands.send(Command::Tone(NEW_STUFF_TONE.to_vec()));
+        }
+        self.update_ring();
+        self.redraw();
+    }
+
     fn clear_attention(&mut self) {
         if self.attention.take().is_some() {
             self.update_ring();
@@ -561,13 +623,74 @@ impl App {
 
     /// Writes the config (after a change made on the board, like the auto-accept toggle).
     fn save_config(&mut self) {
-        let path = config::path();
-        let tmp = path.with_extension("json.tmp");
-        if let Ok(text) = serde_json::to_string_pretty(&self.cfg) {
-            if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-                self.cfg_mtime = config::modified();
-            }
+        self.cfg.updated_at = status::now_ms();
+        self.write_config();
+    }
+
+    /// Writes the settings as they are (keeping their `updatedAt`).
+    fn write_config(&mut self) {
+        if config::save(&self.cfg) {
+            self.cfg_mtime = config::modified();
         }
+        self.config_at.store(self.cfg.updated_at, Ordering::Relaxed);
+    }
+
+    /// Settings from the settings page.
+    fn config_put(&mut self, json: &str) -> Vec<u8> {
+        match serde_json::from_str::<Config>(json) {
+            Ok(mut c) => {
+                c.updated_at = status::now_ms();
+                self.adopt(c, false);
+                self.write_config();
+                b"ok\n".to_vec()
+            }
+            Err(e) => format!("error: {e}\n").into_bytes(),
+        }
+    }
+
+    fn answer_pair(&mut self, allow: bool) {
+        if let Some(a) = self.pair_ask.take() {
+            let _ = a.reply.send(allow);
+            device::log(format!("sync: {} pairing with {}", if allow { "allowed" } else { "refused" }, a.name));
+            self.clear_attention();
+        }
+    }
+
+    /// Everything the settings page needs, in one reply.
+    fn state_json(&self) -> String {
+        let route = if self.connected {
+            serde_json::json!({"kind": "local"})
+        } else {
+            match self.peers.peers.iter().find(|p| p.ok && p.board) {
+                Some(p) => serde_json::json!({"kind": "remote", "name": p.name, "host": p.host, "port": p.port}),
+                None => serde_json::json!({"kind": "none"}),
+            }
+        };
+        let folder = if self.cfg.soundboard.folder.is_empty() { config::Soundboard::default().folder } else { self.cfg.soundboard.folder.clone() };
+        serde_json::json!({
+            "machine": self.peers.name,
+            "config": self.cfg,
+            "status": serde_json::from_str::<serde_json::Value>(&self.status_json()).unwrap_or_default(),
+            "peers": self.peers.peers.iter().map(|p| serde_json::json!({
+                "name": p.name, "host": p.host, "port": p.port, "ok": p.ok, "error": p.error,
+                "board": p.board, "sessions": p.sessions.len(), "configAt": p.config_at,
+            })).collect::<Vec<_>>(),
+            "pairAsk": self.pair_ask.as_ref().map(|a| a.name.clone()),
+            "route": route,
+            "clipsFolder": config::expand(&folder),
+        })
+        .to_string()
+            + "\n"
+    }
+
+    /// An SF Symbol as a white PNG with alpha, for the settings page.
+    fn symbol_png(&self, name: &str, px: f32) -> Vec<u8> {
+        let Some(m) = self.symbols.get(name, px.clamp(8.0, 256.0)) else { return Vec::new() };
+        let Some(mut p) = Pixmap::new(m.w.max(1), m.h.max(1)) else { return Vec::new() };
+        for (i, a) in m.alpha.iter().enumerate() {
+            p.data_mut()[i * 4..i * 4 + 4].copy_from_slice(&[*a, *a, *a, *a]);
+        }
+        p.encode_png().unwrap_or_default()
     }
 
     fn toggle_auto_accept(&mut self) {
@@ -768,6 +891,10 @@ impl App {
     }
 
     fn knob_press(&mut self, code: u8) {
+        // A Mac waiting to pair: press allows, double-click refuses.
+        if self.pair_ask.is_some() && (code == KNOB_PRESS || code == KNOB_DOUBLE) {
+            return self.answer_pair(code == KNOB_PRESS);
+        }
         match code {
             KNOB_PRESS => match (self.page, self.level.clone()) {
                 (PageId::Ai, Level::Top) => {
@@ -1106,12 +1233,27 @@ impl App {
                 "playing": playing,
                 "micMuted": self.sounds.mic_muted,
                 "clips": self.sounds.clips.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+                "clipFiles": self.sounds.clips.iter().map(|c| serde_json::json!({
+                    "title": c.title,
+                    "file": c.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+                    "color": c.color, "symbol": c.symbol, "gain": c.gain,
+                })).collect::<Vec<_>>(),
+                "live": self.cfg.soundboard.live,
             },
         })
         .to_string()
     }
 
     fn on_ctl(&mut self, line: &str) -> Vec<u8> {
+        if let Some(json) = line.strip_prefix("config-put ") {
+            return self.config_put(json);
+        }
+        if let Some(key) = line.strip_prefix("set-key ") {
+            self.cfg.sync.key = key.trim().to_string();
+            self.save_config();
+            let _ = self.sync_cmd.send(sync::Cmd::Configure(self.cfg.sync.clone()));
+            return b"ok\n".to_vec();
+        }
         let parts: Vec<&str> = line.split_whitespace().collect();
         let ok = b"ok\n".to_vec();
         let input = |i: Input| Some(i);
@@ -1132,6 +1274,13 @@ impl App {
         }
         match parts.as_slice() {
             ["status"] => (self.status_json() + "\n").into_bytes(),
+            ["state"] => self.state_json().into_bytes(),
+            ["config"] => (serde_json::to_string(&self.cfg).unwrap_or_default() + "\n").into_bytes(),
+            ["pair-answer", a] => {
+                self.answer_pair(*a == "yes");
+                ok
+            }
+            ["symbol", name, px] => self.symbol_png(name, px.parse().unwrap_or(32.0)),
             ["frame"] => self.render(render::W as u32, render::H as u32).pixmap.encode_png().unwrap_or_default(),
             // Renders another page at its top level without switching the board to it.
             ["frame", p] => match serde_json::from_value::<PageId>(serde_json::Value::String(p.to_string())) {
@@ -1229,6 +1378,11 @@ impl ApplicationHandler<Event> for App {
             Event::Docker(st) => {
                 let news = if self.docker.ok && st.ok { docker_news(&self.docker, &st) } else { Vec::new() };
                 self.docker = st;
+                let ids: Vec<String> = self.docker.containers.iter().map(|c| c.id.clone()).collect();
+                self.history.docker_cpu.retain(|id, _| ids.contains(id));
+                for ct in self.docker.containers.iter().filter(|c| c.state == "running") {
+                    render::History::push(self.history.docker_cpu.entry(ct.id.clone()).or_default(), ct.cpu.unwrap_or(0.0));
+                }
                 if let Some(r) = Self::summarize(news) {
                     self.alert(PageId::Docker, r, true);
                 }
@@ -1244,6 +1398,14 @@ impl ApplicationHandler<Event> for App {
             }
             Event::Ops(st) => {
                 let news = ops_news(&self.ops, &st);
+                // Dashboard: a response time per site check (0 = it failed).
+                for site in &st.sites {
+                    let changed = self.ops.sites.iter().find(|s| s.url == site.url).is_none_or(|s| s.ms != site.ms || s.code != site.code);
+                    if changed {
+                        let ms = if site.code.is_some_and(|c| c < 400) { site.ms.unwrap_or(0) as f32 } else { 0.0 };
+                        render::History::push(self.history.site_ms.entry(site.url.clone()).or_default(), ms);
+                    }
+                }
                 self.ops = st;
                 if let Some(r) = Self::summarize(news) {
                     self.alert(PageId::Ops, r, true);
@@ -1268,6 +1430,24 @@ impl ApplicationHandler<Event> for App {
                 self.peers = st;
                 self.poll_status();
                 self.redraw();
+            }
+            Event::PeerConfig(from, json) => match serde_json::from_str::<Config>(&json) {
+                Ok(mut c) if c.updated_at > self.cfg.updated_at => {
+                    c.sync = self.cfg.sync.clone(); // the key and name stay per Mac
+                    device::log(format!("settings: took the newer settings from {from}"));
+                    self.adopt(c, false);
+                    self.write_config();
+                }
+                Ok(_) => {}
+                Err(e) => device::log(format!("settings from {from}: {e}")),
+            },
+            Event::PairRequest(name, reply) => {
+                if self.pair_ask.is_some() {
+                    let _ = reply.send(false);
+                } else {
+                    self.pair_ask = Some(PairAsk { name, reply, until: Instant::now() + Duration::from_secs(60) });
+                    self.show_pair_ask();
+                }
             }
             Event::Ctl(line, reply) => {
                 let out = self.on_ctl(&line);
@@ -1330,6 +1510,13 @@ impl ApplicationHandler<Event> for App {
         if self.page == PageId::Docker && matches!(self.level, Level::Detail(_)) {
             wake = wake.min(self.next_logs);
         }
+        if let Some(a) = &self.pair_ask {
+            if now >= a.until {
+                self.answer_pair(false);
+            } else if self.attention.is_none() {
+                self.show_pair_ask();
+            }
+        }
         if let Some(a) = &self.attention {
             if now >= a.until {
                 self.clear_attention();
@@ -1352,6 +1539,14 @@ impl ApplicationHandler<Event> for App {
         }
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
+}
+
+/// Same settings apart from when they were saved.
+fn same_settings(a: &Config, b: &Config) -> bool {
+    let (mut a, mut b) = (a.clone(), b.clone());
+    a.updated_at = 0;
+    b.updated_at = 0;
+    a == b
 }
 
 // ---------------------------------------------------------------- what's new
@@ -1429,7 +1624,31 @@ pub fn ctl_socket_path() -> std::path::PathBuf {
 }
 
 /// One request per connection: a line in, a reply out, then close.
-fn ctl_thread(proxy: winit::event_loop::EventLoopProxy<Event>, audio: Sender<audio::Cmd>) {
+/// Runs one control command (the `quaked ctl` lines) against the board, from any thread.
+pub type Ctl = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
+
+fn ctl_caller(proxy: winit::event_loop::EventLoopProxy<Event>, audio: Sender<audio::Cmd>) -> Ctl {
+    let proxy = Mutex::new(proxy);
+    let audio = Mutex::new(audio);
+    Arc::new(move |line: &str| {
+        if line == "audio-devices" {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = audio.lock().unwrap().send(audio::Cmd::Devices(tx));
+            // The first enumeration can take seconds while devices wake up.
+            return match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok((inputs, outputs)) => (serde_json::json!({"inputs": inputs, "outputs": outputs}).to_string() + "\n").into_bytes(),
+                Err(_) => b"error: audio engine busy\n".to_vec(),
+            };
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        if proxy.lock().unwrap().send_event(Event::Ctl(line.to_string(), tx)).is_err() {
+            return b"error: quaked is stopping\n".to_vec();
+        }
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| b"error: timeout\n".to_vec())
+    })
+}
+
+fn ctl_thread(ctl: Ctl) {
     let path = ctl_socket_path();
     let _ = std::fs::remove_file(&path);
     let listener = match std::os::unix::net::UnixListener::bind(&path) {
@@ -1437,8 +1656,7 @@ fn ctl_thread(proxy: winit::event_loop::EventLoopProxy<Event>, audio: Sender<aud
         Err(e) => return device::log(format!("ctl: cannot listen on {}: {e}", path.display())),
     };
     for conn in listener.incoming().flatten() {
-        let proxy = proxy.clone();
-        let audio = audio.clone();
+        let ctl = ctl.clone();
         std::thread::spawn(move || {
             let _ = conn.set_read_timeout(Some(Duration::from_secs(25)));
             let mut reader = BufReader::new(&conn);
@@ -1446,22 +1664,7 @@ fn ctl_thread(proxy: winit::event_loop::EventLoopProxy<Event>, audio: Sender<aud
             if reader.read_line(&mut line).is_err() {
                 return;
             }
-            let line = line.trim().to_string();
-            let reply = if line == "audio-devices" {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let _ = audio.send(audio::Cmd::Devices(tx));
-                // The first enumeration can take seconds while devices wake up.
-                match rx.recv_timeout(Duration::from_secs(20)) {
-                    Ok((inputs, outputs)) => (serde_json::json!({"inputs": inputs, "outputs": outputs}).to_string() + "\n").into_bytes(),
-                    Err(_) => b"error: audio engine busy\n".to_vec(),
-                }
-            } else {
-                let (tx, rx) = std::sync::mpsc::channel();
-                if proxy.send_event(Event::Ctl(line, tx)).is_err() {
-                    return;
-                }
-                rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| b"error: timeout\n".to_vec())
-            };
+            let reply = ctl(line.trim());
             let mut w = &conn;
             let _ = w.write_all(&reply);
         });
@@ -1515,14 +1718,28 @@ pub fn run() {
     let code_cmd = github::spawn(cfg.code.clone(), code_fast.clone(), move |st| {
         let _ = p8.send_event(Event::Code(st));
     });
+    let ctl = ctl_caller(proxy.clone(), audio.cmd.clone());
     let sync_want = Arc::new(AtomicBool::new(false));
-    let p9 = proxy.clone();
-    let sync_cmd = sync::spawn(cfg.sync.clone(), sync_want.clone(), move |st| {
-        let _ = p9.send_event(Event::Sync(st));
+    let config_at = Arc::new(AtomicU64::new(cfg.updated_at));
+    let p10 = Mutex::new(proxy.clone());
+    let pair: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |who: &str| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if p10.lock().unwrap().send_event(Event::PairRequest(who.to_string(), tx)).is_err() {
+            return false;
+        }
+        rx.recv_timeout(Duration::from_secs(65)).unwrap_or(false)
     });
-    let p4 = proxy.clone();
-    let audio_cmd = audio.cmd.clone();
-    std::thread::Builder::new().name("ctl".into()).spawn(move || ctl_thread(p4, audio_cmd)).unwrap();
+    let hooks = sync::Hooks { ctl: ctl.clone(), pair, board: sync_want.clone(), config_at: config_at.clone() };
+    let p9 = proxy.clone();
+    let sync_cmd = sync::spawn(cfg.sync.clone(), hooks, move |out| {
+        let _ = p9.send_event(match out {
+            sync::Out::Status(st) => Event::Sync(st),
+            sync::Out::Config { from, json } => Event::PeerConfig(from, json),
+        });
+    });
+    let ctl_socket = ctl.clone();
+    std::thread::Builder::new().name("ctl".into()).spawn(move || ctl_thread(ctl_socket)).unwrap();
+    crate::web::spawn(ctl.clone());
     let first_page = cfg.pages.first().copied().unwrap_or(PageId::Ai);
     let mut app = App {
         cfg_mtime: config::modified(),
@@ -1550,6 +1767,11 @@ pub fn run() {
         sync_cmd,
         peers: sync::Status::default(),
         sync_want,
+        config_at,
+        pair_ask: None,
+        history: render::History::default(),
+        ai_total: None,
+        next_ai_sample: Instant::now(),
         sessions: Vec::new(),
         states: HashMap::new(),
         loaded_once: false,

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Opens the settings page that quaked serves on this Mac.
+exec /usr/bin/open "http://127.0.0.1:47380/"

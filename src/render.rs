@@ -12,8 +12,8 @@ use crate::status::{Session, State, Step, StepStatus};
 use crate::symbols::Symbols;
 use fontdue::{Font, FontSettings, Metrics};
 use std::cell::RefCell;
-use std::collections::HashMap;
-use tiny_skia::{Color, FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
+use std::collections::{HashMap, VecDeque};
+use tiny_skia::{Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 
 pub const W: f32 = 1920.0;
 pub const H: f32 = 480.0;
@@ -105,6 +105,8 @@ pub struct View<'a> {
     pub settings: SettingsView,
     /// Page colors, for the dashboard tiles.
     pub ring: &'a crate::config::Ring,
+    /// Recent samples for the dashboard's graphs.
+    pub history: &'a History,
     pub level: &'a Level,
     pub sessions: &'a [Session],
     pub sel: usize,
@@ -460,6 +462,35 @@ impl<'a> Canvas<'a> {
         pb.close();
         if let Some(path) = pb.finish() {
             self.pixmap.fill_path(&path, &Self::paint(color, 1.0), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    fn poly_alpha(&mut self, pts: &[(f32, f32)], color: u32, alpha: f32) {
+        let s = self.scale;
+        let mut pb = PathBuilder::new();
+        pb.move_to(pts[0].0 * s, pts[0].1 * s);
+        for p in &pts[1..] {
+            pb.line_to(p.0 * s, p.1 * s);
+        }
+        pb.close();
+        if let Some(path) = pb.finish() {
+            self.pixmap.fill_path(&path, &Self::paint(color, alpha), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    fn polyline(&mut self, pts: &[(f32, f32)], color: u32, width: f32) {
+        if pts.len() < 2 {
+            return;
+        }
+        let s = self.scale;
+        let mut pb = PathBuilder::new();
+        pb.move_to(pts[0].0 * s, pts[0].1 * s);
+        for p in &pts[1..] {
+            pb.line_to(p.0 * s, p.1 * s);
+        }
+        if let Some(path) = pb.finish() {
+            let stroke = Stroke { width: width * s, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
+            self.pixmap.stroke_path(&path, &Self::paint(color, 1.0), &stroke, Transform::identity(), None);
         }
     }
 
@@ -1461,7 +1492,7 @@ fn shortcuts(c: &mut Canvas, v: &View) {
         }
     }
     if v.shortcuts.is_empty() {
-        c.text(F::Medium, "No shortcuts yet: add some in Quaked Companion", 26.0, W / 2.0, CY + CH / 2.0, FAINT, Align::Center);
+        c.text(F::Medium, "No shortcuts yet: add some in Quaked Settings", 26.0, W / 2.0, CY + CH / 2.0, FAINT, Align::Center);
     }
 }
 
@@ -1497,7 +1528,7 @@ fn soundboard(c: &mut Canvas, v: &View) {
         let top = CY + STRIP_H + 6.0;
         c.rrect((M, top, W - 2.0 * M, CY + CH - top), 16.0, PANEL_DEEP, 1.0);
         c.text(F::Medium, "No clips yet", 30.0, W / 2.0, top + 140.0, TEXT_2, Align::Center);
-        c.text(F::Regular, "Drop audio files into ~/Music/Quaked Soundboard, or add them in Quaked Companion.", 20.0, W / 2.0, top + 178.0, FAINT, Align::Center);
+        c.text(F::Regular, "Drop audio files into ~/Music/Quaked Soundboard, or add them in Quaked Settings.", 20.0, W / 2.0, top + 178.0, FAINT, Align::Center);
         return;
     }
     let first = clip_window(s.clips.len(), v.tile);
@@ -2282,26 +2313,18 @@ fn dash_page(c: &mut Canvas, v: &View) {
             let pw = c.measure(F::Bold, "NEW", 12.0) + 12.0 * 1.4;
             c.pill(rx - pw, y + 19.0, "NEW", 12.0, color, 0x101013);
         }
-        let ix = x + 24.0;
-        let iw = w - 44.0;
-        c.fit(F::Bold, &b.big, 34.0, iw, ix, y + 84.0, b.big_color, Align::Left);
-        let mut ly = y + 114.0;
-        for (t, col) in b.lines.iter().take(3) {
-            c.fit(F::Medium, t, 16.0, iw, ix, ly, *col, Align::Left);
-            ly += 24.0;
-        }
-        if let Some(f) = b.bar {
-            bar(c, ix, y + h - 26.0, iw, f.clamp(0.0, 1.0), color);
-        }
-        if p == Page::Shortcuts {
-            // The first tiles' icons, in their colors.
-            let mut sx = ix + 14.0;
-            for sc in v.shortcuts.iter().take(((iw - 10.0) / 44.0) as usize) {
-                let col = crate::config::hex(&sc.color, TEXT_2);
-                c.rrect((sx - 18.0, y + h - 66.0, 36.0, 36.0), 9.0, 0x22222A, 1.0);
-                c.symbol(&sc.symbol, 18.0, sx, y + h - 48.0, col);
-                sx += 44.0;
-            }
+        // Each tile draws its own picture of the page below the header.
+        let inner = (x + 24.0, y + 50.0, w - 44.0, h - 62.0);
+        match p {
+            Page::Ai => dash_ai(c, v, inner, &b),
+            Page::Music => dash_music(c, v, inner, color),
+            Page::Shortcuts => dash_shortcuts(c, v, inner),
+            Page::Soundboard => dash_sounds(c, v, inner),
+            Page::League => dash_league(c, v, inner),
+            Page::Docker => dash_docker(c, v, inner, color, &b),
+            Page::Ops => dash_ops(c, v, inner, &b),
+            Page::Code => dash_code(c, v, inner, color, &b),
+            Page::Dash | Page::Settings => {}
         }
         if v.level != &Level::Top && v.tile == i {
             c.outline(r, 16.0, TEXT, 3.0);
@@ -2309,6 +2332,396 @@ fn dash_page(c: &mut Canvas, v: &View) {
             c.outline(r, 16.0, color, 2.0);
         }
     }
+}
+
+// ---------------------------------------------------------------- dashboard tiles
+
+/// How many samples the dashboard graphs keep.
+pub const HISTORY: usize = 40;
+
+/// Recent samples behind the dashboard's graphs (the app fills it as data comes in).
+#[derive(Debug, Default)]
+pub struct History {
+    /// Claude steps taken in each 30-second slice, oldest first.
+    pub ai_steps: VecDeque<f32>,
+    /// CPU % per container id.
+    pub docker_cpu: HashMap<String, VecDeque<f32>>,
+    /// Response time (ms, 0 = failed) per site URL.
+    pub site_ms: HashMap<String, VecDeque<f32>>,
+}
+
+impl History {
+    pub fn push(q: &mut VecDeque<f32>, v: f32) {
+        q.push_back(v);
+        while q.len() > HISTORY {
+            q.pop_front();
+        }
+    }
+}
+
+/// A line graph with a soft fill; the newest value is the dot at the right.
+fn sparkline(c: &mut Canvas, r: R, values: &[f32], floor_max: f32, color: u32) {
+    let (x, y, w, h) = r;
+    if values.len() < 2 {
+        c.rrect((x, y + h - 2.0, w, 2.0), 1.0, LINE, 1.0);
+        return;
+    }
+    let max = values.iter().cloned().fold(floor_max, f32::max).max(1e-3);
+    let n = values.len();
+    let pts: Vec<(f32, f32)> = values.iter().enumerate().map(|(i, v)| (x + w * i as f32 / (n - 1) as f32, y + h - (h - 2.0) * (v / max).clamp(0.0, 1.0))).collect();
+    let mut area = pts.clone();
+    area.push((x + w, y + h));
+    area.push((x, y + h));
+    c.poly_alpha(&area, color, 0.16);
+    c.polyline(&pts, color, 2.0);
+    let (lx, ly) = pts[n - 1];
+    c.circle(lx, ly, 3.2, color, 1.0);
+}
+
+/// Bars in fixed slots, newest at the right (empty slots on the left until it fills).
+fn bars(c: &mut Canvas, r: R, values: &[f32], slots: usize, color: u32) {
+    let (x, y, w, h) = r;
+    let bw = w / slots as f32;
+    let max = values.iter().cloned().fold(1.0, f32::max);
+    let offset = slots.saturating_sub(values.len());
+    for i in 0..slots {
+        let bx = x + i as f32 * bw + 1.0;
+        match i.checked_sub(offset).and_then(|j| values.get(j)) {
+            Some(&v) if v > 0.0 => {
+                let bh = (h * v / max).max(3.0);
+                c.rrect((bx, y + h - bh, (bw - 2.0).max(1.0), bh), 1.5, color, 1.0);
+            }
+            _ => c.rrect((bx, y + h - 2.0, (bw - 2.0).max(1.0), 2.0), 1.0, LINE, 1.0),
+        }
+    }
+}
+
+/// A small pill with a colored dot and a label; returns its width.
+fn chip(c: &mut Canvas, x: f32, y: f32, dot: u32, label: &str, bg: u32, fg: u32, max_w: f32) -> f32 {
+    let tw = c.measure(F::Medium, label, 13.0).min(max_w - 30.0).max(0.0);
+    let w = tw + 30.0;
+    c.rrect((x, y, w, 24.0), 12.0, bg, 1.0);
+    c.circle(x + 12.0, y + 12.0, 4.5, dot, 1.0);
+    c.clip(F::Medium, label, 13.0, tw, x + 22.0, y + 17.0, fg);
+    w
+}
+
+fn dash_ai(c: &mut Canvas, v: &View, r: R, b: &Brief) {
+    let (x, y, w, h) = r;
+    c.fit(F::Bold, &b.big, 28.0, w, x, y + 26.0, b.big_color, Align::Left);
+    // One chip per session, waiting first.
+    let mut order: Vec<&Session> = v.sessions.iter().collect();
+    order.sort_by_key(|s| match s.state {
+        State::Waiting => 0,
+        State::Working => 1,
+        State::Done => 2,
+        State::Idle => 3,
+    });
+    let mut cx = x;
+    let mut shown = 0;
+    for s in &order {
+        let st = state_style(s.state);
+        let label = if s.machine.is_empty() { s.name.clone() } else { format!("{} · {}", s.name, s.machine) };
+        let need = c.measure(F::Medium, &label, 13.0).min(150.0) + 30.0;
+        if cx + need > x + w - 40.0 && shown > 0 {
+            let more = order.len() - shown;
+            c.text(F::Medium, &format!("+{more}"), 13.0, cx + 4.0, y + 54.0, MUTED, Align::Left);
+            break;
+        }
+        let bg = if s.state == State::Waiting { 0x3A2C08 } else { 0x22222A };
+        cx += chip(c, cx, y + 37.0, st.accent, &label, bg, if s.state == State::Idle { MUTED } else { TEXT }, 180.0) + 6.0;
+        shown += 1;
+    }
+    // Activity: steps per 30 s over the last 20 minutes.
+    let gr = (x, y + h - 46.0, w, 40.0);
+    let steps: Vec<f32> = v.history.ai_steps.iter().copied().collect();
+    if steps.iter().all(|s| *s == 0.0) && steps.len() < 4 {
+        c.text(F::Medium, "activity shows up here as Claude works", 13.0, x, y + h - 10.0, FAINT, Align::Left);
+    } else {
+        bars(c, gr, &steps, HISTORY, ORANGE);
+        c.text(F::Medium, "steps · last 20 min", 11.0, x + w, gr.1 - 4.0, FAINT, Align::Right);
+    }
+}
+
+fn dash_music(c: &mut Canvas, v: &View, r: R, color: u32) {
+    let (x, y, w, h) = r;
+    let Some(t) = v.track else {
+        c.symbol("music.note", 40.0, x + 40.0, y + h / 2.0, FAINT);
+        c.text(F::Bold, "Nothing playing", 26.0, x + 86.0, y + h / 2.0 + 4.0, FAINT, Align::Left);
+        if let Some(pb) = v.problem {
+            c.clip(F::Medium, pb, 13.0, w - 90.0, x + 86.0, y + h / 2.0 + 28.0, MUTED);
+        }
+        return;
+    };
+    let art = h.min(128.0);
+    let ar = (x, y + (h - art) / 2.0, art, art);
+    match v.art {
+        Some(img) => c.image(img, ar, 12.0),
+        None => {
+            c.rrect(ar, 12.0, 0x22222A, 1.0);
+            c.symbol("music.note", 44.0, ar.0 + art / 2.0, ar.1 + art / 2.0, color);
+        }
+    }
+    let tx = x + art + 18.0;
+    let tw = w - art - 18.0;
+    c.fit(F::Bold, &t.title, 22.0, tw, tx, y + 26.0, TEXT, Align::Left);
+    c.fit(F::Medium, &t.artist, 16.0, tw, tx, y + 50.0, TEXT_2, Align::Left);
+    c.symbol(if t.playing { "play.fill" } else { "pause.fill" }, 12.0, tx + 6.0, y + 70.0, if t.playing { SPOTIFY } else { MUTED });
+    c.clip(F::Medium, &format!("{}  ·  {}", t.app, if t.playing { "playing" } else { "paused" }), 13.0, tw - 20.0, tx + 18.0, y + 75.0, MUTED);
+    let frac = if t.duration > 0.0 { (v.position / t.duration) as f32 } else { 0.0 };
+    bar(c, tx, y + h - 34.0, tw, frac.clamp(0.0, 1.0), color);
+    c.text(F::Mono, &mmss(v.position), 13.0, tx, y + h - 8.0, MUTED, Align::Left);
+    c.text(F::Mono, &format!("-{}", mmss((t.duration - v.position).max(0.0))), 13.0, tx + tw, y + h - 8.0, MUTED, Align::Right);
+}
+
+fn dash_shortcuts(c: &mut Canvas, v: &View, r: R) {
+    let (x, y, w, h) = r;
+    if v.shortcuts.is_empty() {
+        c.text(F::Medium, "No shortcuts yet", 22.0, x, y + 40.0, FAINT, Align::Left);
+        return;
+    }
+    let gap = 8.0;
+    let cols = 8usize;
+    let rows = if v.shortcuts.len() > cols { 2 } else { 1 };
+    let s = ((w - gap * (cols as f32 - 1.0)) / cols as f32).min((h - gap * (rows as f32 - 1.0)) / rows as f32).min(52.0);
+    let top = y + (h - (s * rows as f32 + gap * (rows as f32 - 1.0))) / 2.0;
+    for (i, sc) in v.shortcuts.iter().take(cols * rows).enumerate() {
+        let (cx, cy) = (x + (i % cols) as f32 * (s + gap), top + (i / cols) as f32 * (s + gap));
+        let col = crate::config::hex(&sc.color, TEXT_2);
+        c.rrect((cx, cy, s, s), 12.0, 0x22222A, 1.0);
+        c.rrect((cx, cy + s - 3.0, s, 3.0), 1.5, col, 0.55);
+        c.symbol(&sc.symbol, s * 0.42, cx + s / 2.0, cy + s / 2.0 - 1.0, col);
+    }
+}
+
+fn dash_sounds(c: &mut Canvas, v: &View, r: R) {
+    let (x, y, w, h) = r;
+    let s = v.sounds;
+    let (label, bg, fg) = if s.error.is_some() {
+        ("AUDIO ERROR", 0x4A1A1A, 0xFFD0D0)
+    } else if s.live {
+        ("ON AIR", 0xD63A3A, 0xFFFFFF)
+    } else {
+        ("OFF AIR", 0x2A2A31, MUTED)
+    };
+    let bw = c.measure(F::Bold, label, 15.0) + 36.0;
+    c.rrect((x, y + 4.0, bw, 32.0), 9.0, bg, 1.0);
+    if s.live {
+        c.circle(x + 14.0, y + 20.0, 4.5, 0xFFFFFF, if v.tick { 1.0 } else { 0.45 });
+    }
+    c.text(F::Bold, label, 15.0, x + if s.live { 24.0 } else { 18.0 }, y + 25.0, fg, Align::Left);
+    let app = s.listener.as_deref().map(|l| crate::symbols::running_app_name(l).unwrap_or_else(|| l.rsplit('.').next().unwrap_or(l).to_string()));
+    let what = match (&s.error, &app) {
+        (Some(e), _) => e.clone(),
+        (None, Some(a)) if s.live => format!("in {a}"),
+        _ => "not on a call".into(),
+    };
+    c.fit(F::Medium, &what, 17.0, w - bw - 60.0, x + bw + 14.0, y + 26.0, if s.live { TEXT } else { MUTED }, Align::Left);
+    c.symbol(if s.mic_muted { "mic.slash.fill" } else { "mic.fill" }, 18.0, x + w - 12.0, y + 20.0, if s.mic_muted { RED } else { MUTED });
+    // The clips, the ones playing ringed.
+    let d = 40.0;
+    let n = ((w + 8.0) / (d + 8.0)) as usize;
+    for (i, clip) in s.clips.iter().take(n).enumerate() {
+        let cx = x + d / 2.0 + i as f32 * (d + 8.0);
+        let cy = y + 72.0;
+        let col = crate::config::hex(&clip.color, 0x4C8DFF);
+        let playing = s.playing.contains(&i);
+        if playing {
+            c.circle(cx, cy, d / 2.0 + 4.0, col, 0.35);
+        }
+        c.circle(cx, cy, d / 2.0, col, if playing { 1.0 } else { 0.8 });
+        let sym = if clip.symbol.is_empty() { "waveform" } else { clip.symbol.as_str() };
+        c.symbol(sym, 16.0, cx, cy, 0xFFFFFF);
+    }
+    let playing: Vec<&str> = s.playing.iter().filter_map(|&i| s.clips.get(i)).map(|c| c.title.as_str()).collect();
+    let foot = if playing.is_empty() { format!("{} clips", s.clips.len()) } else { format!("playing  {}", playing.join(", ")) };
+    c.clip(F::Medium, &foot, 13.0, w, x, y + h - 6.0, if playing.is_empty() { FAINT } else { TEXT_2 });
+}
+
+fn dash_league(c: &mut Canvas, v: &View, r: R) {
+    let (x, y, w, h) = r;
+    let l = v.league;
+    let steps = ["Lobby", "Queue", "Found", "Pick", "Game"];
+    let at: i32 = match l.phase.as_str() {
+        "Lobby" => 0,
+        "Matchmaking" => 1,
+        "ReadyCheck" => 2,
+        "ChampSelect" => 3,
+        "InProgress" | "GameStart" | "Reconnect" | "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => 4,
+        _ => -1,
+    };
+    let sy = y + 18.0;
+    let span = w - 40.0;
+    let px = |i: usize| x + 20.0 + span * i as f32 / (steps.len() - 1) as f32;
+    c.rect((px(0), sy - 1.5, span, 3.0), 0x2A2A31, 1.0);
+    if at > 0 && l.running {
+        c.rect((px(0), sy - 1.5, px(at as usize) - px(0), 3.0), GOLD, 1.0);
+    }
+    for (i, name) in steps.iter().enumerate() {
+        let done = l.running && (i as i32) < at;
+        let now = l.running && i as i32 == at;
+        if now {
+            c.circle(px(i), sy, 13.0, GOLD, if v.tick { 0.35 } else { 0.2 });
+        }
+        c.circle(px(i), sy, 8.0, if done || now { GOLD } else { 0x3A3A42 }, 1.0);
+        c.text(F::Medium, name, 12.0, px(i), sy + 26.0, if now { GOLD } else if done { TEXT_2 } else { FAINT }, Align::Center);
+    }
+    let auto = v.league_cfg.auto_accept;
+    let pw = c.measure(F::Bold, if auto { "AUTO-ACCEPT" } else { "MANUAL" }, 11.0) + 11.0 * 1.4;
+    c.pill(x + w - pw, y + h - 22.0, if auto { "AUTO-ACCEPT" } else { "MANUAL" }, 11.0, if auto { 0x1A3A24 } else { 0x2A2A31 }, if auto { 0x8EE0A8 } else { MUTED });
+    let queue = l.queue.clone().unwrap_or_default();
+    let (big, col, sub) = if !l.running {
+        ("Client closed".to_string(), FAINT, String::new())
+    } else {
+        match l.phase.as_str() {
+            "Matchmaking" => {
+                let (t, est) = l.search.unwrap_or((0.0, 0.0));
+                (mmss(t), GOLD, if est > 0.0 { format!("est {}  ·  {queue}", mmss(est)) } else { queue.clone() })
+            }
+            "ReadyCheck" => ("Match found".to_string(), GOLD, queue.clone()),
+            "ChampSelect" => {
+                let left = l.champ.as_ref().map(|c| (c.time_left_ms / 1000.0).max(0.0).ceil()).unwrap_or(0.0);
+                (format!("{left:.0}s to pick"), GOLD, l.champ.as_ref().map(|c| c.champion.clone()).unwrap_or_default())
+            }
+            "Lobby" => ("In lobby".to_string(), TEXT, queue.clone()),
+            "InProgress" | "GameStart" => ("In game".to_string(), TEXT, queue.clone()),
+            "Reconnect" => ("Reconnect".to_string(), AMBER, String::new()),
+            "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => ("Game over".to_string(), TEXT_2, String::new()),
+            _ => ("Home".to_string(), TEXT_2, String::new()),
+        }
+    };
+    c.fit(F::Bold, &big, 30.0, w - pw - 16.0, x, y + h - 26.0, col, Align::Left);
+    if !sub.is_empty() {
+        c.clip(F::Medium, &sub, 13.0, w - pw - 16.0, x, y + h - 4.0, MUTED);
+    }
+}
+
+fn dash_docker(c: &mut Canvas, v: &View, r: R, color: u32, b: &Brief) {
+    let (x, y, w, h) = r;
+    let d = v.docker;
+    if d.error.is_some() || d.containers.is_empty() {
+        c.fit(F::Bold, &b.big, 26.0, w, x, y + 30.0, b.big_color, Align::Left);
+        if let Some((t, col)) = b.lines.first() {
+            c.clip(F::Medium, t, 14.0, w, x, y + 56.0, *col);
+        }
+        return;
+    }
+    let mut order: Vec<&docker::Container> = d.containers.iter().collect();
+    order.sort_by_key(|c| (c.state != "running", c.name.clone()));
+    let row_h = 30.0;
+    let rows = ((h + 4.0) / row_h) as usize;
+    let name_w = 150.0;
+    let val_w = 58.0;
+    for (i, ct) in order.iter().take(rows).enumerate() {
+        let ry = y + i as f32 * row_h;
+        let (sc, _) = state_color(&ct.state);
+        c.circle(x + 5.0, ry + 13.0, 5.0, sc, 1.0);
+        let running = ct.state == "running";
+        c.clip(F::Medium, &ct.name, 15.0, name_w, x + 18.0, ry + 19.0, if running { TEXT } else { MUTED });
+        let gx = x + 18.0 + name_w + 10.0;
+        let gw = w - (gx - x) - val_w - 8.0;
+        if running {
+            let hist: Vec<f32> = d.containers.iter().find(|c| c.id == ct.id).and(v.history.docker_cpu.get(&ct.id)).map(|q| q.iter().copied().collect()).unwrap_or_default();
+            sparkline(c, (gx, ry + 2.0, gw, 22.0), &hist, 5.0, color);
+            c.text(F::Mono, &format!("{:.1}%", ct.cpu.unwrap_or(0.0)), 13.0, x + w, ry + 18.0, TEXT_2, Align::Right);
+        } else {
+            c.clip(F::Medium, &ct.status, 13.0, gw + val_w, gx, ry + 18.0, FAINT);
+        }
+    }
+    if order.len() > rows {
+        c.text(F::Medium, &format!("+{} more", order.len() - rows), 12.0, x + w, y + h + 6.0, FAINT, Align::Right);
+    }
+}
+
+fn dash_ops(c: &mut Canvas, v: &View, r: R, b: &Brief) {
+    let (x, y, w, h) = r;
+    let o = v.ops;
+    // Network and hosts on one line.
+    let (wl, wbg, wfg) = match o.net.warp {
+        Some(true) => ("WARP ON", 0x1A3A30, 0x8EE0C8),
+        Some(false) => ("WARP OFF", 0x2A2A31, MUTED),
+        None => ("WARP ?", 0x2A2A31, FAINT),
+    };
+    let mut hx = x + c.pill(x, y + 2.0, wl, 11.0, wbg, wfg) + 12.0;
+    for host in &o.hosts {
+        let label = host.name.split('.').next().unwrap_or(&host.name);
+        let need = c.measure(F::Medium, label, 13.0) + 20.0;
+        if hx + need > x + w {
+            break;
+        }
+        c.circle(hx + 4.0, y + 12.0, 4.5, if host.up { GREEN } else { RED }, 1.0);
+        hx += c.text(F::Medium, label, 13.0, hx + 13.0, y + 17.0, if host.up { TEXT_2 } else { MUTED }, Align::Left) + 22.0;
+    }
+    if o.sites.is_empty() {
+        c.fit(F::Bold, &b.big, 24.0, w, x, y + 60.0, b.big_color, Align::Left);
+        return;
+    }
+    let row_h = 28.0;
+    let top = y + 32.0;
+    let rows = ((y + h - top + 4.0) / row_h) as usize;
+    for (i, site) in o.sites.iter().take(rows).enumerate() {
+        let ry = top + i as f32 * row_h;
+        let ok = site.code.is_some_and(|code| code < 400);
+        let col = if ok { GREEN } else { RED };
+        c.circle(x + 5.0, ry + 12.0, 4.5, col, 1.0);
+        c.clip(F::Medium, site_host(&site.url), 14.0, 150.0, x + 16.0, ry + 17.0, if ok { TEXT } else { 0xFF9B9B });
+        let gx = x + 176.0;
+        let gw = w - 176.0 - 118.0;
+        let hist: Vec<f32> = v.history.site_ms.get(&site.url).map(|q| q.iter().copied().collect()).unwrap_or_default();
+        sparkline(c, (gx, ry + 3.0, gw, 18.0), &hist, 300.0, if ok { 0x7FD1B9 } else { RED });
+        let ms = match (site.ms, ok) {
+            (Some(ms), true) => format!("{ms}ms"),
+            _ => site.code.map(|c| c.to_string()).unwrap_or_else(|| "ERR".into()),
+        };
+        c.text(F::Mono, &ms, 13.0, x + w - 50.0, ry + 17.0, if ok { TEXT_2 } else { RED }, Align::Right);
+        if let Some(days) = site.tls_days {
+            c.text(F::Mono, &format!("{days}d"), 12.0, x + w, ry + 17.0, if days < 14 { AMBER } else { FAINT }, Align::Right);
+        }
+    }
+}
+
+fn dash_code(c: &mut Canvas, v: &View, r: R, accent: u32, b: &Brief) {
+    let (x, y, w, h) = r;
+    let g = v.code;
+    c.fit(F::Bold, &b.big, 26.0, w, x, y + 26.0, b.big_color, Align::Left);
+    if !g.ok && !g.gitlab_ok {
+        return;
+    }
+    // CI across your open PRs, as one stacked bar.
+    let count = |f: &dyn Fn(&github::Pr) -> bool| g.mine.iter().filter(|p| f(p)).count();
+    let pass = count(&|p| p.ci == "SUCCESS");
+    let fail = count(&|p| matches!(p.ci.as_str(), "FAILURE" | "ERROR"));
+    let pend = count(&|p| matches!(p.ci.as_str(), "PENDING" | "EXPECTED"));
+    let none = g.mine.len() - pass - fail - pend;
+    let total = g.mine.len().max(1) as f32;
+    let by = y + 40.0;
+    c.rrect((x, by, w, 14.0), 7.0, 0x2A2A31, 1.0);
+    let mut sx = x;
+    for (n, col) in [(pass, GREEN), (fail, RED), (pend, AMBER), (none, 0x4A4A54)] {
+        if n == 0 {
+            continue;
+        }
+        let sw = w * n as f32 / total;
+        c.rrect((sx, by, sw.max(4.0), 14.0), 7.0, col, 1.0);
+        sx += sw;
+    }
+    let mut lx = x;
+    for (n, label, col) in [(pass, "passing", GREEN), (fail, "failing", RED), (pend, "pending", AMBER), (none, "no CI", MUTED)] {
+        if n == 0 {
+            continue;
+        }
+        c.circle(lx + 4.0, by + 30.0, 4.0, col, 1.0);
+        lx += c.text(F::Medium, &format!("{n} {label}"), 13.0, lx + 12.0, by + 35.0, TEXT_2, Align::Left) + 24.0;
+    }
+    let conflicts = g.mine.iter().filter(|p| p.mergeable == "CONFLICTING").count();
+    let foot = if let Some(p) = g.reviews.first() {
+        (format!("{}  {}", pr_ref(p), p.title), accent)
+    } else if conflicts > 0 {
+        (format!("{conflicts} with merge conflicts"), AMBER)
+    } else {
+        (format!("{} approved", g.mine.iter().filter(|p| p.review == "APPROVED").count()), MUTED)
+    };
+    c.clip(F::Medium, &foot.0, 14.0, w, x, y + h - 6.0, foot.1);
 }
 
 // ---------------------------------------------------------------- SETTINGS

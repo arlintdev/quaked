@@ -1,13 +1,17 @@
 # quaked
 
 Drives the DECOKEE Quake desk screen directly, with no DK-Suite. Ten pages (turn them on
-and off and reorder them in the companion's Panes tab), each with its own color on the
+and off and reorder them on the settings page's Panes tab), each with its own color on the
 knob's light ring:
 
-- **Dashboard** (the grid icon, first by default): a tile per pane with a health dot and
-  its status at a glance: who needs you, now playing, call routing, League phase,
-  containers, hosts and sites, PRs. Tap a tile (or press the knob on it) to go there. After the idle
-  time (default 45 s, set on the Settings page or in the companion) the board comes back
+- **Dashboard** (the grid icon, first by default): a tile per pane, each drawn for what
+  matters there: Claude session chips and a 20-minute activity histogram; album art with
+  progress; your shortcut icons; ON AIR / OFF AIR with the call app and clip chips; the
+  League phase as a Lobby → Queue → Found → Pick → Game stepper with the timer; a CPU
+  sparkline per container; WARP, host dots and a latency sparkline per site with TLS
+  days; a stacked CI bar across your PRs and the review waiting on you. Each has a health
+  dot. Tap a tile (or press the knob on it) to go there. After the idle
+  time (default 45 s, set on the board's Settings page or the settings page) the board comes back
   here; switch "Home when idle" off to stay on the current page instead.
 
 - **AI**: a column per Claude Code session showing state (working / needs you / done / idle),
@@ -52,21 +56,28 @@ Touching the board stops the blinking. `quaked ctl alert code "test"` tries it.
 
 ## Two Macs
 
-Every quaked advertises `_quaked._tcp` with Bonjour and serves its Claude sessions to
-peers that know the pairing key (`sync.key`, made on first run). The Mac with the Quake
-attached pulls the other's sessions every 2 seconds and shows them with the Mac's name;
-a session waiting on the other Mac alerts here like a local one. To set up the second
-Mac: install quaked there (`./install.sh`; it runs fine with no Quake attached), then put
-the same key in both configs (the companion's General tab has it, with a Copy button).
-macOS asks once to allow Quaked on the local network; that is needed for this and for
-the Ops page's LAN hosts.
+Every quaked advertises `_quaked._tcp` with Bonjour. Paired Macs share two things:
+
+- **Claude sessions.** The Mac with the Quake attached pulls the others' sessions every
+  2 seconds and shows them with the Mac's name; a session waiting on another Mac alerts
+  here like a local one.
+- **One set of settings.** Each config carries `updatedAt`; a Mac that sees newer
+  settings on a peer takes them, keeping only its own `sync` section (name and key). Edit
+  on either Mac, by hand or on the settings page, and the other follows within seconds.
+  Whichever Mac has the Quake plugged in uses the same settings.
+
+To add the second Mac: install quaked there (`./install.sh`; it runs fine with no Quake
+attached), open its settings page, go to **Macs** and click **Pair** next to this Mac.
+Allow it here by pressing the knob (or clicking Allow on this Mac's settings page) and
+the key is handed over. macOS asks once to allow Quaked on the local network; that is
+needed for this and for the Ops page's LAN hosts.
 
 ## Soundboard setup
 
 1. BlackHole 2ch (virtual audio device) must be installed: `brew install blackhole-2ch`.
 2. In Zoom / Meet / Teams, pick **BlackHole 2ch** as the microphone.
 3. Put clips (wav, mp3, m4a, aiff, flac, caf) in `~/Music/Quaked Soundboard`, or add them
-   in Quaked Companion.
+   on the settings page's Soundboard tab.
 
 With `live: "auto"` (default) quaked only opens your real mic while another app is
 listening to BlackHole, so the mic indicator is on during calls only. macOS asks once for
@@ -86,16 +97,20 @@ Touch: tap a tab to switch pages, a session to open it, Back / Open in Claude in
 detail view, and the music buttons or volume bar. 45 seconds without input returns to the
 top level. The top bar always shows where you are and what the knob does there.
 
-## Settings and the companion app
+## Settings
+
+quaked serves its own settings page at **http://127.0.0.1:47380** (this Mac only; open
+**Quaked Settings** from Spotlight, or `quaked settings`). Tabs: Live (a mirror of the
+board you can click, knob and page buttons, status), Panes, Shortcuts, Soundboard,
+Lighting, General and Macs (pairing). On a Mac without the Quake, the live view and board
+controls go through to the Mac that has it. It replaced the old SwiftUI companion app.
 
 Everything is in `~/Library/Application Support/Quaked/config.json` (pages, ring colors,
 shortcuts, soundboard devices and clips, League auto-accept, Docker socket, the Quake's
 own mic (off by default, which also turns its indicator light off), screen brightness,
 touch mapping, buzzer, idle timeout, Ops hosts and sites, Code refresh and GitLab, new
-stuff alerts, two-Mac sync). quaked reloads it when it
-changes. **Quaked Companion** (`companion/`, a small SwiftUI app) edits it and shows a live
-mirror of the screen you can click on, with knob buttons. Its Panes tab turns panes on
-and off and sets their order.
+stuff alerts, two-Mac sync). quaked reloads it when it changes, and refuses to use a file
+it can't parse (it keeps the last good settings instead).
 
 ## How the Quake works
 
@@ -130,7 +145,9 @@ DK-Suite must not run at the same time: both want the same display and HID devic
 ## Commands
 
 ```
-./install.sh                 build, bundle, sign, (re)start the LaunchAgent
+./install.sh                 build, bundle, sign, add Claude Code hooks, (re)start the LaunchAgent
+quaked settings              open the settings page (http://127.0.0.1:47380)
+quaked hooks                 add the Claude Code hooks to ~/.claude/settings.json
 quaked ctl turn 1|-1         drive the running board like the knob
 quaked ctl press|double|hold
 quaked ctl tap X Y           tap at screen coordinates (1920x480)

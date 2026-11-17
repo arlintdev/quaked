@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quaked</title>
+<style>
+:root {
+  --bg: #f5f5f7; --panel: #ffffff; --panel-2: #f0f0f3; --line: #e2e2e7; --text: #1d1d1f;
+  --muted: #6e6e73; --faint: #a1a1a6; --accent: #0a84ff; --green: #2f9e5b; --amber: #c98a00;
+  --red: #e5484d; --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111114; --panel: #1b1b1f; --panel-2: #232328; --line: #2e2e35; --text: #ececf1;
+    --muted: #9a9aa3; --faint: #65656e; --accent: #4c9dff; --green: #3fbf75; --amber: #f2b705;
+    --red: #ff6b6b; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+.app { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
+nav { padding: 18px 12px; border-right: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; height: 100vh; }
+nav .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; padding: 4px 8px 16px; }
+nav .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--faint); }
+nav .brand .dot.on { background: var(--green); }
+nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; color: var(--text); text-decoration: none; cursor: pointer; user-select: none; }
+nav a:hover { background: var(--panel-2); }
+nav a.active { background: var(--accent); color: #fff; }
+nav .where { margin-top: 18px; padding: 10px; border-radius: 10px; background: var(--panel-2); font-size: 12px; color: var(--muted); }
+nav .where b { color: var(--text); display: block; font-size: 13px; }
+main { padding: 26px 34px 60px; max-width: 980px; width: 100%; }
+h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -.01em; }
+.sub { color: var(--muted); margin: 0 0 22px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); margin-bottom: 18px; }
+.card > h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; padding: 14px 18px 4px; }
+.card > .foot { color: var(--muted); font-size: 12px; padding: 0 18px 14px; }
+.row { display: flex; align-items: center; gap: 14px; padding: 11px 18px; border-top: 1px solid var(--line); min-height: 48px; }
+.card > h2 + .row { border-top: 0; }
+.row .label { flex: 1; min-width: 0; }
+.row .label small { display: block; color: var(--muted); font-size: 12px; }
+.row .ctl { display: flex; align-items: center; gap: 8px; }
+.sym { display: inline-block; width: 18px; height: 18px; background: currentColor; -webkit-mask: var(--u) center / contain no-repeat; mask: var(--u) center / contain no-repeat; flex: none; }
+.switch { position: relative; width: 42px; height: 24px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 12px; transition: .15s; cursor: pointer; }
+.switch span::after { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; border-radius: 50%; background: #fff; transition: .15s; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.switch input:checked + span { background: var(--green); }
+.switch input:checked + span::after { transform: translateX(18px); }
+.switch input:disabled + span { opacity: .45; cursor: default; }
+input[type=text], input[type=number], select, textarea { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; outline: none; }
+input[type=text]:focus, select:focus, textarea:focus { border-color: var(--accent); }
+textarea { width: 100%; min-height: 92px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; resize: vertical; }
+input[type=range] { width: 220px; accent-color: var(--accent); }
+input[type=color] { width: 38px; height: 28px; border: 1px solid var(--line); border-radius: 7px; background: none; padding: 2px; cursor: pointer; }
+.btn { border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px; padding: 6px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.btn:hover { border-color: var(--faint); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--red); }
+.btn.small { padding: 3px 8px; font-size: 12px; }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.icon { padding: 5px 7px; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 10px; font-size: 11.5px; font-weight: 600; background: var(--panel-2); color: var(--muted); }
+.pill.green { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+.pill.amber { background: color-mix(in srgb, var(--amber) 20%, transparent); color: var(--amber); }
+.pill.red { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }
+.pill.blue { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.banner { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 12px; margin-bottom: 18px; background: color-mix(in srgb, var(--amber) 16%, var(--panel)); border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent); }
+.banner .label { flex: 1; }
+#toast { position: fixed; right: 18px; bottom: 18px; background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+#toast.show { opacity: .92; }
+/* Live */
+.mirror { position: relative; border-radius: 12px; overflow: hidden; background: #09090b; aspect-ratio: 4 / 1; cursor: crosshair; }
+.mirror img { width: 100%; height: 100%; display: block; image-rendering: auto; }
+.mirror .off { position: absolute; inset: 0; display: grid; place-items: center; color: #8c8c96; font-size: 15px; }
+.knob { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 18px; }
+.pages { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 18px 16px; }
+.pages .btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.grid2 { display: grid; grid-template-columns: 150px 1fr; gap: 6px 14px; padding: 12px 18px 16px; }
+.grid2 .k { color: var(--muted); }
+.dotc { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--faint); }
+/* Panes / lists */
+.list .row .icon { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--panel-2); flex: none; }
+.list .row.off { opacity: .5; }
+/* Shortcuts */
+.split { display: grid; grid-template-columns: 300px 1fr; gap: 18px; align-items: start; }
+.tiles .row { cursor: pointer; }
+.tiles .row.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.tile { width: 120px; height: 120px; border-radius: 16px; background: #151519; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; color: #e8e8ee; margin: 6px auto 10px; }
+.tile .sym { width: 40px; height: 40px; }
+.tile span { font-weight: 600; font-size: 13px; text-align: center; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.suggest { display: grid; grid-template-columns: repeat(auto-fill, minmax(34px, 1fr)); gap: 4px; padding: 4px 18px 14px; }
+.suggest button { height: 34px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; display: grid; place-items: center; }
+.suggest button:hover, .suggest button.on { border-color: var(--accent); color: var(--accent); }
+.clip { display: flex; align-items: center; gap: 12px; }
+.clip .icon { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; color: #fff; flex: none; }
+.empty { padding: 28px 18px; text-align: center; color: var(--muted); }
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; }
+  nav { position: static; height: auto; display: flex; flex-wrap: wrap; gap: 4px; border-right: 0; border-bottom: 1px solid var(--line); }
+  nav .brand, nav .where { width: 100%; }
+  main { padding: 18px 16px 48px; }
+  .split { grid-template-columns: 1fr; }
+  input[type=range] { width: 140px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav id="nav"></nav>
+  <main id="main"><p class="sub">Loading…</p></main>
+</div>
+<div id="toast"></div>
+<script>
+"use strict";
+const PAGES = [
+  ["dash", "Dashboard", "square.grid.2x2.fill", "A tile per pane with its status at a glance"],
+  ["ai", "AI", "sparkles", "Claude Code sessions, their steps, who needs you"],
+  ["music", "Music", "music.note", "Spotify or Music: now playing, controls, volume"],
+  ["shortcuts", "Shortcuts", "square.grid.3x3.fill", "Tiles that type keys, open things, run Shortcuts"],
+  ["soundboard", "Sounds", "waveform", "Clips into your call through the virtual mic"],
+  ["league", "League", "gamecontroller.fill", "League client: queue, auto-accept, champ select"],
+  ["docker", "Docker", "shippingbox.fill", "Containers on Kiri or Docker, with logs"],
+  ["ops", "Ops", "server.rack", "WARP, your servers and your sites"],
+  ["code", "Code", "arrow.triangle.pull", "GitHub PRs and GitLab merge requests"],
+  ["settings", "Settings", "gearshape.fill", "Brightness and switches, right on the board"],
+];
+const PAGE = Object.fromEntries(PAGES.map(([id, label, sym, blurb]) => [id, { id, label, sym, blurb }]));
+const TABS = [
+  ["live", "Live", "display"], ["panes", "Panes", "rectangle.3.group"], ["shortcuts", "Shortcuts", "square.grid.3x3"],
+  ["soundboard", "Soundboard", "waveform"], ["lighting", "Lighting", "light.max"], ["general", "General", "gearshape"],
+  ["sync", "Macs", "laptopcomputer.and.iphone"],
+];
+const SYMBOLS = ["star.fill", "bolt.fill", "camera.viewfinder", "rectangle.dashed", "lock.fill", "moon.fill", "sun.max.fill", "speaker.slash.fill", "mic.slash.fill", "music.note", "playpause.fill", "forward.fill", "backward.fill", "terminal.fill", "safari.fill", "globe", "folder.fill", "doc.text.fill", "envelope.fill", "message.fill", "phone.fill", "video.fill", "calendar", "clock.fill", "timer", "bell.fill", "gearshape.fill", "hammer.fill", "wrench.and.screwdriver.fill", "sparkles", "brain.head.profile", "chevron.left.forwardslash.chevron.right", "server.rack", "shippingbox.fill", "cloud.fill", "network", "wifi", "lightbulb.fill", "house.fill", "gamecontroller.fill", "headphones", "megaphone.fill", "hand.thumbsup.fill", "heart.fill", "flame.fill", "trash.fill", "arrow.clockwise", "square.and.arrow.up", "rectangle.split.2x1.fill", "macwindow", "display", "keyboard", "command", "eye.fill", "magnifyingglass", "paperplane.fill", "cart.fill", "creditcard.fill", "person.fill", "figure.walk"];
+const ACTIONS = [["keys", "Type keys"], ["open", "Open"], ["shortcut", "Run a Shortcut"], ["shell", "Shell command"], ["micMute", "Mute my mic"], ["media", "Music control"], ["clip", "Play a clip"], ["page", "Go to a page"]];
+
+let state = null, cfg = null, tab = localStorage.getItem("quaked.tab") || "live";
+let saveTimer = null, saving = false, editing = false, selTile = 0, devices = null, pairing = null;
+
+const $ = (sel, root = document) => root.querySelector(sel);
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "style" && typeof v === "object") for (const [p, val] of Object.entries(v)) { if (val == null) continue; if (p.startsWith("--")) el.style.setProperty(p, val); else el.style[p] = val; }
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "html") el.innerHTML = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+const sym = (name, px = 18, color) => h("span", { class: "sym", style: { "--u": `url(/api/symbol?name=${encodeURIComponent(name)}&px=64)`, width: px + "px", height: px + "px", color } });
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 1600); }
+const get = (path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), cfg);
+function set(path, value) {
+  const keys = path.split("."); let o = cfg;
+  for (const k of keys.slice(0, -1)) { if (o[k] == null) o[k] = {}; o = o[k]; }
+  o[keys.at(-1)] = value; changed();
+}
+function changed() { editing = true; clearTimeout(saveTimer); saveTimer = setTimeout(save, 400); }
+async function save() {
+  saving = true;
+  try {
+    const r = await fetch("/api/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) });
+    const j = await r.json();
+    if (!r.ok) toast("Not saved: " + (j.error || r.status)); else toast("Saved");
+  } catch (e) { toast("Not saved: quaked isn't answering"); }
+  saving = false; editing = false; poll();
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  const type = r.headers.get("content-type") || "";
+  const body = type.includes("json") ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((body && body.error) || r.status);
+  return body;
+}
+const ctl = (line) => api("/api/ctl", { method: "POST", body: line }).catch((e) => toast(String(e.message || e)));
+const strip = (c) => { const x = structuredClone(c); delete x.updatedAt; return JSON.stringify(x); };
+
+async function poll() {
+  try { state = await api("/api/state"); } catch (e) { $("#main").replaceChildren(h("div", { class: "card" }, h("div", { class: "empty" }, "quaked isn't answering. Is it running? (./install.sh starts it)"))); return; }
+  const fresh = !cfg || (!editing && !saving && strip(state.config) !== strip(cfg));
+  if (fresh) { cfg = structuredClone(state.config); render(); }
+  else { if (cfg && !editing) cfg.updatedAt = state.config.updatedAt; renderNav(); renderLive(); renderBanner(); }
+}
+
+// ---------------------------------------------------------------- controls
+function toggle(label, path, desc, opts = {}) {
+  const input = h("input", { type: "checkbox", checked: !!get(path), disabled: opts.disabled, onchange: (e) => { set(path, e.target.checked); opts.after && opts.after(); } });
+  return h("div", { class: "row" }, h("div", { class: "label" }, label, desc && h("small", {}, desc)), h("label", { class: "switch" }, input, h("span")));
+}
+function slider(label, path, min, max, step, fmt, desc) {
+  const out = h("span", { class: "mono", style: { minWidth: "56px", textAlign: "right" } }, fmt(get(path) ?? min));
+  const input = h("input", { type: "range", min, max, step, value: get(path) ?? min, oninput: (e) => { out.textContent = fmt(+e.target.value); set(path, +e.target.value); } });
+  return h("div", { class: "row" }, h("div", { class: "label" }, label, desc && h("small", {}, desc)), h("div", { class: "ctl" }, input, out));
+}
+function choice(label, path, options, desc, numeric) {
+  const cur = get(path);
+  const sel = h("select", { onchange: (e) => set(path, numeric ? +e.target.value : e.target.value) },
+    options.map(([v, t]) => h("option", { value: v, selected: String(v) === String(cur) }, t)));
+  return h("div", { class: "row" }, h("div", { class: "label" }, label, desc && h("small", {}, desc)), sel);
+}
+function text(label, path, placeholder, desc, width = "260px") {
+  return h("div", { class: "row" }, h("div", { class: "label" }, label, desc && h("small", {}, desc)),
+    h("input", { type: "text", value: get(path) ?? "", placeholder, style: { width }, oninput: (e) => set(path, e.target.value) }));
+}
+function color(label, path, desc) {
+  return h("div", { class: "row" }, h("div", { class: "label" }, label, desc && h("small", {}, desc)),
+    h("div", { class: "ctl" }, h("span", { class: "mono", style: { color: "var(--muted)", fontSize: "12px" } }, get(path) || ""),
+      h("input", { type: "color", value: get(path) || "#888888", oninput: (e) => { set(path, e.target.value.toUpperCase()); e.target.previousSibling.textContent = e.target.value.toUpperCase(); } })));
+}
+function lines(label, path, desc) {
+  return h("div", { class: "row", style: { display: "block" } }, h("div", { class: "label", style: { marginBottom: "8px" } }, label, desc && h("small", {}, desc)),
+    h("textarea", { oninput: (e) => set(path, e.target.value.split("\n").map((s) => s.trim()).filter(Boolean)) }, (get(path) || []).join("\n")));
+}
+const card = (title, foot, ...rows) => h("div", { class: "card" }, title && h("h2", {}, title), ...rows, foot && h("div", { class: "foot" }, foot));
+const secs = (s) => (s >= 120 ? `${Math.round(s / 60)} min` : `${s} s`);
+
+// ---------------------------------------------------------------- frame
+function renderNav() {
+  const nav = $("#nav");
+  const conn = state?.status?.connected;
+  const route = state?.route?.kind;
+  const where = route === "local" ? ["The Quake is on", "this Mac"] : route === "remote" ? ["The Quake is on", state.route.name] : ["No Quake connected", "Plug it into either Mac"];
+  nav.replaceChildren(
+    h("div", { class: "brand" }, h("span", { class: "dot" + (conn ? " on" : "") }), "Quaked"),
+    ...TABS.map(([id, label, s]) => h("a", { class: tab === id ? "active" : "", onclick: () => { tab = id; localStorage.setItem("quaked.tab", id); render(); } }, sym(s, 16), label)),
+    h("div", { class: "where" }, where[0], h("b", {}, where[1]), state?.machine ? h("div", { style: { marginTop: "6px" } }, `You're on ${state.machine}`) : null),
+  );
+}
+function renderBanner() {
+  const slot = $("#banner"); if (!slot) return;
+  const ask = state?.pairAsk;
+  slot.replaceChildren(ask ? h("div", { class: "banner" }, sym("laptopcomputer.and.iphone", 22),
+    h("div", { class: "label" }, h("b", {}, `${ask} wants to pair`), h("div", { style: { color: "var(--muted)", fontSize: "12px" } }, "It will share Claude sessions and settings with this Mac. You can also press the knob on the Quake.")),
+    h("button", { class: "btn", onclick: () => api("/api/pair-answer?allow=0", { method: "POST" }).then(poll) }, "Refuse"),
+    h("button", { class: "btn primary", onclick: () => api("/api/pair-answer?allow=1", { method: "POST" }).then(poll) }, "Allow")) : "");
+}
+function render() {
+  renderNav();
+  const main = $("#main");
+  main.replaceChildren(h("div", { id: "banner" }));
+  renderBanner();
+  const views = { live: viewLive, panes: viewPanes, shortcuts: viewShortcuts, soundboard: viewSoundboard, lighting: viewLighting, general: viewGeneral, sync: viewSync };
+  (views[tab] || viewLive)(main);
+}
+
+// ---------------------------------------------------------------- Live
+let frameTimer = null;
+function viewLive(main) {
+  const st = state.status || {};
+  main.append(h("h1", {}, "Live"), h("p", { class: "sub" }, "The board as it is now. Click it to tap; the buttons work like the knob."));
+  const img = h("img", { id: "frame", alt: "" });
+  const mirror = h("div", { class: "mirror", id: "mirror", onclick: (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    ctl(`tap ${Math.round((e.clientX - r.left) / r.width * 1920)} ${Math.round((e.clientY - r.top) / r.height * 480)}`).then(refreshFrame);
+  } }, img, h("div", { class: "off", id: "mirror-off", style: { display: "none" } }, "No Quake connected"));
+  const k = (label, s, line) => h("button", { class: "btn", onclick: () => ctl(line).then(refreshFrame) }, sym(s, 15), label);
+  main.append(card(null, null, h("div", { style: { padding: "14px 14px 0" } }, mirror),
+    h("div", { class: "knob" }, k("Turn left", "arrow.counterclockwise", "turn -1"), k("Press", "circle.inset.filled", "press"), k("Turn right", "arrow.clockwise", "turn 1"),
+      k("Back", "chevron.left", "double"), k("Top", "house", "hold")),
+    h("div", { class: "pages", id: "pagebtns" })));
+  main.append(card("Status", null, h("div", { class: "grid2", id: "statusgrid" })));
+  renderLive();
+  refreshFrame();
+  clearInterval(frameTimer);
+  frameTimer = setInterval(() => { if (tab === "live" && !document.hidden) refreshFrame(); }, 600);
+}
+function refreshFrame() {
+  const img = $("#frame"); if (!img) return;
+  const off = state?.route?.kind === "none";
+  $("#mirror-off").style.display = off ? "grid" : "none";
+  img.style.visibility = off ? "hidden" : "visible";
+  if (off) return;
+  const next = new Image();
+  next.onload = () => { if ($("#frame")) $("#frame").src = next.src; };
+  next.src = "/api/frame?t=" + Date.now();
+}
+function renderLive() {
+  if (tab !== "live" || !$("#statusgrid")) return;
+  const st = state.status || {};
+  const pages = $("#pagebtns");
+  pages.replaceChildren(...(cfg.pages || []).map((p) => h("button", { class: "btn small" + (st.page === p ? " on" : ""), onclick: () => ctl(`page ${p}`).then(refreshFrame) }, sym(PAGE[p]?.sym || "circle", 13), PAGE[p]?.label || p)));
+  const dot = (c) => h("span", { class: "dotc", style: { background: c } });
+  const sb = st.soundboard || {};
+  const peers = (state.peers || []);
+  const rows = [
+    ["Quake", st.connected ? [dot("var(--green)"), "Connected"] : state.route?.kind === "remote" ? [dot("var(--green)"), `On ${state.route.name}`] : [dot("var(--faint)"), "Not connected"]],
+    ["Page", `${PAGE[st.page]?.label || st.page || "—"}${st.level && st.level !== "top" ? ` · ${st.level}` : ""}`],
+    ["Claude sessions", st.sessions != null ? `${st.sessions} (${st.waiting || 0} waiting on you, ${st.working || 0} working)` : "—"],
+    ["Now playing", st.track ? `${st.track.title} — ${st.track.artist}${st.track.playing ? "" : " (paused)"}` : "Nothing"],
+    ["Soundboard", sb.error ? [dot("var(--red)"), sb.error] : sb.routing ? [dot("var(--green)"), `Live${sb.listener ? " · " + sb.listener : ""}`] : [dot("var(--faint)"), "Idle (mic not routed)"]],
+    ["Other Macs", peers.length ? peers.map((p) => `${p.name}: ${p.ok ? `${p.sessions} sessions${p.board ? ", has the Quake" : ""}` : p.error || "…"}`).join("  ·  ") : "None found"],
+    ["quaked", st.version || "—"],
+  ];
+  if (state.boardError) rows.unshift(["Board", [dot("var(--red)"), state.boardError]]);
+  $("#statusgrid").replaceChildren(...rows.flatMap(([k, v]) => [h("div", { class: "k" }, k), h("div", {}, v)]));
+}
+
+// ---------------------------------------------------------------- Panes
+function viewPanes(main) {
+  const shown = cfg.pages;
+  const order = [...shown, ...PAGES.map((p) => p[0]).filter((p) => !shown.includes(p))];
+  main.append(h("h1", {}, "Panes"), h("p", { class: "sub" }, `${shown.length} of ${PAGES.length} on. The knob steps through them in this order; the board starts on the first.`));
+  const commit = (o) => { const next = o.filter((p) => cfg.pages.includes(p)); if (next.length) { cfg.pages = next; changed(); render(); } };
+  main.append(card(null, "A pane that's off disappears from the board and the dashboard. At least one stays on.", h("div", { class: "list" }, order.map((p, i) => {
+    const on = shown.includes(p);
+    const meta = PAGE[p];
+    const ringColor = cfg.ring?.[p] || "var(--accent)";
+    const move = (d) => { const o = [...order]; const j = i + d; if (j < 0 || j >= o.length) return; [o[i], o[j]] = [o[j], o[i]]; cfg.pages = o.filter((x) => cfg.pages.includes(x)); changed(); render(); };
+    return h("div", { class: "row" + (on ? "" : " off") },
+      h("div", { class: "icon" }, sym(meta.sym, 17, ringColor)),
+      h("div", { class: "label" }, h("b", {}, meta.label), h("small", {}, meta.blurb)),
+      h("button", { class: "btn icon", title: "Move up", disabled: i === 0, onclick: () => move(-1) }, sym("chevron.up", 13)),
+      h("button", { class: "btn icon", title: "Move down", disabled: i === order.length - 1, onclick: () => move(1) }, sym("chevron.down", 13)),
+      h("label", { class: "switch" }, h("input", { type: "checkbox", checked: on, disabled: on && shown.length === 1, onchange: (e) => {
+        cfg.pages = order.filter((x) => (x === p ? e.target.checked : cfg.pages.includes(x))); changed(); render();
+      } }), h("span")));
+  }))));
+  main.append(h("div", { style: { display: "flex", gap: "8px" } },
+    h("button", { class: "btn", disabled: shown.length === PAGES.length, onclick: () => { cfg.pages = order; changed(); render(); } }, "Turn all on"),
+    h("button", { class: "btn", onclick: () => { cfg.pages = PAGES.map((p) => p[0]).filter((p) => cfg.pages.includes(p)); changed(); render(); } }, "Default order")));
+}
+
+// ---------------------------------------------------------------- Shortcuts
+function actionSummary(a) {
+  if (!a) return "";
+  switch (a.type) {
+    case "keys": return a.keys ? `Types ${a.keys}` : "Types a key combo";
+    case "open": return a.target ? `Opens ${a.target}` : "Opens something";
+    case "shortcut": return a.name ? `Runs “${a.name}”` : "Runs a Shortcut";
+    case "shell": return a.command ? `$ ${a.command}` : "Runs a command";
+    case "micMute": return "Mutes your soundboard mic";
+    case "media": return `Music: ${a.command || "playpause"}`;
+    case "clip": return a.title ? `Plays “${a.title}”` : "Plays a clip";
+    case "page": return `Goes to ${PAGE[a.page]?.label || a.page}`;
+    default: return a.type;
+  }
+}
+function tilePreview(t) {
+  const col = t.color || "#B4B4BE";
+  return h("div", { class: "tile" }, sym(t.symbol || "questionmark", 40, col), h("span", {}, t.title || "Untitled"));
+}
+function viewShortcuts(main) {
+  const tiles = cfg.shortcuts || (cfg.shortcuts = []);
+  selTile = Math.min(selTile, Math.max(0, tiles.length - 1));
+  main.append(h("h1", {}, "Shortcuts"), h("p", { class: "sub" }, `${tiles.length} of 16 tiles. They show on the Shortcuts pane in this order.`));
+  const add = () => {
+    if (tiles.length >= 16) return;
+    tiles.splice(tiles.length ? selTile + 1 : 0, 0, { title: "New shortcut", symbol: "star.fill", color: "#4C8DFF", action: { type: "keys", keys: "" } });
+    selTile = tiles.length === 1 ? 0 : selTile + 1; changed(); render();
+  };
+  const list = card(null, null, h("div", { class: "list tiles" }, tiles.length ? tiles.map((t, i) => h("div", { class: "row" + (i === selTile ? " sel" : ""), onclick: () => { selTile = i; render(); } },
+    h("div", { class: "icon" }, sym(t.symbol || "questionmark", 17, t.color || "var(--muted)")),
+    h("div", { class: "label" }, h("b", {}, t.title || "Untitled"), h("small", {}, actionSummary(t.action))))) : h("div", { class: "empty" }, "No tiles yet.")),
+    h("div", { class: "row" },
+      h("button", { class: "btn small", disabled: tiles.length >= 16, onclick: add }, sym("plus", 12), "Add"),
+      h("button", { class: "btn small", disabled: selTile <= 0, onclick: () => { [tiles[selTile - 1], tiles[selTile]] = [tiles[selTile], tiles[selTile - 1]]; selTile--; changed(); render(); } }, sym("chevron.up", 12)),
+      h("button", { class: "btn small", disabled: selTile >= tiles.length - 1, onclick: () => { [tiles[selTile + 1], tiles[selTile]] = [tiles[selTile], tiles[selTile + 1]]; selTile++; changed(); render(); } }, sym("chevron.down", 12)),
+      h("span", { style: { flex: 1 } }),
+      h("button", { class: "btn small danger", disabled: !tiles.length, onclick: () => { tiles.splice(selTile, 1); selTile = Math.max(0, selTile - 1); changed(); render(); } }, "Delete")));
+  const t = tiles[selTile];
+  let editor = h("div", { class: "card" }, h("div", { class: "empty" }, "Add a tile to edit it."));
+  if (t) {
+    const p = `shortcuts.${selTile}`;
+    const symInput = h("input", { type: "text", value: t.symbol || "", class: "mono", style: { width: "220px" }, oninput: (e) => { set(`${p}.symbol`, e.target.value.trim()); refreshPreview(); } });
+    const preview = h("div", {}, tilePreview(t));
+    const refreshPreview = () => preview.replaceChildren(tilePreview(tiles[selTile]));
+    const a = t.action || (t.action = { type: "keys", keys: "" });
+    const actionFields = h("div");
+    const drawAction = () => {
+      const f = (label, key, ph, mono) => h("div", { class: "row" }, h("div", { class: "label" }, label), h("input", { type: "text", value: a[key] || "", placeholder: ph, class: mono ? "mono" : "", style: { width: "280px" }, oninput: (e) => { a[key] = e.target.value; changed(); } }));
+      const clips = state.status?.soundboard?.clips || [];
+      const rows = {
+        keys: () => [f("Keys", "keys", "cmd+shift+4", true), h("div", { class: "foot", style: { padding: "0 18px 12px" } }, "The Quake types it as a USB keyboard: cmd, ctrl, alt, shift + a key (a–z, 0–9, f1–f12, space, return, tab, esc, arrows).")],
+        open: () => [f("App, file, folder or URL", "target", "/Applications/Safari.app or https://…")],
+        shortcut: () => [f("Shortcut name", "name", "Focus mode")],
+        shell: () => [f("Command", "command", "say hello", true)],
+        micMute: () => [],
+        media: () => [h("div", { class: "row" }, h("div", { class: "label" }, "Command"), h("select", { onchange: (e) => { a.command = e.target.value; changed(); } }, [["playpause", "Play / pause"], ["next", "Next"], ["previous", "Previous"]].map(([v, l]) => h("option", { value: v, selected: (a.command || "playpause") === v }, l))))],
+        clip: () => [h("div", { class: "row" }, h("div", { class: "label" }, "Clip"), h("select", { onchange: (e) => { a.title = e.target.value; changed(); } }, [h("option", { value: "" }, "Choose…"), ...clips.map((c) => h("option", { value: c, selected: a.title === c }, c))]))],
+        page: () => [h("div", { class: "row" }, h("div", { class: "label" }, "Page"), h("select", { onchange: (e) => { a.page = e.target.value; changed(); } }, PAGES.map(([id, label]) => h("option", { value: id, selected: a.page === id }, label))))],
+      };
+      actionFields.replaceChildren(...(rows[a.type] || (() => []))());
+    };
+    const typeSel = h("select", { onchange: (e) => {
+      const type = e.target.value;
+      const fresh = { keys: { keys: "" }, open: { target: "" }, shortcut: { name: "" }, shell: { command: "" }, micMute: {}, media: { command: "playpause" }, clip: { title: "" }, page: { page: "ai" } }[type];
+      for (const k of Object.keys(a)) delete a[k];
+      Object.assign(a, { type }, fresh); changed(); drawAction(); render();
+    } }, ACTIONS.map(([v, l]) => h("option", { value: v, selected: a.type === v }, l)));
+    drawAction();
+    editor = h("div", {},
+      card(null, null, preview,
+        h("div", { class: "row" }, h("div", { class: "label" }, "Title"), h("input", { type: "text", value: t.title, style: { width: "280px" }, oninput: (e) => { set(`${p}.title`, e.target.value); refreshPreview(); } })),
+        h("div", { class: "row" }, h("div", { class: "label" }, "SF Symbol", h("small", {}, "Any name from Apple's SF Symbols app")), symInput),
+        h("div", { class: "suggest" }, SYMBOLS.map((s) => h("button", { title: s, class: s === t.symbol ? "on" : "", onclick: () => { set(`${p}.symbol`, s); symInput.value = s; refreshPreview(); render(); } }, sym(s, 16)))),
+        h("div", { class: "row" }, h("div", { class: "label" }, "Color"), h("div", { class: "ctl" },
+          h("button", { class: "btn small", onclick: () => { set(`${p}.color`, ""); refreshPreview(); render(); } }, "Default"),
+          h("input", { type: "color", value: t.color || "#B4B4BE", oninput: (e) => { set(`${p}.color`, e.target.value.toUpperCase()); refreshPreview(); } })))),
+      card("What it does", null, h("div", { class: "row" }, h("div", { class: "label" }, "Action"), typeSel), actionFields,
+        h("div", { class: "row" }, h("span", { style: { flex: 1 } }), h("button", { class: "btn", onclick: () => ctl(`shortcut ${selTile}`).then(() => toast("Ran it")) }, sym("play.fill", 12), "Try it"))));
+  }
+  main.append(h("div", { class: "split" }, list, editor));
+}
+
+// ---------------------------------------------------------------- Soundboard
+async function loadDevices() { try { devices = await api("/api/audio-devices"); } catch (e) { devices = { inputs: [], outputs: [], error: String(e.message || e) }; } if (tab === "soundboard") render(); }
+function clipStyle(file) {
+  const list = cfg.soundboard.clips || (cfg.soundboard.clips = []);
+  let c = list.find((x) => x.file === file);
+  if (!c) { c = { file, title: "", color: "", symbol: "", gain: 1 }; list.push(c); }
+  return c;
+}
+function viewSoundboard(main) {
+  const sb = state.status?.soundboard || {};
+  const remote = state.route?.kind === "remote";
+  main.append(h("h1", {}, "Soundboard"), h("p", { class: "sub" }, "Clips play into your call through a virtual mic, mixed with your real one."));
+  if (!devices) loadDevices();
+  const devOpts = (list) => [["", "System default"], ...((list || []).map((d) => [d, d]))];
+  const upload = h("input", { type: "file", multiple: true, accept: "audio/*", style: { display: "none" }, onchange: async (e) => {
+    for (const f of e.target.files) {
+      try { await api(`/api/clips?name=${encodeURIComponent(f.name)}`, { method: "POST", body: f }); toast(`Added ${f.name}`); }
+      catch (err) { toast(`${f.name}: ${err.message || err}`); }
+    }
+    e.target.value = ""; setTimeout(poll, 700);
+  } });
+  main.append(card("Routing", sb.error ? `Problem: ${sb.error}` : sb.routing ? `Live${sb.listener ? " — " + sb.listener + " is listening" : ""}.` : "Not routing right now.",
+    choice("Route my mic through", "soundboard.live", [["auto", "Automatically, while a call app listens"], ["on", "Always"], ["off", "Never"]]),
+    choice("My microphone", "soundboard.input", devOpts(devices?.inputs)),
+    choice("Virtual mic (set your call app's mic to this)", "soundboard.output", devOpts(devices?.outputs)),
+    toggle("Mix my mic in", "soundboard.passthrough", "Off sends only the clips"),
+    toggle("Play clips on my speakers too", "soundboard.monitor"),
+    choice("Monitor on", "soundboard.monitorDevice", devOpts(devices?.outputs)),
+    slider("Clip volume", "soundboard.gain", 0, 1, 0.01, (v) => `${Math.round(v * 100)}%`),
+    h("div", { class: "row" }, h("span", { style: { flex: 1, color: "var(--muted)", fontSize: "12px" } }, devices?.error ? `Devices: ${devices.error}` : ""), h("button", { class: "btn small", onclick: () => { devices = null; loadDevices(); } }, "Refresh devices"))));
+  const files = sb.clipFiles || [];
+  main.append(card("Clips", remote ? `Clips live on ${state.route.name} (the Mac with the Quake); add them there.` : `Folder: ${state.clipsFolder}`,
+    h("div", { class: "row" }, upload,
+      h("button", { class: "btn", disabled: remote, onclick: () => upload.click() }, sym("plus", 12), "Add clips…"),
+      h("button", { class: "btn", disabled: remote, onclick: () => api("/api/open-clips", { method: "POST" }) }, sym("folder", 12), "Show in Finder"),
+      h("span", { style: { flex: 1 } }),
+      h("button", { class: "btn", onclick: () => ctl("stop") }, sym("stop.fill", 12), "Stop all")),
+    ...(files.length ? files.map((f) => {
+      const c = clipStyle(f.file);
+      const col = c.color || f.color || "#4C8DFF";
+      return h("div", { class: "row clip" },
+        h("div", { class: "icon", style: { background: col } }, sym(c.symbol || f.symbol || "waveform", 16, "#fff")),
+        h("div", { class: "label" }, h("input", { type: "text", value: c.title || f.title, placeholder: f.title, style: { width: "100%" }, oninput: (e) => { c.title = e.target.value; changed(); } }), h("small", { class: "mono" }, f.file)),
+        h("input", { type: "text", value: c.symbol || "", placeholder: "symbol", class: "mono", style: { width: "130px" }, oninput: (e) => { c.symbol = e.target.value.trim(); changed(); } }),
+        h("input", { type: "color", value: col, oninput: (e) => { c.color = e.target.value.toUpperCase(); changed(); } }),
+        h("input", { type: "range", min: 0, max: 2, step: 0.05, value: c.gain ?? 1, style: { width: "90px" }, title: "Volume", oninput: (e) => { c.gain = +e.target.value; changed(); } }),
+        h("button", { class: "btn icon", title: "Play", onclick: () => ctl(`play ${f.title}`) }, sym("play.fill", 12)));
+    }) : [h("div", { class: "empty" }, "No clips yet. Add some audio files.")])));
+}
+
+// ---------------------------------------------------------------- Lighting
+function viewLighting(main) {
+  main.append(h("h1", {}, "Lighting"), h("p", { class: "sub" }, "The light ring around the knob shows which pane you're on."));
+  main.append(card(null, "Off leaves the ring as the device has it.", toggle("Drive the knob's light ring", "ring.enabled", null, { after: render }), slider("Brightness", "ring.brightness", 0, 255, 1, (v) => `${Math.round(v / 255 * 100)}%`)));
+  main.append(card("Pane colors", null, PAGES.map(([id, label]) => color(label, `ring.${id}`))));
+  main.append(card("Alerts", null, toggle("Breathe while a Claude session needs you", "ring.alert"), color("Alert color", "ring.alertColor")));
+}
+
+// ---------------------------------------------------------------- General
+function viewGeneral(main) {
+  const idle = [15, 30, 45, 60, 90, 120, 180, 300, 600];
+  if (!idle.includes(cfg.idleSeconds)) idle.push(cfg.idleSeconds), idle.sort((a, b) => a - b);
+  main.append(h("h1", {}, "General"), h("p", { class: "sub" }, "Everything else. Changes save as you go and reach your other Mac within a few seconds."));
+  main.append(card("Board", null,
+    slider("Screen brightness", "device.screenBrightness", 10, 255, 1, (v) => `${Math.round(v / 255 * 100)}%`),
+    toggle("Buzzer", "buzzer", "Chirps when a Claude session waits on you or something new comes in"),
+    choice("Idle after", "idleSeconds", idle.map((s) => [s, secs(s)]), "Time without input before the board backs out", true),
+    toggle("Go back to the dashboard when idle", "idleHome", "Stays on League during a ready check or champ select"),
+    toggle("The Quake's own microphone", "device.mic", "Off also turns off its bright indicator light"),
+    toggle("Flip touch left / right", "touch.flipX"),
+    toggle("Flip touch top / bottom", "touch.flipY", "On by default: the panel reports y from the bottom")));
+  main.append(card("New stuff", "Touching the board stops the blinking. It won't jump while you've used the board in the last 15 seconds.",
+    toggle("Blink the ring", "alerts.blink"), toggle("Jump to the pane that has it", "alerts.jump"),
+    choice("Stop blinking after", "alerts.seconds", [[60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"], [1800, "30 min"]], null, true),
+    toggle("Claude sessions waiting on you", "alerts.ai"), toggle("Review requests, failing CI, approvals, conflicts", "alerts.code"),
+    toggle("Hosts going down, sites failing", "alerts.ops"), toggle("Containers stopping", "alerts.docker")));
+  main.append(card("League of Legends", "Uses the League client's local API while it runs (live or PBE).",
+    toggle("Accept the match automatically", "league.autoAccept"),
+    slider("Wait before accepting", "league.acceptDelayMs", 0, 8000, 250, (v) => `${(v / 1000).toFixed(2)} s`),
+    toggle("Jump to League when the queue pops", "league.snap")));
+  main.append(card("Ops", "Hosts are SSH aliases from ~/.ssh/config; stats use key login only. Sites get status, response time and certificate expiry.",
+    lines("Hosts", "ops.hosts", "One per line"), toggle("Read load, memory, disk and GPU over SSH", "ops.sshStats"), lines("Sites", "ops.sites", "One URL per line")));
+  main.append(card("Code", "Through gh and glab's own logins.",
+    toggle("Include GitLab merge requests", "code.gitlab"),
+    choice("Refresh every", "code.refreshSeconds", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], "Twice as often while the pane is showing", true)));
+  main.append(card("Docker", null, text("Engine socket", "docker.socket", "Automatic (Kiri first)", "Empty finds Kiri's, then Docker's")));
+}
+
+// ---------------------------------------------------------------- Macs (sync)
+function viewSync(main) {
+  main.append(h("h1", {}, "Macs"), h("p", { class: "sub" }, "Paired Macs share Claude sessions and one set of settings. The one with the Quake plugged in shows everything."));
+  const peers = state.peers || [];
+  main.append(card("This Mac", null,
+    toggle("Share with my other Macs", "sync.enabled"),
+    text("Name on the network", "sync.name", state.machine || "This Mac's name")));
+  main.append(card("Nearby", "Found with Bonjour on this network. Pairing asks for approval on the other Mac: press the knob on its Quake, or click Allow in its settings page.",
+    ...(peers.length ? peers.map((p) => {
+      const busy = pairing === p.name;
+      const unpaired = !p.ok && /key/.test(p.error || "");
+      return h("div", { class: "row" }, h("div", { class: "icon", style: { width: "30px", display: "grid", placeItems: "center" } }, sym("laptopcomputer", 20, "var(--muted)")),
+        h("div", { class: "label" }, h("b", {}, p.name), h("small", {}, p.ok ? `${p.sessions} Claude sessions${p.board ? " · has the Quake" : ""}` : unpaired ? "Not paired" : p.error || "Connecting…")),
+        p.ok ? h("span", { class: "pill green" }, "Paired") : unpaired ? h("button", { class: "btn primary", disabled: !!pairing, onclick: () => pairWith(p.name) }, busy ? "Waiting for approval…" : "Pair") : h("span", { class: "pill amber" }, "Not reachable"));
+    }) : [h("div", { class: "empty" }, "No other Mac running quaked found on this network.")])));
+  const key = h("input", { type: "text", class: "mono", value: cfg.sync?.key || "", style: { width: "200px" }, oninput: (e) => set("sync.key", e.target.value.trim()) });
+  main.append(h("details", { class: "card", style: { padding: "0" } }, h("summary", { style: { padding: "14px 18px", cursor: "pointer", color: "var(--muted)" } }, "Pairing key (advanced)"),
+    h("div", { class: "row" }, h("div", { class: "label" }, "Key", h("small", {}, "Paired Macs share it. Pairing sets it for you.")), key,
+      h("button", { class: "btn small", onclick: () => navigator.clipboard.writeText(cfg.sync?.key || "").then(() => toast("Copied")) }, "Copy"))));
+}
+async function pairWith(name) {
+  pairing = name; render();
+  toast(`Asked ${name}: allow it there`);
+  try { await api(`/api/pair?peer=${encodeURIComponent(name)}`, { method: "POST" }); toast(`Paired with ${name}`); }
+  catch (e) { toast(`Not paired: ${e.message || e}`); }
+  pairing = null; cfg = null; poll();
+}
+
+poll();
+setInterval(() => { if (!document.hidden) poll(); }, 2000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+</script>
+</body>
+</html>

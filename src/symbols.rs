@@ -1,5 +1,5 @@
 //! SF Symbols (Apple's icon set, built into macOS) rendered through AppKit into an
-//! alpha mask that the board tints. The companion app shows the same names natively.
+//! alpha mask that the board tints. The settings page gets the same icons as PNGs.
 
 use objc2::rc::autoreleasepool;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
