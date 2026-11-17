@@ -495,7 +495,8 @@ impl App {
             _ if self.feature_animating() => true,
             (PageId::Dash, _) => self.track.as_ref().is_some_and(|t| t.playing) || self.sessions.iter().any(|s| s.state == State::Working),
             (PageId::Ai, Level::Detail(_)) => true,
-            (PageId::Ai, _) => self.sessions.iter().any(|s| s.steps.last().is_some_and(|st| st.status == status::StepStatus::Running)),
+            // The activity line's turn timer ticks every second.
+            (PageId::Ai, _) => self.sessions.iter().any(|s| s.state == State::Working),
             _ => false,
         }
     }

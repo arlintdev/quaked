@@ -1602,7 +1602,12 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
             cy += line_h;
         }
         room = room.saturating_sub(shown);
-        // The command running now, under the list.
+        // What it's doing now and for how long, then the command itself.
+        if room > 0 && s.state == State::Working {
+            activity_line(c, v, s, ix, cy + 4.0, iw);
+            cy += line_h + 4.0;
+            room -= 1;
+        }
         if room > 0 {
             if let Some(step) = s.steps.iter().rev().find(|st| st.status == StepStatus::Running) {
                 step_line(c, v, step, ix - 4.0, cy, iw + 4.0, 14.0, 76.0);
@@ -1610,10 +1615,60 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
         }
         return;
     }
+    if room > 0 && s.state == State::Working {
+        activity_line(c, v, s, ix, cy, iw);
+        cy += line_h;
+        room -= 1;
+    }
     for step in s.steps.iter().rev().filter(|st| st.status != StepStatus::Info).take(room) {
         step_line(c, v, step, ix - 4.0, cy, iw + 4.0, 14.0, 76.0);
         cy += line_h;
     }
+}
+
+/// What a working session is doing, the way the desktop app puts it ("Running a command"),
+/// and how long this turn has run ("6m 55s").
+fn activity(s: &Session, now: u64) -> Option<(String, String)> {
+    if s.state != State::Working {
+        return None;
+    }
+    let verb = match s.steps.iter().rev().find(|st| st.status == StepStatus::Running).map(|st| st.tag.as_str()) {
+        Some("$") => "Running a command".to_string(),
+        Some("edit") => "Editing a file".into(),
+        Some("write") => "Writing a file".into(),
+        Some("read") => "Reading a file".into(),
+        Some("grep") | Some("glob") => "Searching the code".into(),
+        Some("web") => "Reading a web page".into(),
+        Some("search") => "Searching the web".into(),
+        Some("agent") => "Running an agent".into(),
+        Some("skill") => "Using a skill".into(),
+        Some(t) => format!("Using {t}"),
+        None => "Thinking".into(),
+    };
+    let turn_start = s.steps.iter().rev().find(|st| st.tag == "you").map(|st| st.ts).unwrap_or(s.since);
+    Some((verb, turn_time(now.saturating_sub(turn_start))))
+}
+
+/// "45s", "6m 55s", "1h 04m".
+fn turn_time(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// The activity line: three dots that pulse in turn, what it's doing, the turn's time.
+fn activity_line(c: &mut Canvas, v: &View, s: &Session, x: f32, y: f32, w: f32) {
+    let Some((verb, time)) = activity(s, v.now_ms) else { return };
+    let beat = (v.now_ms / 400 % 3) as usize;
+    for k in 0..3 {
+        let (dx, dy) = [(0.0, -4.0), (6.0, -4.0), (3.0, 2.0)][k];
+        c.circle(x + 6.0 + dx, y - 6.0 + dy, 2.4, ORANGE, if k == beat { 1.0 } else { 0.45 });
+    }
+    let vw = c.clip(F::Medium, &verb, 16.0, w - 120.0, x + 24.0, y, TEXT_2);
+    c.text(F::Medium, &time, 16.0, x + 24.0 + vw + 10.0, y, MUTED, Align::Left);
 }
 
 /// One item of a session's task list: a check when done (dimmed, struck through), a
@@ -1706,9 +1761,12 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
         let rows = ((tr.3 - 60.0) / 30.0).floor().max(1.0) as usize;
         let first_open = s.todos.iter().position(|t| t.state != crate::status::TodoState::Completed).unwrap_or(s.todos.len());
         let start = first_open.saturating_sub(2).min(s.todos.len().saturating_sub(rows));
+        let rows = if s.state == State::Working { rows.saturating_sub(1).max(1) } else { rows };
+        let start = start.min(s.todos.len().saturating_sub(rows));
         for (k, t) in s.todos.iter().skip(start).take(rows).enumerate() {
             todo_line(c, t, tr.0 + 22.0, tr.1 + 66.0 + k as f32 * 30.0, tw - 44.0, s.state == State::Working);
         }
+        activity_line(c, v, s, tr.0 + 22.0, tr.1 + tr.3 - 22.0, tw - 44.0);
         (full.0 + tw + G, full.1, full.2 - tw - G, full.3)
     };
     let (rx, ry, rw, rh) = rr;
@@ -4693,6 +4751,14 @@ fn pr_line(c: &mut Canvas, v: &View, p: &github::Pr, r: R, reviews: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_times_read_like_the_app() {
+        assert_eq!(turn_time(45_000), "45s");
+        assert_eq!(turn_time(415_000), "6m 55s");
+        assert_eq!(turn_time(3_840_000), "1h 04m");
+    }
+
 
     #[test]
     fn clip_windows() {
