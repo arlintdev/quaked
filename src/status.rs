@@ -242,12 +242,23 @@ fn project_name(cwd: &str) -> String {
 /// A prompt without the `<system-reminder>…</system-reminder>` blocks apps inject into it
 /// (cut-off ones included), so the board shows what you typed.
 pub fn typed_prompt(s: &str) -> String {
+    // Blocks Claude Code and the desktop app put into prompts themselves.
+    let mut text = s.to_string();
+    for tag in ["system-reminder", "task-notification", "side-sessions-event", "ci-monitor-event"] {
+        text = strip_blocks(&text, tag);
+    }
+    text.trim().to_string()
+}
+
+/// `s` without any <tag>...</tag> blocks (an unclosed one runs to the end).
+fn strip_blocks(s: &str, tag: &str) -> String {
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
     let mut out = String::new();
     let mut rest = s;
-    while let Some(start) = rest.find("<system-reminder>") {
+    while let Some(start) = rest.find(&open) {
         out.push_str(&rest[..start]);
-        match rest[start..].find("</system-reminder>") {
-            Some(end) => rest = &rest[start + end + "</system-reminder>".len()..],
+        match rest[start..].find(&close) {
+            Some(end) => rest = &rest[start + end + close.len()..],
             None => {
                 rest = "";
                 break;
@@ -255,7 +266,7 @@ pub fn typed_prompt(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    out.trim().to_string()
+    out
 }
 
 pub fn squash(s: &str, max: usize) -> String {
@@ -518,6 +529,11 @@ fn apply(input: &HookInput, prev: Option<Session>, now: u64) -> Option<Session> 
     match input.hook_event_name.as_str() {
         "SessionStart" => {
             new_state = if old_state == Some(State::Working) { State::Working } else { State::Idle };
+        }
+        "UserPromptSubmit" if typed_prompt(&input.prompt).is_empty() && !input.prompt.trim().is_empty() => {
+            // Woken by Claude Code itself (a finished background task, a hook): not a
+            // prompt from you, so the prompt and the turn's start stay as they were.
+            new_state = State::Working;
         }
         "UserPromptSubmit" => {
             new_state = State::Working;
@@ -935,6 +951,13 @@ mod tests {
         fs::write(&path, next).unwrap();
         assert_eq!(turn_comment(path.to_str().unwrap()), "", "a new prompt starts a new turn");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn injected_blocks_are_not_your_prompt() {
+        assert_eq!(typed_prompt("<task-notification>\n<task-id>b0ea</task-id>\n</task-notification>"), "");
+        assert_eq!(typed_prompt("push it <system-reminder>x</system-reminder>"), "push it");
+        assert_eq!(typed_prompt("<side-sessions-event kind=\"done\">y</side-sessions-event> ok"), "ok");
     }
 
     #[test]
