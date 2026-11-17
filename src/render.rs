@@ -668,36 +668,48 @@ impl<'a> Canvas<'a> {
 
 // ---------------------------------------------------------------- layout
 
-fn tab_width(p: Page) -> f32 {
+/// Every tab is an icon; the current page's tab also says its name.
+const TAB_ICON_W: f32 = 52.0;
+
+/// Room the name takes in the current page's tab (Bold 15).
+fn tab_label_w(p: Page) -> f32 {
     match p {
-        Page::Ai => 70.0,
-        Page::Music => 104.0,
-        Page::Shortcuts => 150.0,
-        Page::Soundboard => 112.0,
-        Page::League => 104.0,
-        Page::Docker => 108.0,
-        Page::Ops => 80.0,
-        Page::Code => 92.0,
-        Page::Digin => 96.0,
-        Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health => 56.0, // icons
-        Page::Settings => 56.0, // a gear, not a word
-        Page::Dash => 56.0,     // a grid
+        Page::Ai => 22.0,
+        Page::Ops | Page::Calendar => 40.0,
+        Page::Deploy => 42.0,
+        Page::Dash | Page::Code => 50.0,
+        Page::Digin => 52.0,
+        Page::Paste => 56.0,
+        Page::Music | Page::Focus => 60.0,
+        Page::League | Page::Health => 72.0,
+        Page::Soundboard | Page::Docker => 76.0,
+        Page::Windows => 92.0,
+        Page::Settings => 96.0,
+        Page::Shortcuts => 110.0,
     }
 }
 
-fn tab_rect(pages: &[Page], p: Page) -> R {
+fn tab_width(p: Page, active: Page) -> f32 {
+    if p == active {
+        TAB_ICON_W - 8.0 + tab_label_w(p) + 18.0
+    } else {
+        TAB_ICON_W
+    }
+}
+
+fn tab_rect(pages: &[Page], active: Page, p: Page) -> R {
     let mut x = M;
     for q in pages {
         if *q == p {
-            return (x, 9.0, tab_width(p), 34.0);
+            return (x, 9.0, tab_width(p, active), 34.0);
         }
-        x += tab_width(*q) + 8.0;
+        x += tab_width(*q, active) + 8.0;
     }
     (-1000.0, 0.0, 0.0, 0.0)
 }
 
-fn tabs_end(pages: &[Page]) -> f32 {
-    M + pages.iter().map(|p| tab_width(*p) + 8.0).sum::<f32>()
+fn tabs_end(pages: &[Page], active: Page) -> f32 {
+    M + pages.iter().map(|p| tab_width(*p, active) + 8.0).sum::<f32>()
 }
 
 // Shortcuts: 2 rows x 8 tiles.
@@ -1065,7 +1077,7 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
         return night::hit(v, x, y);
     }
     for p in v.pages {
-        if inside(tab_rect(v.pages, *p), x, y) {
+        if inside(tab_rect(v.pages, v.page, *p), x, y) {
             return Some(Hit::Tab(*p));
         }
     }
@@ -1180,7 +1192,7 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
 
 fn hit_rect(v: &View, h: Hit) -> Option<R> {
     Some(match h {
-        Hit::Tab(p) => tab_rect(v.pages, p),
+        Hit::Tab(p) => tab_rect(v.pages, v.page, p),
         Hit::Shortcut(i) => shortcut_rect(i),
         Hit::Clip(i) => clip_rect(i.checked_sub(clip_window(v.sounds.clips.len(), v.tile))?),
         Hit::StopAll => stop_all_button(),
@@ -1351,14 +1363,15 @@ fn top_bar(c: &mut Canvas, v: &View) {
     let waiting = v.sessions.iter().filter(|s| s.state == State::Waiting).count();
     for p in v.pages {
         let p = *p;
-        let r = tab_rect(v.pages, p);
+        let r = tab_rect(v.pages, v.page, p);
         let active = v.page == p;
         c.rrect(r, 17.0, if active { TEXT } else { 0x1C1C21 }, 1.0);
         let fg = if active { 0x111114 } else { MUTED };
-        if matches!(p, Page::Settings | Page::Dash | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health) {
-            c.symbol(page_symbol(p), 18.0, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, fg);
+        if active {
+            c.symbol(page_symbol(p), 18.0, r.0 + 24.0, r.1 + r.3 / 2.0, fg);
+            c.fit(F::Bold, p.label(), 15.0, tab_label_w(p) + 6.0, r.0 + 42.0, r.1 + 23.0, fg, Align::Left);
         } else {
-            c.text(F::Bold, p.label(), 16.0, r.0 + r.2 / 2.0, r.1 + 23.0, fg, Align::Center);
+            c.symbol(page_symbol(p), 18.0, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0, fg);
         }
         if active {
             c.rrect((r.0 + 14.0, r.1 + r.3 + 3.0, r.2 - 28.0, 3.0), 1.5, v.accent, 1.0);
@@ -1368,13 +1381,13 @@ fn top_bar(c: &mut Canvas, v: &View) {
         }
     }
     if waiting > 0 && v.pages.contains(&Page::Ai) {
-        let r = tab_rect(v.pages, Page::Ai);
+        let r = tab_rect(v.pages, v.page, Page::Ai);
         c.circle(r.0 + r.2 - 4.0, r.1 + 4.0, 11.0, AMBER, 1.0);
         c.text(F::Bold, &waiting.to_string(), 14.0, r.0 + r.2 - 4.0, r.1 + 9.0, 0x1C1500, Align::Center);
     }
 
     // Breadcrumb
-    let crumb_x = tabs_end(v.pages) + 12.0;
+    let crumb_x = tabs_end(v.pages, v.page) + 12.0;
     let mut x = crumb_x;
     let crumb = match (v.page, v.level) {
         (Page::Ai, Level::Detail(id)) => v.sessions.iter().find(|s| &s.id == id).map(|s| format!("›  {}", s.name)),
@@ -1448,7 +1461,7 @@ fn top_bar(c: &mut Canvas, v: &View) {
         x += c.fit(F::Bold, &cb, 20.0, (limit - x).clamp(80.0, 360.0), x, 33.0, TEXT, Align::Left) + 24.0;
     }
     if let Some((why, color, page)) = v.notice {
-        let r = tab_rect(v.pages, page);
+        let r = tab_rect(v.pages, v.page, page);
         c.circle(r.0 + r.2 - 4.0, r.1 + 4.0, 7.0, color, 1.0);
         let nx = x.max(crumb_x);
         let pw = c.pill(nx, 15.0, "NEW", 13.0, color, 0x101013);
