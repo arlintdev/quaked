@@ -242,7 +242,8 @@ refused in code.
 - `~/Applications/Quaked.app`: the daemon, a background app with no Dock icon, signed with
   your Developer ID so its Input Monitoring grant survives rebuilds.
 - `~/Library/LaunchAgents/dev.arlint.quaked.plist`: starts it at login and restarts it if it
-  crashes. Log: `~/Library/Logs/quaked.log`.
+  crashes. Log: `~/Library/Logs/quaked.log`. `install.sh` writes it from
+  `launchd/dev.arlint.quaked.plist`, filling in `__HOME__` with this Mac's home folder.
 - `~/.local/bin/quaked`: symlink to the daemon's binary, used by the hooks.
 - `~/.claude/settings.json` hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
   PostToolUseFailure, Notification, Stop, SessionEnd) run `quaked hook`, which keeps one
