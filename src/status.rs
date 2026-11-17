@@ -308,10 +308,15 @@ fn project_name(cwd: &str) -> String {
 pub fn typed_prompt(s: &str) -> String {
     // Blocks Claude Code and the desktop app put into prompts themselves.
     let mut text = s.to_string();
-    for tag in ["system-reminder", "task-notification", "side-sessions-event", "ci-monitor-event"] {
+    for tag in ["system-reminder", "task-notification", "side-sessions-event", "ci-monitor-event", "bash-stdout", "bash-stderr", "local-command-stdout", "command-message"] {
         text = strip_blocks(&text, tag);
     }
-    text.trim().to_string()
+    // A shell command you ran in the app ("!ls") reads as "$ ls"; a slash command as itself.
+    text = text.replace("<bash-input>", "$ ").replace("</bash-input>", "");
+    for tag in ["command-name", "command-args"] {
+        text = text.replace(&format!("<{tag}>"), " ").replace(&format!("</{tag}>"), " ");
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
 }
 
 /// `s` without any <tag>...</tag> blocks (an unclosed one runs to the end).
@@ -1070,6 +1075,8 @@ mod tests {
         assert_eq!(typed_prompt("<task-notification>\n<task-id>b0ea</task-id>\n</task-notification>"), "");
         assert_eq!(typed_prompt("push it <system-reminder>x</system-reminder>"), "push it");
         assert_eq!(typed_prompt("<side-sessions-event kind=\"done\">y</side-sessions-event> ok"), "ok");
+        assert_eq!(typed_prompt("<bash-input>docker ps</bash-input><bash-stdout>CONTAINER</bash-stdout><bash-stderr></bash-stderr>"), "$ docker ps");
+        assert_eq!(typed_prompt("<command-message>compact</command-message><command-name>/compact</command-name><command-args>keep it short</command-args>"), "/compact keep it short");
     }
 
     #[test]
