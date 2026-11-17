@@ -27,8 +27,13 @@ mkdir -p "$SETTINGS/Contents/MacOS"
 cp bundle/settings/Info.plist "$SETTINGS/Contents/Info.plist"
 install -m 755 bundle/settings/quaked-settings "$SETTINGS/Contents/MacOS/quaked-settings"
 codesign --force --sign "${IDENTITY:--}" --identifier dev.arlint.quaked.settings "$SETTINGS" 2>/dev/null || true
-# The LaunchAgent in the repo says __HOME__ where your home folder goes.
-sed "s|__HOME__|$HOME|g" launchd/dev.arlint.quaked.plist > "$HOME/Library/LaunchAgents/dev.arlint.quaked.plist"
+# The template says __HOME__ wherever this Mac's home folder goes, so one file serves every Mac.
+AGENT="$HOME/Library/LaunchAgents/dev.arlint.quaked.plist"
+# XML-escape the path, then escape it for sed's replacement text.
+HOME_SED="$(printf '%s' "$HOME" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/[\\&|]/\\&/g')"
+sed "s|__HOME__|$HOME_SED|g" launchd/dev.arlint.quaked.plist > "$AGENT.tmp"
+plutil -lint -s "$AGENT.tmp"
+mv "$AGENT.tmp" "$AGENT"
 launchctl bootout "gui/$(id -u)/dev.arlint.quaked" 2>/dev/null || true
 # bootout returns before the old instance has exited; bootstrap fails until it has.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -44,7 +49,7 @@ for pid in $(pgrep -x quaked || true); do
   esac
 done
 sleep 0.5
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.arlint.quaked.plist"
+launchctl bootstrap "gui/$(id -u)" "$AGENT"
 # Check the new build is the one answering.
 RUNNING=""
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
