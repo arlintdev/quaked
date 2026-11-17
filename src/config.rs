@@ -207,19 +207,30 @@ impl Default for FocusSettings {
     }
 }
 
-/// Deploy and CI.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+/// Deploy and CI. A deploy only starts from the board's two-step confirmation (press to
+/// arm, press again within 4 seconds).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeploySettings {
+    /// The projects on the SHIP page, in order. Empty = every folder directly under `scan`
+    /// that has an executable deploy.sh (most recently committed first).
     pub projects: Vec<DeployProject>,
+    /// Where to look for projects when `projects` is empty ("" = don't look).
+    pub scan: String,
+}
+impl Default for DeploySettings {
+    fn default() -> Self {
+        DeploySettings { projects: Vec::new(), scan: "~/ArlintDev".into() }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeployProject {
+    /// Shown on the card; empty = the folder's name.
     pub name: String,
     /// The project folder ("~/ArlintDev/plcplayground").
     pub path: String,
-    /// What deploys it, run in `path` ("./deploy.sh").
+    /// What deploys it, run with /bin/sh -c in `path`; empty = "./deploy.sh".
     pub command: String,
     /// GitHub repo for CI status ("arlintdev/plcplayground"); empty = from the folder's git remote.
     pub repo: String,
