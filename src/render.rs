@@ -23,6 +23,7 @@ mod focus;
 mod health;
 mod night;
 pub(crate) mod stocks;
+pub(crate) mod update;
 mod paste;
 mod viz;
 mod windows;
@@ -213,6 +214,7 @@ pub struct View<'a> {
     pub calendar: &'a crate::calendar::Status,
     pub health: &'a crate::health::Status,
     pub stocks: &'a crate::stocks::Status,
+    pub update: update::UpdateView<'a>,
     pub night: &'a crate::night::Status,
     pub viz: &'a crate::viz::Status,
     pub level: &'a Level,
@@ -733,7 +735,7 @@ fn tab_label_w(p: Page) -> f32 {
         Page::Paste => 56.0,
         Page::Music | Page::Focus => 60.0,
         Page::League | Page::Health => 72.0,
-        Page::Stocks => 72.0,
+        Page::Stocks | Page::Update => 72.0,
         Page::Soundboard | Page::Docker => 76.0,
         Page::Windows => 92.0,
         Page::Settings => 96.0,
@@ -883,7 +885,7 @@ fn pr_lists(g: &github::Status, tile: usize) -> [(R, usize, usize, usize); 2] {
 // Dashboard: a tile per page (all but itself and Settings), in page order, two rows.
 /// Shortcuts has no live status, so it gets no tile (Digin takes its place).
 pub fn dash_pages(pages: &[Page]) -> Vec<Page> {
-    pages.iter().copied().filter(|p| !matches!(p, Page::Dash | Page::Settings | Page::Shortcuts | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health | Page::Stocks)).collect()
+    pages.iter().copied().filter(|p| !matches!(p, Page::Dash | Page::Settings | Page::Shortcuts | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health | Page::Stocks | Page::Update)).collect()
 }
 fn dash_rect(i: usize, n: usize) -> R {
     let cols = n.div_ceil(2).max(1);
@@ -911,6 +913,7 @@ pub fn page_symbol(p: Page) -> &'static str {
         Page::Calendar => "calendar",
         Page::Health => "waveform.path.ecg",
         Page::Stocks => "chart.line.uptrend.xyaxis",
+        Page::Update => "arrow.down.circle.fill",
         Page::Settings => "gearshape.fill",
     }
 }
@@ -1189,6 +1192,7 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
         (Page::Calendar, _) => calendar::hit(v, x, y),
         (Page::Health, _) => health::hit(v, x, y),
         (Page::Stocks, _) => stocks::hit(v, x, y),
+        (Page::Update, _) => update::hit(v, x, y),
         (Page::Digin, Level::Detail(_)) if dg_open(v).is_some() => {
             let d = dg_open(v)?;
             if inside(dg_back(), x, y) {
@@ -1328,6 +1332,7 @@ fn feature_rect(v: &View, p: Page, i: usize) -> Option<R> {
         Page::Calendar => calendar::rect(v, i),
         Page::Health => health::rect(v, i),
         Page::Stocks => stocks::rect(v, i),
+        Page::Update => update::rect(v, i),
         _ => None,
     }
 }
@@ -1382,6 +1387,7 @@ pub fn draw(c: &mut Canvas, v: &View) {
         (Page::Calendar, _) => calendar::draw(c, v),
         (Page::Health, _) => health::draw(c, v),
         (Page::Stocks, _) => stocks::draw(c, v),
+        (Page::Update, _) => update::draw(c, v),
     }
     if let Some(r) = v.flash.and_then(|h| hit_rect(v, h)) {
         c.rrect(r, 14.0, 0xFFFFFF, 0.22);
@@ -1415,6 +1421,7 @@ fn hints(v: &View) -> &'static str {
         (Page::Calendar, l) => calendar::hints(l),
         (Page::Health, l) => health::hints(l),
         (Page::Stocks, l) => stocks::hints(l),
+        (Page::Update, l) => update::hints(l),
         (Page::Digin, Level::Top) => "turn  switch page   ·   press  pick an item   ·   tap  open",
         (Page::Digin, Level::Detail(_)) => digin_hints(v),
         (Page::Digin, _) => "turn  choose   ·   press  open   ·   double-click  back",
@@ -1490,6 +1497,7 @@ fn top_bar(c: &mut Canvas, v: &View) {
         (Page::Calendar, _) => calendar::crumb(v),
         (Page::Health, _) => health::crumb(v),
         (Page::Stocks, _) => stocks::crumb(v),
+        (Page::Update, _) => update::crumb(v),
         (Page::Settings, Level::Focus) => Some(format!("›  {}", setting_name(v.tile))),
         (Page::Settings, Level::Detail(_)) => Some(format!("›  {}", setting_name(v.tile))),
         _ => None,
@@ -3418,7 +3426,7 @@ fn brief(v: &View, p: Page, accent: u32) -> Brief {
                 Brief::new("All caught up", GREEN).dot(GREEN)
             }
         }
-        Page::Dash | Page::Settings | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health | Page::Stocks => Brief::new("", TEXT),
+        Page::Dash | Page::Settings | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health | Page::Stocks | Page::Update => Brief::new("", TEXT),
     }
 }
 
@@ -3460,7 +3468,7 @@ fn dash_page(c: &mut Canvas, v: &View) {
             Page::Ops => dash_ops(c, v, inner, &b),
             Page::Code => dash_code(c, v, inner, color, &b),
             Page::Digin => dash_digin(c, v, inner, color, &b),
-            Page::Dash | Page::Settings | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health | Page::Stocks => {}
+            Page::Dash | Page::Settings | Page::Focus | Page::Deploy | Page::Paste | Page::Windows | Page::Calendar | Page::Health | Page::Stocks | Page::Update => {}
         }
         if v.level != &Level::Top && v.tile == i {
             c.outline(r, 16.0, TEXT, 3.0);

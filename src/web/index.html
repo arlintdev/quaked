@@ -142,6 +142,7 @@ const TABS = [
   ["digin", "Digin", "bubble.left.and.text.bubble.right"],
   ["extras", "Extras", "sparkles"],
   ["sync", "Macs", "laptopcomputer.and.iphone"],
+  ["updates", "Updates", "arrow.down.circle"],
 ];
 const SYMBOLS = ["star.fill", "bolt.fill", "camera.viewfinder", "rectangle.dashed", "lock.fill", "moon.fill", "sun.max.fill", "speaker.slash.fill", "mic.slash.fill", "music.note", "playpause.fill", "forward.fill", "backward.fill", "terminal.fill", "safari.fill", "globe", "folder.fill", "doc.text.fill", "envelope.fill", "message.fill", "phone.fill", "video.fill", "calendar", "clock.fill", "timer", "bell.fill", "gearshape.fill", "hammer.fill", "wrench.and.screwdriver.fill", "sparkles", "brain.head.profile", "chevron.left.forwardslash.chevron.right", "server.rack", "shippingbox.fill", "cloud.fill", "network", "wifi", "lightbulb.fill", "house.fill", "gamecontroller.fill", "headphones", "megaphone.fill", "hand.thumbsup.fill", "heart.fill", "flame.fill", "trash.fill", "arrow.clockwise", "square.and.arrow.up", "rectangle.split.2x1.fill", "macwindow", "display", "keyboard", "command", "eye.fill", "magnifyingglass", "paperplane.fill", "cart.fill", "creditcard.fill", "person.fill", "figure.walk"];
 const ACTIONS = [["keys", "Type keys"], ["open", "Open"], ["shortcut", "Run a Shortcut"], ["shell", "Shell command"], ["micMute", "Mute my mic"], ["media", "Music control"], ["clip", "Play a clip"], ["page", "Go to a page"]];
@@ -195,7 +196,7 @@ async function poll() {
   try { state = await api("/api/state"); } catch (e) { $("#main").replaceChildren(h("div", { class: "card" }, h("div", { class: "empty" }, "quaked isn't answering. Is it running? (./install.sh starts it)"))); return; }
   const fresh = !cfg || (!editing && !saving && strip(state.config) !== strip(cfg));
   if (fresh) { cfg = structuredClone(state.config); render(); }
-  else { if (cfg && !editing) cfg.updatedAt = state.config.updatedAt; renderNav(); renderLive(); renderBanner(); }
+  else { if (cfg && !editing) cfg.updatedAt = state.config.updatedAt; renderNav(); renderLive(); renderBanner(); renderUpdates(); }
 }
 
 // ---------------------------------------------------------------- controls
@@ -238,7 +239,8 @@ function renderNav() {
   const where = route === "local" ? ["The Quake is on", "this Mac"] : route === "remote" ? ["The Quake is on", state.route.name] : ["No Quake connected", "Plug it into either Mac"];
   nav.replaceChildren(
     h("div", { class: "brand" }, h("span", { class: "dot" + (conn ? " on" : "") }), "Quaked"),
-    ...TABS.map(([id, label, s]) => h("a", { class: tab === id ? "active" : "", onclick: () => { tab = id; localStorage.setItem("quaked.tab", id); render(); } }, sym(s, 16), label)),
+    ...TABS.map(([id, label, s]) => h("a", { class: tab === id ? "active" : "", onclick: () => { tab = id; localStorage.setItem("quaked.tab", id); render(); } }, sym(s, 16), label,
+      id === "updates" && (state?.status?.features?.update?.macs || []).some((m) => m.state === "behind") ? h("span", { class: "pill blue", style: { marginLeft: "auto" } }, "New") : null)),
     h("div", { class: "where" }, where[0], h("b", {}, where[1]), state?.machine ? h("div", { style: { marginTop: "6px" } }, `You're on ${state.machine}`) : null),
   );
 }
@@ -255,7 +257,7 @@ function render() {
   const main = $("#main");
   main.replaceChildren(h("div", { id: "banner" }));
   renderBanner();
-  const views = { live: viewLive, panes: viewPanes, shortcuts: viewShortcuts, soundboard: viewSoundboard, lighting: viewLighting, general: viewGeneral, digin: viewDigin, extras: viewExtras, sync: viewSync };
+  const views = { live: viewLive, panes: viewPanes, shortcuts: viewShortcuts, soundboard: viewSoundboard, lighting: viewLighting, general: viewGeneral, digin: viewDigin, extras: viewExtras, sync: viewSync, updates: viewUpdates };
   (views[tab] || viewLive)(main);
 }
 
@@ -685,6 +687,60 @@ function viewSync(main) {
     h("div", { class: "row" }, h("div", { class: "label" }, "Key", h("small", {}, "Paired Macs share it. Pairing sets it for you.")), key,
       h("button", { class: "btn small", onclick: () => navigator.clipboard.writeText(cfg.sync?.key || "").then(() => toast("Copied")) }, "Copy"))));
 }
+// ---------------------------------------------------------------- Updates
+const ago = (ms) => { const m = Math.max(0, Math.round((Date.now() - ms) / 60000)); return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`; };
+// Release notes (Markdown) as plain paragraphs and bullets; never as HTML.
+function notesView(md) {
+  const plain = (s) => s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\*\*|__|`/g, "");
+  const out = h("div", { style: { padding: "4px 18px 14px", color: "var(--text-2, inherit)", fontSize: "13.5px", lineHeight: "1.5" } });
+  let list = null;
+  for (const raw of (md || "").split("\n")) {
+    const t = raw.trim();
+    const item = t.match(/^[-*] (.*)/);
+    if (item) { if (!list) out.append(list = h("ul", { style: { margin: "6px 0", paddingLeft: "20px" } })); list.append(h("li", {}, plain(item[1]))); continue; }
+    list = null;
+    if (t) out.append(h("p", { style: { margin: "6px 0" } }, plain(t.replace(/^#+\s*/, ""))));
+  }
+  return out;
+}
+// The Updates view follows checks and installs as they happen (other views only redraw
+// when the settings change).
+let updatesShown = "";
+function renderUpdates() {
+  if (tab !== "updates" || editing) return;
+  const key = JSON.stringify(state.status?.features?.update || {});
+  if (key !== updatesShown) render();
+}
+function viewUpdates(main) {
+  const u = state.status?.features?.update || {};
+  updatesShown = JSON.stringify(u);
+  const rel = u.latest;
+  main.append(h("h1", {}, "Updates"), h("p", { class: "sub" }, "New releases of quaked from GitHub. While one is out, the Quake shows an Update pane where you can install it on each Mac."));
+  const checked = u.checking ? "checking…" : u.checkedMs ? `checked ${ago(u.checkedMs)}` : "not checked yet";
+  main.append(card("This Mac", "Installing checks the download against the release's checksum and that the apps are signed by the same developer as the quaked running here, then restarts quaked.",
+    h("div", { class: "row" }, h("div", { class: "label" }, h("b", {}, `quaked ${u.current || "?"}`), h("small", {}, `build ${u.build || "?"} · ${checked}${u.error ? ` · ${u.error}` : ""}`)),
+      h("button", { class: "btn", disabled: !!u.checking, onclick: () => ctl("update-check").then(() => setTimeout(poll, 2000)) }, "Check now")),
+    toggle("Look for new releases", "updates.check", "Every six hours")));
+  if (rel) {
+    main.append(h("div", { class: "card" }, h("h2", {}, `${u.available ? "New release" : "Latest release"}: quaked ${rel.version}`),
+      h("div", { class: "row" }, h("div", { class: "label" }, rel.name || `quaked ${rel.version}`, h("small", {}, `Released ${ago(rel.publishedMs)}${rel.size ? ` · ${(rel.size / 1e6).toFixed(1)} MB` : ""}`)),
+        h("a", { class: "btn small", href: rel.url, target: "_blank", rel: "noopener" }, "On GitHub")),
+      notesView(rel.notes)));
+  }
+  const label = { current: ["Up to date", "green"], busy: [null, "blue"], failed: [null, "red"], unknown: ["Update by hand once", "amber"] };
+  main.append(card("Your Macs", "A paired Mac installs the release itself when you ask; it needs a quaked new enough to know how (anything from this version on).",
+    ...(u.macs || []).map((m) => {
+      const install = m.state === "behind" || m.state === "failed";
+      const target = m.here ? "" : ` ${m.name}`;
+      const go = () => { if (confirm(`Install quaked ${rel?.version} on ${m.here ? "this Mac" : m.name}? quaked restarts there.`)) ctl(`update-install${target}`).then(() => setTimeout(poll, 1500)); };
+      const [text, color] = label[m.state] || ["", "blue"];
+      return h("div", { class: "row" },
+        h("div", { class: "label" }, h("b", {}, m.name || "This Mac", m.here ? h("span", { class: "pill green", style: { marginLeft: "8px" } }, "This Mac") : null),
+          h("small", { style: m.state === "failed" ? { color: "var(--red)" } : {} }, m.state === "failed" ? m.text : `${m.version || "version unknown"}${m.build ? ` · ${m.build}` : ""}`)),
+        install ? h("button", { class: "btn primary", onclick: go }, m.state === "failed" ? "Try again" : `Install ${rel?.version || ""}`) : h("span", { class: `pill ${color}` }, text || m.text || ""));
+    })));
+}
+
 // The Stocks card: your symbols in order (with what each is and its price), search to add.
 function stocksCard() {
   const st = cfg.stocks || (cfg.stocks = { enabled: true, symbols: [], refreshSeconds: 60 });

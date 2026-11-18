@@ -46,6 +46,8 @@ pub enum PageId {
     Calendar,
     Health,
     Stocks,
+    /// Shows itself while a new quaked release is out (never needs to be in `pages`).
+    Update,
     Settings,
 }
 
@@ -70,6 +72,7 @@ impl PageId {
             PageId::Calendar => "Calendar",
             PageId::Health => "Health",
             PageId::Stocks => "Stocks",
+            PageId::Update => "Update",
             PageId::Settings => "Settings",
         }
     }
@@ -93,6 +96,7 @@ impl PageId {
             PageId::Calendar => "CAL",
             PageId::Health => "HEALTH",
             PageId::Stocks => "STOCKS",
+            PageId::Update => "UPDATE",
             PageId::Settings => "SETTINGS",
         }
     }
@@ -141,6 +145,7 @@ pub struct Config {
     pub calendar: CalendarSettings,
     pub health: HealthSettings,
     pub stocks: StocksSettings,
+    pub updates: UpdateSettings,
     pub night: NightSettings,
     pub viz: VizSettings,
     pub sync: SyncSettings,
@@ -338,6 +343,19 @@ pub struct HealthSettings {
 impl Default for HealthSettings {
     fn default() -> Self {
         HealthSettings { enabled: true }
+    }
+}
+
+/// New quaked releases (from GitHub): the Update pane shows up when one is out.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateSettings {
+    /// Look for a new release every few hours.
+    pub check: bool,
+}
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        UpdateSettings { check: true }
     }
 }
 
@@ -545,6 +563,7 @@ pub struct Ring {
     pub calendar: String,
     pub health: String,
     pub stocks: String,
+    pub update: String,
     /// Breathe in this color while a Claude session needs you.
     pub alert: bool,
     pub alert_color: String,
@@ -685,6 +704,7 @@ impl Default for Config {
             calendar: CalendarSettings::default(),
             health: HealthSettings::default(),
             stocks: StocksSettings::default(),
+            updates: UpdateSettings::default(),
             night: NightSettings::default(),
             viz: VizSettings::default(),
             sync: SyncSettings::default(),
@@ -717,6 +737,7 @@ impl Default for Ring {
             calendar: "#FF453A".into(),
             health: "#66D4CF".into(),
             stocks: "#34C759".into(),
+            update: "#5AC8FA".into(),
             alert: true,
             alert_color: "#F2B705".into(),
         }
@@ -760,6 +781,7 @@ impl Ring {
             PageId::Calendar => &self.calendar,
             PageId::Health => &self.health,
             PageId::Stocks => &self.stocks,
+            PageId::Update => &self.update,
         }
     }
 }

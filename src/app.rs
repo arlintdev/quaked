@@ -18,6 +18,7 @@ use relevance::Urgency;
 mod focus;
 mod health;
 mod stocks;
+mod update;
 mod night;
 mod paste;
 mod viz;
@@ -118,6 +119,7 @@ pub enum FeatureEvent {
     Calendar(crate::calendar::Update),
     Health(crate::health::Update),
     Stocks(crate::stocks::Update),
+    Update(crate::update::Update),
     Night(crate::night::Update),
     Viz(crate::viz::Update),
 }
@@ -228,6 +230,18 @@ struct App {
     health_cmd: Sender<crate::health::Cmd>,
     stocks: crate::stocks::Status,
     stocks_cmd: Sender<crate::stocks::Cmd>,
+    update: crate::update::Status,
+    update_cmd: Sender<crate::update::Cmd>,
+    /// Paired Macs asked to install a release: (the version, when). Done once they report it.
+    update_peers: HashMap<String, (String, Instant)>,
+    /// Why a paired Mac couldn't install.
+    update_errors: HashMap<String, String>,
+    /// The Mac row a first press armed (a second press within a few seconds installs).
+    update_armed: Option<(usize, Instant)>,
+    /// The release already announced in the top bar.
+    update_announced: String,
+    /// The pages in the tab bar: `cfg.pages`, plus Update while it has something to show.
+    pages: Vec<PageId>,
     night: crate::night::Status,
     night_cmd: Sender<crate::night::Cmd>,
     viz: crate::viz::Status,
@@ -402,7 +416,7 @@ impl App {
     fn view<'a>(&'a self, clock: &'a str, now_ms: u64, second: u64) -> View<'a> {
         let desk = self.desk();
         View {
-            pages: &self.cfg.pages,
+            pages: &self.pages,
             page: self.page,
             accent: self.accent(),
             shortcuts: &self.cfg.shortcuts,
@@ -456,6 +470,7 @@ impl App {
             calendar: &self.calendar,
             health: &self.health,
             stocks: &self.stocks,
+            update: render::update::UpdateView { status: &self.update, rows: self.update_rows(), armed: self.update_armed_row() },
             night: &self.night,
             viz: &self.viz,
             level: &self.level,
@@ -609,6 +624,9 @@ impl App {
             if cfg.night != self.cfg.night || force {
                 let _ = self.night_cmd.send(crate::night::Cmd::Configure(cfg.night.clone()));
             }
+            if cfg.updates != self.cfg.updates || force {
+                let _ = self.update_cmd.send(crate::update::Cmd::Configure(cfg.updates.clone()));
+            }
             if cfg.viz != self.cfg.viz || force {
                 let _ = self.viz_cmd.send(crate::viz::Cmd::Configure(cfg.viz.clone()));
             }
@@ -620,8 +638,9 @@ impl App {
             if self.cfg.pages.is_empty() {
                 self.cfg.pages = vec![PageId::Ai];
             }
-            if !self.cfg.pages.contains(&self.page) {
-                self.set_page(self.cfg.pages[0]);
+            self.refresh_pages();
+            if !self.pages.contains(&self.page) {
+                self.set_page(self.pages[0]);
             }
             device::log("config: loaded");
             self.update_ring();
@@ -767,7 +786,7 @@ impl App {
             PageId::Health => a.health,
             _ => true,
         };
-        if !wanted || !self.cfg.pages.contains(&page) {
+        if !wanted || !self.pages.contains(&page) {
             return false;
         }
         device::log(format!("new: {reason}"));
@@ -819,6 +838,7 @@ impl App {
             FeatureEvent::Calendar(u) => self.on_calendar(u),
             FeatureEvent::Health(u) => self.on_health(u),
             FeatureEvent::Stocks(u) => self.on_stocks(u),
+            FeatureEvent::Update(u) => self.on_update(u),
             FeatureEvent::Night(u) => self.on_night(u),
             FeatureEvent::Viz(u) => self.on_viz(u),
         }
@@ -831,7 +851,7 @@ impl App {
     }
 
     fn feature_tick(&mut self, now: Instant) -> Option<Instant> {
-        [self.call_tick(now), self.focus_tick(now), self.deploy_tick(now), self.paste_tick(now), self.windows_tick(now), self.calendar_tick(now), self.health_tick(now), self.night_tick(now), self.viz_tick(now)].into_iter().flatten().min()
+        [self.call_tick(now), self.focus_tick(now), self.deploy_tick(now), self.paste_tick(now), self.windows_tick(now), self.calendar_tick(now), self.health_tick(now), self.night_tick(now), self.viz_tick(now), self.update_tick(now)].into_iter().flatten().min()
     }
 
     fn feature_animating(&self) -> bool {
@@ -863,6 +883,7 @@ impl App {
             PageId::Calendar => self.calendar_tap(i),
             PageId::Health => self.health_tap(i),
             PageId::Stocks => self.stocks_tap(i),
+            PageId::Update => self.update_tap(i),
             _ => {}
         }
     }
@@ -877,6 +898,7 @@ impl App {
             "calendar": self.calendar_json(),
             "health": self.health_json(),
             "stocks": self.stocks_json(),
+            "update": self.update_json(),
             "night": self.night_json(),
             "viz": self.viz_json(),
         })
@@ -934,7 +956,7 @@ impl App {
             waiting,
             lines,
             pair: self.pair_ask.as_ref().map(|a| a.name.clone()),
-            pages: if self.connected { self.cfg.pages.iter().map(|p| (p.title().to_string(), *p == self.page)).collect() } else { Vec::new() },
+            pages: if self.connected { self.pages.iter().map(|p| (p.title().to_string(), *p == self.page)).collect() } else { Vec::new() },
         }
     }
 
@@ -962,7 +984,7 @@ impl App {
             }
             Action::Pair(allow) => self.answer_pair(allow),
             Action::Page(i) => {
-                if let Some(p) = self.cfg.pages.get(i).copied() {
+                if let Some(p) = self.pages.get(i).copied() {
                     self.last_input = Instant::now();
                     self.set_page(p);
                     self.redraw();
@@ -1248,6 +1270,7 @@ impl App {
         self.calendar_page_shown(p == PageId::Calendar);
         self.health_page_shown(p == PageId::Health);
         self.stocks_page_shown(p == PageId::Stocks);
+        self.update_page_shown(p == PageId::Update);
         if p == PageId::Code {
             let _ = self.code_cmd.send(github::Cmd::Refresh);
         }
@@ -1484,6 +1507,7 @@ impl App {
             PageId::Windows => self.windows.apps.len(),
             PageId::Health => self.health.macs.len(),
             PageId::Stocks => self.stocks.quotes.len(),
+            PageId::Update => self.update_rows().len(),
             _ => 0,
         }
     }
@@ -1500,7 +1524,7 @@ impl App {
         }
         match (self.page, &self.level) {
             (_, Level::Top) => {
-                let pages = &self.cfg.pages;
+                let pages = &self.pages;
                 let i = pages.iter().position(|p| *p == self.page).unwrap_or(0) as i32;
                 let next = (i + d).rem_euclid(pages.len() as i32) as usize;
                 self.set_page(pages[next]);
@@ -1544,6 +1568,7 @@ impl App {
             (PageId::Calendar, _) => self.calendar_turn(d),
             (PageId::Health, _) => self.health_turn(d),
             (PageId::Stocks, _) => self.stocks_turn(d),
+            (PageId::Update, _) => self.update_turn(d),
         }
     }
 
@@ -1624,6 +1649,7 @@ impl App {
                 (PageId::Calendar, _) => self.calendar_press(),
                 (PageId::Health, _) => self.health_press(),
                 (PageId::Stocks, _) => self.stocks_press(),
+                (PageId::Update, _) => self.update_press(),
                 (PageId::Settings, Level::Detail(_)) => self.level = Level::Focus,
                 (PageId::Settings, _) => {
                     if self.tile < render::SETTING_SLIDERS {
@@ -1721,7 +1747,7 @@ impl App {
                 let _ = self.audio.cmd.send(audio::Cmd::PlayTitle(title.clone()));
             }
             Action::Page { page } => {
-                if self.cfg.pages.contains(page) {
+                if self.pages.contains(page) {
                     self.set_page(*page);
                 }
             }
@@ -1985,6 +2011,9 @@ impl App {
         if let Some(json) = line.strip_prefix("config-put ") {
             return self.config_put(json);
         }
+        if let Some(reply) = self.update_ctl(line.trim()) {
+            return reply;
+        }
         // From a paired Mac: join a meeting, or show an event, here.
         if let Some(url) = line.strip_prefix("join ") {
             return self.calendar_join_from_peer(url.trim());
@@ -2184,6 +2213,7 @@ impl ApplicationHandler<Event> for App {
                 self.peers = st;
                 self.health_peers_changed();
                 self.calendar_peers_changed();
+                self.refresh_pages();
                 self.poll_status();
                 self.redraw();
             }
@@ -2581,6 +2611,10 @@ pub fn run() {
         let _ = pf.send_event(Event::Feature(FeatureEvent::Stocks(u)));
     });
     let pf = proxy.clone();
+    let update_cmd = crate::update::spawn(cfg.updates.clone(), move |u| {
+        let _ = pf.send_event(Event::Feature(FeatureEvent::Update(u)));
+    });
+    let pf = proxy.clone();
     let night_cmd = crate::night::spawn(cfg.night.clone(), move |u| {
         let _ = pf.send_event(Event::Feature(FeatureEvent::Night(u)));
     });
@@ -2626,6 +2660,18 @@ pub fn run() {
     std::thread::Builder::new().name("ctl".into()).spawn(move || ctl_thread(ctl_socket)).unwrap();
     crate::web::spawn(ctl.clone());
     let first_page = cfg.pages.first().copied().unwrap_or(PageId::Ai);
+    let first_pages = cfg.pages.clone();
+    // After an update this build installed: say how it went in the top bar.
+    let just_updated = crate::update::just_updated().map(|r| Attention {
+        page: first_page,
+        reason: match r {
+            Ok(v) => format!("Updated to quaked {v}"),
+            Err(v) => format!("The update to quaked {v} didn't take: this is still {}", crate::update::CURRENT),
+        },
+        until: Instant::now() + Duration::from_secs(cfg.alerts.seconds.max(30)),
+        urgency: Urgency::Low,
+        machine: None,
+    });
     let mut app = App {
         cfg_mtime: config::modified(),
         cfg,
@@ -2679,6 +2725,13 @@ pub fn run() {
         health_cmd,
         stocks: crate::stocks::Status::default(),
         stocks_cmd,
+        update: crate::update::Status::default(),
+        update_cmd,
+        update_peers: HashMap::new(),
+        update_errors: HashMap::new(),
+        update_armed: None,
+        update_announced: String::new(),
+        pages: first_pages,
         night: crate::night::Status::default(),
         night_cmd,
         viz: crate::viz::Status::default(),
@@ -2704,7 +2757,7 @@ pub fn run() {
         undim_to: None,
         cursor: (0.0, 0.0),
         flash: None,
-        attention: None,
+        attention: just_updated,
         jumped: None,
         pending_jump: None,
         health_flags: Default::default(),

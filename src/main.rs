@@ -41,6 +41,7 @@ mod status;
 mod stocks;
 mod symbols;
 mod sync;
+mod update;
 mod viz;
 mod web;
 mod windows;
@@ -435,6 +436,22 @@ fn preview(dir: &str) {
     let (night_on, night_off) = (night::sample(), night::Status::default());
     let (focus_s, deploy_s, paste_s, windows_s, calendar_s, health_s, viz_s) = (focus::sample(), deploy::sample(), clipboard::sample(), windows::sample(), calendar::sample(), health::sample(), viz::sample());
     let stocks_s = stocks::sample();
+    let update_s = update::sample();
+    // The tab bar gains Update (before Settings) while a release is out.
+    let pages_with_update: Vec<Page> = {
+        let mut p = cfg.pages.clone();
+        let at = p.iter().position(|x| *x == Page::Settings).unwrap_or(p.len());
+        p.insert(at, Page::Update);
+        p
+    };
+    // This Mac downloading the new release, the laptop's Install pressed once.
+    let update_rows = || {
+        use render::update::{Row, RowState};
+        vec![
+            Row { name: "Mac mini".into(), here: true, version: update::CURRENT.into(), build: "d2dd77f".into(), state: RowState::Busy("Downloading 9.1.0…".into()) },
+            Row { name: "MacBook Pro".into(), here: false, version: update::CURRENT.into(), build: "d2dd77f".into(), state: RowState::Behind },
+        ]
+    };
     // Two Macs: this one on the right of the Quake, a laptop on the left; the featured
     // meeting from the laptop's calendar for one shot.
     let sides: std::collections::BTreeMap<String, config::Side> = [("Mac mini".to_string(), config::Side::Right), ("MacBook Pro".to_string(), config::Side::Left)].into();
@@ -452,7 +469,7 @@ fn preview(dir: &str) {
         s
     };
     let (stocks_two, stocks_four) = (stocks_n(2), stocks_n(4));
-    let shots: [(&str, Page, Level, usize, usize, usize); 43] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 44] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -496,13 +513,14 @@ fn preview(dir: &str) {
         ("41-stocks-expanded", Page::Stocks, Level::Detail("NVDA@1Y".into()), 0, 0, 0),
         ("42-stocks-two", Page::Stocks, Level::Top, 0, 0, 0),
         ("43-stocks-four", Page::Stocks, Level::Top, 0, 0, 0),
+        ("44-update", Page::Update, Level::Focus, 0, 0, 1),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
     let empty = audio::Status::default();
     for (name, page, level, sel, scroll, tile) in shots.into_iter().chain(std::iter::once(detail_shot)) {
         let mut c = render::Canvas::new(1920, 480, &fonts, &symbols);
         let view = View {
-            pages: &cfg.pages,
+            pages: if name == "44-update" { &pages_with_update } else { &cfg.pages },
             page,
             accent: config::hex(cfg.ring.color_for(page), 0),
             shortcuts: &cfg.shortcuts,
@@ -528,6 +546,7 @@ fn preview(dir: &str) {
             paste: &paste_s,
             windows: &windows_s,
             calendar: if name == "34-calendar-other-mac" { &calendar_other } else { &calendar_s },
+            update: render::update::UpdateView { status: &update_s, rows: update_rows(), armed: (name == "44-update").then_some(1) },
             health: &health_s,
             stocks: match name {
                 "42-stocks-two" => &stocks_two,
@@ -639,6 +658,14 @@ fn main() {
         "settings" | "ui" => {
             let _ = std::process::Command::new("/usr/bin/open").arg(web::url()).status();
         }
+        // A dry run of an update: download the latest release and check it.
+        "update" if args.get(1).map(String::as_str) == Some("verify") => match update::verify_latest() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        },
         "hooks" => match status::install_hooks() {
             Ok(msg) => println!("{msg}"),
             Err(e) => {

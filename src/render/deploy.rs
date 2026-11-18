@@ -776,6 +776,7 @@ mod tests {
                 calendar: &calendar,
                 health: &health,
                 stocks: &stocks,
+                update: super::update::UpdateView { status: &Default::default(), rows: Vec::new(), armed: None },
                 night: &night,
                 viz: &viz,
                 level: &level,

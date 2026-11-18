@@ -155,6 +155,18 @@ clears the download quarantine on them.
 **From source**: `./install.sh` in a clone (needs Rust). `scripts/package.sh` builds a
 release zip into `dist/` the same way.
 
+**Updates.** quaked asks GitHub for the latest release every six hours. When it's newer
+than a Mac's quaked, an **Update** pane joins the tab bar (before Settings) with the
+release notes and a row per Mac: press twice (or tap twice) to install there. A paired Mac
+installs it itself when asked. Installing downloads the zip, checks it against the
+release's `.sha256` and that both apps are signed by the same Developer ID team as the
+running quaked, swaps them in and restarts quaked; the zip's `install.sh` never runs.
+Settings → Updates shows the same, with Check now. `quaked update verify` downloads and
+checks the latest release without installing it. A release is newer when its tag
+(`v<version>`) beats `version` in Cargo.toml, so bump that before `scripts/package.sh`. To
+try a release before publishing it, point `QUAKED_UPDATE_FEED` (`launchctl setenv`, then
+restart quaked) at a file:// copy of its GitHub release JSON; it's checked the same way.
+
 ## Claude's questions and permissions on the Quake
 
 When Claude asks you to choose (merge or hold, which approach...) or needs permission
@@ -296,6 +308,7 @@ DK-Suite must not run at the same time: both want the same display and HID devic
 ```
 ./install.sh                 build, bundle, sign, add Claude Code hooks, (re)start the LaunchAgent
 scripts/package.sh           build the Apple Silicon release zip into dist/
+quaked update verify         download the latest release and check it (no install)
 quaked settings              open the settings page (http://127.0.0.1:47380)
 quaked hooks                 add the Claude Code hooks to ~/.claude/settings.json
 quaked ctl turn 1|-1         drive the running board like the knob

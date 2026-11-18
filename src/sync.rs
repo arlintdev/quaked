@@ -38,6 +38,8 @@ pub struct Peer {
     pub config_at: u64,
     /// Its build (git commit), when it's new enough to say.
     pub build: String,
+    /// Its version ("0.3.0"), when it's new enough to say (and to update itself).
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -259,7 +261,7 @@ fn serve(listener: TcpListener, cfg: Arc<Mutex<SyncCfg>>, name: Arc<Mutex<String
                     (serde_json::json!({"name": me, "sessions": status::load(status::now_ms())}).to_string() + "\n").into_bytes()
                 } else if what == "summary" {
                     let me = name.lock().unwrap().clone();
-                    (serde_json::json!({"name": me, "board": hooks.board.load(Ordering::Relaxed), "configAt": hooks.config_at.load(Ordering::Relaxed), "build": env!("QUAKED_BUILD")}).to_string() + "\n").into_bytes()
+                    (serde_json::json!({"name": me, "board": hooks.board.load(Ordering::Relaxed), "configAt": hooks.config_at.load(Ordering::Relaxed), "build": env!("QUAKED_BUILD"), "version": crate::update::CURRENT}).to_string() + "\n").into_bytes()
                 } else if what == "config" {
                     (hooks.ctl)("config")
                 } else if let Some(cmd) = what.strip_prefix("ctl ") {
@@ -445,6 +447,7 @@ fn run(cfg: SyncCfg, hooks: Hooks, rx: Receiver<Cmd>, emit: impl Fn(Out)) {
                         p.board = v.get("board").and_then(|b| b.as_bool()).unwrap_or(false);
                         p.config_at = v.get("configAt").and_then(|b| b.as_u64()).unwrap_or(0);
                         p.build = v.get("build").and_then(|b| b.as_str()).unwrap_or("").to_string();
+                        p.version = v.get("version").and_then(|b| b.as_str()).unwrap_or("").to_string();
                     }
                     Err(e) => {
                         if p.error.as_ref() != Some(&e) {
