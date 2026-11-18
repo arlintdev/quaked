@@ -63,7 +63,7 @@ impl App {
                     }
                     // A failure is waiting on you; a success is just news.
                     let urgency = if f.ok { super::relevance::Urgency::Normal } else { super::relevance::Urgency::High };
-                    self.alert_with(PageId::Deploy, reason, true, urgency);
+                    self.alert_from(PageId::Deploy, reason, true, urgency, Some(""));
                 }
             }
             Update::Notice(text) => self.deploy_toast(text),

@@ -5,6 +5,7 @@
 //! Unknown fields are ignored; missing fields take the defaults below.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -143,7 +144,18 @@ pub struct Config {
     pub night: NightSettings,
     pub viz: VizSettings,
     pub sync: SyncSettings,
+    /// Where each Mac sits, seen from the Quake (by its name on the network). Notices and
+    /// meetings from a Mac point its way; one left out gets no arrow.
+    pub sides: BTreeMap<String, Side>,
     pub device: DeviceSettings,
+}
+
+/// Which side of the Quake a Mac sits on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Left,
+    Right,
 }
 
 /// Servers, sites and network for the OPS page.
@@ -297,11 +309,24 @@ pub struct CalendarSettings {
     /// Minutes before each meeting to blink the ring and jump to the Calendar page (0 = as
     /// it starts); empty = never.
     pub jump_minutes: Vec<u32>,
+    /// Which Mac the Join button (and the knob) opens a meeting on. The card also has a
+    /// button for each other Mac.
+    pub join_on: JoinOn,
 }
 impl Default for CalendarSettings {
     fn default() -> Self {
-        CalendarSettings { enabled: true, calendars: Vec::new(), jump_minutes: vec![15, 10, 5, 0] }
+        CalendarSettings { enabled: true, calendars: Vec::new(), jump_minutes: vec![15, 10, 5, 0], join_on: JoinOn::Origin }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum JoinOn {
+    /// The Mac whose calendar the meeting came from.
+    #[default]
+    Origin,
+    /// The Mac with the Quake plugged in.
+    Board,
 }
 
 /// Mac health (this Mac and paired ones).
@@ -663,6 +688,7 @@ impl Default for Config {
             night: NightSettings::default(),
             viz: VizSettings::default(),
             sync: SyncSettings::default(),
+            sides: BTreeMap::new(),
             device: DeviceSettings::default(),
         }
     }
@@ -814,6 +840,19 @@ pub fn modified() -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sides_and_join_on() {
+        // Older files have neither: no sides, join where the meeting came from.
+        let c: Config = serde_json::from_str(r#"{"calendar": {"enabled": true}}"#).unwrap();
+        assert!(c.sides.is_empty());
+        assert_eq!(c.calendar.join_on, JoinOn::Origin);
+        let c: Config = serde_json::from_str(r#"{"sides": {"Mac mini": "right", "MacBook Pro": "left"}, "calendar": {"joinOn": "board"}}"#).unwrap();
+        assert_eq!(c.sides.get("MacBook Pro"), Some(&Side::Left));
+        assert_eq!(c.calendar.join_on, JoinOn::Board);
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
+    }
 
     #[test]
     fn round_trip_and_partial_files() {

@@ -75,7 +75,9 @@ knob's light ring:
   next meeting big with its time, place and a Join button for Zoom / Meet / Teams /
   FaceTime / Webex links, and the list coming up, merged from both Macs' calendars. The
   board jumps here 15, 10 and 5 minutes before each meeting and as it starts (set the
-  marks in Extras).
+  marks in Extras). With a paired Mac answering, the card has a Join button for each Mac;
+  the green one (and the knob) opens the meeting on the Mac whose calendar it came from,
+  or on the Mac with the Quake (Extras → Join meetings on).
 - **Focus** (timer icon): a countdown you set on the knob (25 minutes by default), shown
   in the ring wherever the board is, with today's blocks, the week, and whether a block
   fits before your next meeting. Optional macOS Shortcuts run when a block starts and ends
@@ -193,6 +195,12 @@ Every quaked advertises `_quaked._tcp` with Bonjour. Paired Macs share two thing
   settings on a peer takes them, keeping only its own `sync` section (name and key). Edit
   on either Mac, by hand or on the settings page, and the other follows within seconds.
   Whichever Mac has the Quake plugged in uses the same settings.
+
+Under **Macs → Where they sit**, put each Mac on the Quake's left or right. Notices,
+Claude's questions and sessions, and meetings from a Mac then carry an arrow pointing at
+it, and a meeting's Join buttons line up the same way. Joining on the other Mac goes over
+the pairing link (`ctl join <link>`, meeting links only); if that Mac doesn't answer, the
+meeting opens here instead.
 
 To add the second Mac: install quaked there (`./install.sh`; it runs fine with no Quake
 attached), open its settings page, go to **Macs** and click **Pair** next to this Mac.

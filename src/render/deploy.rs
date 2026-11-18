@@ -792,6 +792,7 @@ mod tests {
                 connected: true,
                 flash: None,
                 notice: None,
+                desk: super::super::Desk { here: "", sides: &Default::default(), macs: Vec::new(), join_on: Default::default() },
                 tick: true,
             };
             super::super::draw(&mut c, &v);

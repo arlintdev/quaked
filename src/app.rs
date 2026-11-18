@@ -161,6 +161,8 @@ struct Attention {
     reason: String,
     until: Instant,
     urgency: Urgency,
+    /// The Mac it's about ("" = this one), for the arrow pointing at it; None = not a Mac's.
+    machine: Option<String>,
 }
 
 struct Gfx {
@@ -398,6 +400,7 @@ impl App {
     }
 
     fn view<'a>(&'a self, clock: &'a str, now_ms: u64, second: u64) -> View<'a> {
+        let desk = self.desk();
         View {
             pages: &self.cfg.pages,
             page: self.page,
@@ -468,9 +471,20 @@ impl App {
             clock,
             connected: self.connected,
             flash: self.flash.filter(|(_, at)| at.elapsed() < FLASH).map(|(h, _)| h),
-            notice: self.attention.as_ref().map(|a| (a.reason.as_str(), config::hex(self.cfg.ring.color_for(a.page), 0xF2B705), a.page)),
+            notice: self.attention.as_ref().map(|a| (a.reason.as_str(), config::hex(self.cfg.ring.color_for(a.page), 0xF2B705), a.page, a.machine.as_deref().and_then(|m| desk.side(m)))),
+            desk,
             tick: second % 2 == 0,
         }
+    }
+
+    /// Which Mac is where, for the board's arrows and Join buttons.
+    fn desk(&self) -> render::Desk<'_> {
+        render::Desk { here: &self.peers.name, sides: &self.cfg.sides, macs: self.desk_macs(), join_on: self.cfg.calendar.join_on }
+    }
+
+    /// The Macs a meeting can be joined on: this one first, then the paired ones answering.
+    pub(super) fn desk_macs(&self) -> Vec<String> {
+        std::iter::once(self.peers.name.clone()).chain(self.peers.peers.iter().filter(|p| p.ok).map(|p| p.name.clone())).collect()
     }
 
     /// Renders the current screen into a canvas of the given size.
@@ -737,6 +751,12 @@ impl App {
     /// `alert` with an urgency: what's on the board decides whether it may take it
     /// (see app/relevance.rs). Returns whether it jumped.
     fn alert_with(&mut self, page: PageId, reason: String, chirp: bool, urgency: Urgency) -> bool {
+        self.alert_from(page, reason, chirp, urgency, None)
+    }
+
+    /// `alert_with` for something on one Mac (`machine`, "" = this one): the top bar points
+    /// to the side that Mac sits on (config `sides`).
+    fn alert_from(&mut self, page: PageId, reason: String, chirp: bool, urgency: Urgency, machine: Option<&str>) -> bool {
         let a = self.cfg.alerts.clone();
         let wanted = match page {
             PageId::Ai => a.ai,
@@ -764,7 +784,7 @@ impl App {
             self.defer_jump(page, urgency);
             false
         };
-        self.attention = Some(Attention { page, reason, until: Instant::now() + Duration::from_secs(a.seconds.max(10)), urgency });
+        self.attention = Some(Attention { page, reason, until: Instant::now() + Duration::from_secs(a.seconds.max(10)), urgency, machine: machine.map(str::to_string) });
         if urgency > Urgency::Low {
             self.blink_on = true;
             self.next_blink = Instant::now() + BLINK;
@@ -1189,7 +1209,7 @@ impl App {
     fn show_pair_ask(&mut self) {
         let Some(a) = &self.pair_ask else { return };
         let reason = format!("{} wants to pair  ·  press to allow  ·  double-click to refuse", a.name);
-        self.attention = Some(Attention { page: self.page, reason, until: a.until, urgency: Urgency::Critical });
+        self.attention = Some(Attention { page: self.page, reason, until: a.until, urgency: Urgency::Critical, machine: None });
         self.blink_on = true;
         self.next_blink = Instant::now() + BLINK;
         if self.cfg.buzzer {
@@ -1965,6 +1985,13 @@ impl App {
         if let Some(json) = line.strip_prefix("config-put ") {
             return self.config_put(json);
         }
+        // From a paired Mac: join a meeting, or show an event, here.
+        if let Some(url) = line.strip_prefix("join ") {
+            return self.calendar_join_from_peer(url.trim());
+        }
+        if let Some(id) = line.strip_prefix("show-event ") {
+            return self.calendar_show_from_peer(id.trim());
+        }
         if let Some(key) = line.strip_prefix("set-key ") {
             self.cfg.sync.key = key.trim().to_string();
             self.save_config();
@@ -2111,7 +2138,7 @@ impl ApplicationHandler<Event> for App {
                     render::History::push(self.history.docker_cpu.entry(ct.id.clone()).or_default(), ct.cpu.unwrap_or(0.0));
                 }
                 if let Some(r) = Self::summarize(news) {
-                    self.alert(PageId::Docker, r, true);
+                    self.alert_from(PageId::Docker, r, true, Urgency::of(PageId::Docker), Some(""));
                 }
                 if let Level::Detail(id) = &self.level {
                     if self.page == PageId::Docker && !self.docker.containers.iter().any(|c| &c.id == id) {

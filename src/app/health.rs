@@ -18,11 +18,18 @@ impl App {
                 let changed = st != self.health;
                 // Running low: say so once (again only after it recovers).
                 let found = problems(&st.macs);
-                let news: Vec<String> = found.iter().filter(|(k, _)| !self.health_flags.contains(k)).map(|(_, t)| t.clone()).collect();
+                let fresh: Vec<&(String, String)> = found.iter().filter(|(k, _)| !self.health_flags.contains(k)).collect();
+                // The Mac it's about, when it's one: "disk:<name>", "vol:<name>:<volume>", "mem:<name>".
+                let mac_of = |k: &str| k.split_once(':').map(|(_, rest)| if k.starts_with("vol:") { rest.rsplit_once(':').map_or(rest, |(m, _)| m) } else { rest }.to_string());
+                let mut about: Vec<String> = fresh.iter().filter_map(|(k, _)| mac_of(k)).collect();
+                about.dedup();
+                let here = st.macs.first().map(|m| m.name.clone()).unwrap_or_default();
+                let machine = (about.len() == 1).then(|| if about[0] == here { String::new() } else { about[0].clone() });
+                let news: Vec<String> = fresh.iter().map(|(_, t)| t.clone()).collect();
                 self.health_flags = found.into_iter().map(|(k, _)| k).collect();
                 self.health = st;
                 if let Some(r) = Self::summarize(news) {
-                    self.alert(PageId::Health, r, true);
+                    self.alert_from(PageId::Health, r, true, Urgency::of(PageId::Health), machine.as_deref());
                 }
                 if changed && self.page == PageId::Health {
                     self.redraw();

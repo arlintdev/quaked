@@ -559,7 +559,8 @@ function viewExtras(main) {
       const sel = h("select", { onchange: (e) => set("calendar.jumpMinutes", e.target.value ? e.target.value.split(",").map(Number) : []) },
         opts.map(([v, t]) => h("option", { value: v, selected: v === cur }, t)));
       return h("div", { class: "row" }, h("div", { class: "label" }, "Jump to the calendar before meetings", h("small", {}, "Blinks the ring and shows the meeting; 5 minutes and less also takes the board from a game or a focus block")), sel);
-    })()));
+    })(),
+    choice("Join meetings on", "calendar.joinOn", [["origin", "The Mac the meeting came from"], ["board", "The Mac with the Quake"]], "What the knob and the green Join button do. With a paired Mac answering, the card has a Join button for each Mac, in the order they sit (Macs → Where they sit)")));
   main.append(card("Clipboard and windows", "Copies from password managers are never kept; the history lives in memory only.",
     toggle("Clipboard picker", "paste.enabled"),
     choice("Remember", "paste.history", [[10, "10 copies"], [20, "20 copies"], [40, "40 copies"]], null, true),
@@ -656,6 +657,21 @@ function viewSync(main) {
   main.append(card("This Mac", null,
     toggle("Share with my other Macs", "sync.enabled"),
     text("Name on the network", "sync.name", state.machine || "This Mac's name")));
+  // Where each Mac sits, seen from the Quake (config `sides`, shared by the paired Macs).
+  const sides = cfg.sides || {};
+  const setSide = (name, v) => {
+    const next = { ...(cfg.sides || {}) };
+    if (v) next[name] = v; else delete next[name];
+    cfg.sides = next; changed(); render();
+  };
+  const here = state.route?.kind === "local" ? "This Mac · has the Quake" : "This Mac";
+  const macs = [[state.machine, here], ...peers.filter((p) => p.ok || sides[p.name]).map((p) => [p.name, p.board ? "Has the Quake" : ""])].filter(([n]) => n);
+  main.append(card("Where they sit", "Seen from the Quake. Notices, Claude's questions and sessions, and meetings from a Mac point its way, and a meeting's Join buttons line up the same way.",
+    ...macs.map(([name, sub]) => h("div", { class: "row" },
+      h("div", { class: "label" }, h("b", {}, name), sub && h("small", {}, sub)),
+      h("div", { style: { display: "flex", gap: "6px" } }, ...[["left", "arrowshape.left.fill", "Left"], ["", null, "Not set"], ["right", "arrowshape.right.fill", "Right"]].map(([v, icon, t]) =>
+        h("button", { class: "btn small" + ((sides[name] || "") === v ? " primary" : ""), onclick: () => setSide(name, v) },
+          v === "left" ? sym(icon, 12) : null, ` ${t} `, v === "right" ? sym(icon, 12) : null)))))));
   main.append(card("Nearby", "Found with Bonjour on this network. Pairing asks for approval on the other Mac: press the knob on its Quake, or click Allow in its settings page.",
     ...(peers.length ? peers.map((p) => {
       const busy = pairing === p.name;

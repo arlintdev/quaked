@@ -5,14 +5,14 @@
 //! Levels: Top (just looking) -> Focus (knob drives the page) -> Detail (one session).
 
 use crate::audio;
-use crate::config::{Action, PageId, Shortcut};
+use crate::config::{Action, JoinOn, PageId, Shortcut, Side};
 use crate::{digin, docker, github, league, ops};
 use crate::music::Track;
 use crate::status::{Session, State, Step, StepStatus};
 use crate::symbols::Symbols;
 use fontdue::{Font, FontSettings, Metrics};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use tiny_skia::{Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 
 // One file per feature (each draws its own page / overlay; they share this module's helpers).
@@ -88,6 +88,46 @@ pub enum Hit {
     DiginItem(usize),
     /// Item `usize` on a feature's page (or overlay: Page::Dash for call / night).
     Feature(Page, usize),
+}
+
+/// Which Mac sits where (config `sides`): notices, sessions and meetings point at theirs.
+pub struct Desk<'a> {
+    /// This Mac's name on the network ("" until sync has started).
+    pub here: &'a str,
+    pub sides: &'a BTreeMap<String, Side>,
+    /// The Macs a meeting can be joined on: this one first, then the paired ones answering.
+    pub macs: Vec<String>,
+    pub join_on: JoinOn,
+}
+
+impl Desk<'_> {
+    /// The side of the Mac named `machine` ("" = this Mac).
+    pub fn side(&self, machine: &str) -> Option<Side> {
+        self.sides.get(if machine.is_empty() { self.here } else { machine }).copied()
+    }
+
+    /// The Mac to show next to something from `machine` ("" = this Mac), with its side:
+    /// another Mac always, this one only once it has a side.
+    pub fn label(&self, machine: &str) -> Option<(String, Option<Side>)> {
+        let side = self.side(machine);
+        if !machine.is_empty() {
+            Some((machine.to_string(), side))
+        } else if side.is_some() && !self.here.is_empty() {
+            Some((self.here.to_string(), side))
+        } else {
+            None
+        }
+    }
+
+    /// `label` as plain text, pointing its way: "‹ MacBook Pro", "Mac mini ›" (Helvetica
+    /// Neue has no arrows; draw `mac_tag` where there's room for the symbol).
+    pub fn text(&self, machine: &str) -> Option<String> {
+        self.label(machine).map(|(name, side)| match side {
+            Some(Side::Left) => format!("‹ {name}"),
+            Some(Side::Right) => format!("{name} ›"),
+            None => name,
+        })
+    }
 }
 
 /// Claude's current question on the board.
@@ -188,8 +228,10 @@ pub struct View<'a> {
     pub clock: &'a str,
     pub connected: bool,
     pub flash: Option<Hit>,
-    /// Something new: (why, its page's color, its page). Shown in the top bar.
-    pub notice: Option<(&'a str, u32, Page)>,
+    /// Something new: (why, its page's color, its page, the side of the Mac it's from).
+    /// Shown in the top bar.
+    pub notice: Option<(&'a str, u32, Page, Option<Side>)>,
+    pub desk: Desk<'a>,
     /// Alternates every second; drives the "running" pulse.
     pub tick: bool,
 }
@@ -1486,12 +1528,21 @@ fn top_bar(c: &mut Canvas, v: &View) {
     if let Some(cb) = crumb {
         x += c.fit(F::Bold, &cb, 20.0, (limit - x).clamp(80.0, 360.0), x, 33.0, TEXT, Align::Left) + 24.0;
     }
-    if let Some((why, color, page)) = v.notice {
+    if let Some((why, color, page, side)) = v.notice {
         let r = tab_rect(v.pages, v.page, page);
         c.circle(r.0 + r.2 - 4.0, r.1 + 4.0, 7.0, color, 1.0);
-        let nx = x.max(crumb_x);
+        let mut nx = x.max(crumb_x);
+        // From a Mac on the left: the arrow leads; on the right: it follows the text.
+        if side == Some(Side::Left) {
+            side_arrow(c, Side::Left, nx + 13.0, 27.0, 24.0, MACHINE);
+            nx += 36.0;
+        }
         let pw = c.pill(nx, 15.0, "NEW", 13.0, color, 0x101013);
-        c.fit(F::Bold, why, 17.0, (limit - nx - pw - 12.0).max(40.0), nx + pw + 12.0, 33.0, TEXT, Align::Left);
+        let room = (limit - nx - pw - 12.0 - if side == Some(Side::Right) { 40.0 } else { 0.0 }).max(40.0);
+        let tw = c.fit(F::Bold, why, 17.0, room, nx + pw + 12.0, 33.0, TEXT, Align::Left);
+        if side == Some(Side::Right) {
+            side_arrow(c, Side::Right, nx + pw + 12.0 + tw + 23.0, 27.0, 24.0, MACHINE);
+        }
         c.rect((M, CY - 6.0, W - 2.0 * M, 1.0), LINE, 1.0);
         return;
     }
@@ -1588,11 +1639,10 @@ fn session_card(c: &mut Canvas, v: &View, s: &Session, r: R) {
         format!("{} steps", s.step_count)
     };
     let sw = c.text(F::Medium, &steps, 15.0, ix + pw + 10.0, y + 66.0, MUTED, Align::Left);
-    if !s.machine.is_empty() {
-        // Synced from another Mac
+    if let Some((name, side)) = v.desk.label(&s.machine) {
+        // Which Mac it runs on (another one, or this one once the Macs have sides).
         let mx = ix + pw + sw + 22.0;
-        c.symbol("laptopcomputer", 15.0, mx + 9.0, y + 61.0, 0x8AB4F8);
-        c.fit(F::Medium, &s.machine, 15.0, (x + w - 16.0 - mx - 24.0).max(30.0), mx + 24.0, y + 66.0, 0x8AB4F8, Align::Left);
+        mac_tag(c, &name, side, 15.0, mx, y + 66.0, (x + w - 16.0 - mx).max(54.0));
     }
 
     let mut cy = y + 98.0;
@@ -1777,8 +1827,12 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
         age(v.now_ms.saturating_sub(s.started_at))
     );
     c.fit(F::Medium, &meta, 16.0, iw - pw - 12.0, ix + pw + 12.0, y + 78.0, MUTED, Align::Left);
-    let path = if s.machine.is_empty() { short_path(&s.cwd) } else { format!("{}  ·  {}", s.machine, short_path(&s.cwd)) };
-    c.fit(F::Mono, &path, 14.0, iw, ix, y + 110.0, if s.machine.is_empty() { FAINT } else { 0x8AB4F8 }, Align::Left);
+    let mut px = ix;
+    if let Some((name, side)) = v.desk.label(&s.machine) {
+        px += mac_tag(c, &name, side, 14.0, ix, y + 110.0, iw * 0.5) + 10.0;
+        px += c.text(F::Mono, "·", 14.0, px, y + 110.0, FAINT, Align::Left) + 10.0;
+    }
+    c.fit(F::Mono, &short_path(&s.cwd), 14.0, (ix + iw - px).max(40.0), px, y + 110.0, FAINT, Align::Left);
 
     let mut cy = y + 144.0;
     c.text(F::Bold, "PROMPT", 12.0, ix, cy, FAINT, Align::Left);
@@ -1803,7 +1857,7 @@ fn ai_detail(c: &mut Canvas, v: &View, s: &Session) {
         let lines = ((back_button().1 - 14.0 - cy) / 22.0).floor().max(1.0) as usize;
         c.paragraph(if waiting { F::Bold } else { F::Regular }, body, 17.0, ix, cy, iw, lines.min(5), 22.0, col);
     }
-    let open_label = if s.machine.is_empty() { "Open in Claude".to_string() } else { format!("On {}", s.machine) };
+    let open_label = if s.machine.is_empty() { "Open in Claude".to_string() } else { format!("On {}", v.desk.text(&s.machine).unwrap_or_default()) };
     for (r, label, fg) in [(back_button(), "‹  Back".to_string(), TEXT), (open_button(), open_label, if s.machine.is_empty() { TEXT } else { MUTED })] {
         c.rrect(r, 10.0, 0x26262D, 1.0);
         c.fit(F::Medium, &label, 17.0, r.2 - 16.0, r.0 + r.2 / 2.0, r.1 + 25.0, fg, Align::Center);
@@ -3216,7 +3270,7 @@ fn brief(v: &View, p: Page, accent: u32) -> Brief {
         Page::Ai => {
             let count = |st: State| v.sessions.iter().filter(|s| s.state == st).count();
             let (waiting, working, done) = (count(State::Waiting), count(State::Working), count(State::Done));
-            let names = |st: State| v.sessions.iter().filter(|s| s.state == st).map(|s| if s.machine.is_empty() { s.name.clone() } else { format!("{} ({})", s.name, s.machine) }).collect::<Vec<_>>().join(", ");
+            let names = |st: State| v.sessions.iter().filter(|s| s.state == st).map(|s| if s.machine.is_empty() { s.name.clone() } else { format!("{} ({})", s.name, v.desk.text(&s.machine).unwrap_or_default()) }).collect::<Vec<_>>().join(", ");
             let latest = v.sessions.iter().filter(|s| s.state == State::Working).max_by_key(|s| s.updated_at).and_then(|s| s.current_step().map(|st| format!("{}  ›  {} {}", s.name, st.tag, st.text)));
             if v.sessions.is_empty() {
                 Brief::new("No sessions", FAINT).line("Claude sessions show up when you send a prompt", FAINT).dot(FAINT)
@@ -3380,7 +3434,7 @@ fn dash_page(c: &mut Canvas, v: &View) {
         let (x, y, w, h) = r;
         let color = crate::config::hex(v.ring.color_for(p), v.accent);
         let b = brief(v, p, color);
-        let new = v.notice.is_some_and(|(_, _, q)| q == p);
+        let new = v.notice.is_some_and(|(_, _, q, _)| q == p);
         c.rrect(r, 16.0, PANEL, 1.0);
         c.rrect((x, y, 6.0, h), 3.0, color, 1.0);
         c.symbol(page_symbol(p), 17.0, x + 34.0, y + 30.0, color);
@@ -3503,7 +3557,10 @@ fn dash_ai(c: &mut Canvas, v: &View, r: R, b: &Brief) {
     let mut shown = 0;
     for s in &order {
         let st = state_style(s.state);
-        let label = if s.machine.is_empty() { s.name.clone() } else { format!("{} · {}", s.name, s.machine) };
+        let label = match v.desk.text(&s.machine) {
+            Some(mac) => format!("{} · {mac}", s.name),
+            None => s.name.clone(),
+        };
         let need = c.measure(F::Medium, &label, 13.0).min(150.0) + 30.0;
         if cx + need > x + w - 40.0 && shown > 0 {
             let more = order.len() - shown;
@@ -4517,6 +4574,44 @@ fn dg_action_bar(c: &mut Canvas, d: &digin::Detail) {
     }
 }
 
+// ---------------------------------------------------------------- which Mac
+
+/// The color for Mac names and the arrows pointing at them.
+const MACHINE: u32 = 0x8AB4F8;
+
+/// An arrow pointing at the side a Mac sits on, centered on (cx, cy).
+fn side_arrow(c: &mut Canvas, side: Side, cx: f32, cy: f32, px: f32, color: u32) {
+    let (name, text) = match side {
+        Side::Left => ("arrowshape.left.fill", "‹"),
+        Side::Right => ("arrowshape.right.fill", "›"),
+    };
+    if !c.symbol(name, px, cx, cy, color) {
+        c.text(F::Bold, text, px, cx, cy + px * 0.35, color, Align::Center);
+    }
+}
+
+/// A Mac's name with its arrow on its side ("◀ MacBook Pro", "Mac mini ▶"), or the laptop
+/// symbol when it has no side; `y` is the text baseline. Returns the width used.
+fn mac_tag(c: &mut Canvas, name: &str, side: Option<Side>, px: f32, x: f32, y: f32, max_w: f32) -> f32 {
+    let icon = px * 1.6;
+    let cy = y - px * 0.36;
+    match side {
+        Some(Side::Right) => {
+            let tw = c.fit(F::Medium, name, px, (max_w - icon).max(20.0), x, y, MACHINE, Align::Left);
+            side_arrow(c, Side::Right, x + tw + icon * 0.6, cy, px * 1.15, MACHINE);
+            tw + icon
+        }
+        Some(Side::Left) => {
+            side_arrow(c, Side::Left, x + icon * 0.4, cy, px * 1.15, MACHINE);
+            icon + c.fit(F::Medium, name, px, (max_w - icon).max(20.0), x + icon, y, MACHINE, Align::Left)
+        }
+        None => {
+            c.symbol("laptopcomputer", px, x + px * 0.6, cy, MACHINE);
+            icon + c.fit(F::Medium, name, px, (max_w - icon).max(20.0), x + icon, y, MACHINE, Align::Left)
+        }
+    }
+}
+
 // ---------------------------------------------------------------- Claude's questions
 
 fn ask_overlay(c: &mut Canvas, v: &View, a: &AskView) {
@@ -4525,9 +4620,8 @@ fn ask_overlay(c: &mut Canvas, v: &View, a: &AskView) {
     let mut x = M + 36.0;
     x += c.text(F::Bold, "Claude asks", 20.0, x, 37.0, AMBER, Align::Left) + 16.0;
     x += c.fit(F::Bold, a.session, 20.0, 420.0, x, 37.0, TEXT, Align::Left) + 14.0;
-    if !a.machine.is_empty() {
-        c.symbol("laptopcomputer", 16.0, x + 9.0, 31.0, 0x8AB4F8);
-        c.fit(F::Medium, a.machine, 17.0, 260.0, x + 24.0, 37.0, 0x8AB4F8, Align::Left);
+    if let Some((name, side)) = v.desk.label(a.machine) {
+        mac_tag(c, &name, side, 17.0, x, 37.0, 300.0);
     }
     let mut rx = W - M;
     rx -= c.text(F::Mono, &mmss(a.secs_left as f64), 20.0, rx, 37.0, if a.secs_left <= 15 { RED } else { MUTED }, Align::Right) + 18.0;
@@ -4820,6 +4914,25 @@ fn pr_line(c: &mut Canvas, v: &View, p: &github::Pr, r: R, reviews: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macs_point_their_way() {
+        fn desk(sides: &BTreeMap<String, Side>) -> Desk<'_> {
+            Desk { here: "Mac mini", sides, macs: vec!["Mac mini".into()], join_on: JoinOn::Origin }
+        }
+        let mut sides = BTreeMap::new();
+        // No sides: only another Mac is named, with no arrow.
+        assert_eq!(desk(&sides).label(""), None);
+        assert_eq!(desk(&sides).text("MacBook Pro").as_deref(), Some("MacBook Pro"));
+        sides.insert("Mac mini".to_string(), Side::Right);
+        sides.insert("MacBook Pro".to_string(), Side::Left);
+        let d = desk(&sides);
+        assert_eq!(d.side(""), Some(Side::Right));
+        assert_eq!(d.label(""), Some(("Mac mini".to_string(), Some(Side::Right))));
+        assert_eq!(d.text("MacBook Pro").as_deref(), Some("‹ MacBook Pro"));
+        assert_eq!(d.text("").as_deref(), Some("Mac mini ›"));
+        assert_eq!(d.text("Studio"), Some("Studio".to_string()));
+    }
 
     #[test]
     fn turn_times_read_like_the_app() {

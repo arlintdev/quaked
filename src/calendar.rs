@@ -6,9 +6,9 @@
 //! and notes. The app side (app/calendar.rs) keeps the knob's pick and the
 //! "starts in 2 minutes" alerts.
 
-use crate::config::CalendarSettings as Cfg;
+use crate::config::{CalendarSettings as Cfg, JoinOn, Side};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -54,8 +54,35 @@ pub struct Status {
     pub announced: Vec<String>,
 }
 
-/// Tap index of the join / open button on the big card (rows are 0..).
+/// Tap index of the join / open button on the big card (rows are 0..): the same as the
+/// knob's press.
 pub const TAP_JOIN: usize = 1000;
+/// Tap index of "join on Mac `i`" (TAP_JOIN_ON + i, `i` into the Macs list, this one first).
+pub const TAP_JOIN_ON: usize = 1100;
+
+/// Where a meeting can be joined: indexes into `macs` (this Mac first, then the paired ones
+/// answering) from left to right as they sit, and the one Join and the knob use: the Mac the
+/// meeting came from (with `JoinOn::Origin`, while it answers), else this one.
+pub fn join_targets(macs: &[String], sides: &BTreeMap<String, Side>, e: &Event, join_on: JoinOn) -> (Vec<usize>, usize) {
+    let rank = |name: &String| match sides.get(name) {
+        Some(Side::Left) => 0,
+        None => 1,
+        Some(Side::Right) => 2,
+    };
+    let mut order: Vec<usize> = (0..macs.len().max(1)).collect();
+    order.sort_by_key(|&i| macs.get(i).map(rank).unwrap_or(1));
+    let origin = macs.iter().skip(1).position(|m| !e.machine.is_empty() && *m == e.machine).map(|i| i + 1);
+    let primary = match join_on {
+        JoinOn::Origin => origin.unwrap_or(0),
+        JoinOn::Board => 0,
+    };
+    (order, primary)
+}
+
+/// The id a paired Mac knows its own event by (merge prefixes it with the Mac's name).
+pub fn own_id(e: &Event) -> &str {
+    e.id.strip_prefix(&format!("{}/", e.machine)).unwrap_or(&e.id)
+}
 
 const MIN: u64 = 60_000;
 const HOUR: u64 = 60 * MIN;
@@ -396,12 +423,18 @@ pub enum Cmd {
     Peers(Vec<(String, String, u16)>, String),
     /// (internal) A paired Mac answered `ctl calendar`, or didn't.
     PeerReply(String, Result<Vec<Event>, String>),
+    /// Run a control line on a paired Mac ("join <link>", "show-event <id>").
+    OnPeer(String, String),
+    /// (internal) It finished.
+    OnPeerDone(String, String, Result<(), String>),
 }
 
 /// What the module's thread sends the app (handled in app/calendar.rs on the main thread).
 #[derive(Debug)]
 pub enum Update {
     Status(Status),
+    /// A Cmd::OnPeer finished: (Mac, the line, Ok or why not).
+    PeerDone(String, String, Result<(), String>),
 }
 
 const REFRESH: Duration = Duration::from_secs(60);
@@ -498,6 +531,21 @@ fn run(mut cfg: Cfg, me: Sender<Cmd>, rx: Receiver<Cmd>, emit: impl Fn(Update)) 
                         next_peers = Instant::now();
                     }
                 }
+                Cmd::OnPeer(name, line) => {
+                    let Some((_, host, port)) = peers.iter().find(|(n, _, _)| *n == name).cloned() else {
+                        emit(Update::PeerDone(name, line, Err("isn't answering".into())));
+                        continue;
+                    };
+                    let (key, back) = (key.clone(), me.clone());
+                    std::thread::Builder::new()
+                        .name("calendar-on-peer".into())
+                        .spawn(move || {
+                            let done = crate::sync::request(&host, port, &key, &format!("ctl {line}")).and_then(|r| peer_done(&r));
+                            let _ = back.send(Cmd::OnPeerDone(name, line, done));
+                        })
+                        .ok();
+                }
+                Cmd::OnPeerDone(name, line, done) => emit(Update::PeerDone(name, line, done)),
                 Cmd::PeerReply(name, reply) => {
                     asking.remove(&name);
                     if !peers.iter().any(|(n, _, _)| *n == name) {
@@ -554,6 +602,19 @@ pub fn peer_json(st: &Status, enabled: bool) -> String {
     }
     let own: Vec<&Event> = st.events.iter().filter(|e| e.machine.is_empty()).collect();
     serde_json::json!({ "events": own }).to_string()
+}
+
+/// A paired Mac's answer to a Cmd::OnPeer line.
+pub fn peer_done(reply: &[u8]) -> Result<(), String> {
+    let text = String::from_utf8_lossy(reply);
+    let text = text.trim();
+    if text == "ok" {
+        Ok(())
+    } else if text.starts_with("error: unknown command") {
+        Err("its quaked is older; update it".into())
+    } else {
+        Err(text.strip_prefix("error: ").unwrap_or(text).to_string())
+    }
 }
 
 /// A paired Mac's answer to `ctl calendar`.
@@ -861,6 +922,33 @@ mod tests {
         assert_eq!(all[0].machine, "");
         assert_eq!(all[1].machine, "AustinM5Max");
         assert_eq!(all[1].id, "AustinM5Max/id-Design review");
+    }
+
+    #[test]
+    fn join_on_the_mac_it_came_from_or_this_one() {
+        let macs = vec!["Mac mini".to_string(), "MacBook Pro".to_string()];
+        let mut sides = BTreeMap::new();
+        let mine = ev("Standup", 0, "");
+        let theirs = Event { id: "MacBook Pro/id-Review".into(), ..ev("Review", 0, "MacBook Pro") };
+        // No sides: this Mac first; Join goes where the meeting came from.
+        assert_eq!(join_targets(&macs, &sides, &mine, JoinOn::Origin), (vec![0, 1], 0));
+        assert_eq!(join_targets(&macs, &sides, &theirs, JoinOn::Origin), (vec![0, 1], 1));
+        assert_eq!(join_targets(&macs, &sides, &theirs, JoinOn::Board), (vec![0, 1], 0));
+        // The laptop on the left, this Mac on the right: buttons in that order.
+        sides.insert("MacBook Pro".to_string(), Side::Left);
+        sides.insert("Mac mini".to_string(), Side::Right);
+        assert_eq!(join_targets(&macs, &sides, &theirs, JoinOn::Origin), (vec![1, 0], 1));
+        // The Mac it came from isn't answering: join here.
+        assert_eq!(join_targets(&macs[..1], &sides, &theirs, JoinOn::Origin), (vec![0], 0));
+        assert_eq!(own_id(&theirs), "id-Review");
+        assert_eq!(own_id(&mine), "id-Standup");
+    }
+
+    #[test]
+    fn peer_replies() {
+        assert_eq!(peer_done(b"ok\n"), Ok(()));
+        assert_eq!(peer_done(b"error: not a meeting link\n"), Err("not a meeting link".into()));
+        assert_eq!(peer_done(b"error: unknown command \"join https://zoom.us/j/1\"\n"), Err("its quaked is older; update it".into()));
     }
 
     #[test]

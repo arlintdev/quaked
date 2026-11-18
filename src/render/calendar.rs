@@ -25,6 +25,20 @@ fn join_button() -> R {
     (x + w - 236.0, y + h - 96.0, 212.0, 72.0)
 }
 
+/// With more than one Mac to join on: a Join button for each, left to right as the Macs
+/// sit: (index into `desk.macs`, where, whether it's the one the knob joins on).
+fn join_buttons(v: &View, e: &Event) -> Vec<(usize, R, bool)> {
+    if e.join_url.is_empty() || v.desk.macs.len() < 2 {
+        return Vec::new();
+    }
+    let (order, primary) = cal::join_targets(&v.desk.macs, v.desk.sides, e, v.desk.join_on);
+    let n = order.len().min(3);
+    let bw = if n == 2 { 196.0 } else { 160.0 };
+    let (x, y, w, h) = CARD;
+    let x0 = x + w - 24.0 - n as f32 * bw - (n - 1) as f32 * 12.0;
+    order.into_iter().take(n).enumerate().map(|(k, i)| (i, (x0 + k as f32 * (bw + 12.0), y + h - 96.0, bw, 72.0), i == primary)).collect()
+}
+
 fn row_rect(slot: usize) -> R {
     (LIST.0 + 10.0, LIST_TOP + slot as f32 * ROW_H, LIST.2 - 20.0, ROW_H - 4.0)
 }
@@ -191,12 +205,19 @@ fn card(c: &mut Canvas, v: &View, l: &Layout) {
     };
     let pw = c.pill(x + 30.0, y + 22.0, tag, 14.0, if running { v.accent } else { col }, 0x101013);
     let mut meta = cal::span(e.start_ms, e.end_ms);
-    for part in [&e.calendar, &e.machine] {
-        if !part.is_empty() {
-            meta = format!("{meta}   ·   {part}");
-        }
+    if !e.calendar.is_empty() {
+        meta = format!("{meta}   ·   {}", e.calendar);
     }
-    c.fit(F::Medium, &meta, 18.0, w - pw - 80.0, x + 44.0 + pw, y + 41.0, TEXT_2, Align::Left);
+    // Then the Mac it came from, pointing its way.
+    let mac = v.desk.label(&e.machine);
+    let mx = x + 44.0 + pw;
+    let room = w - pw - 80.0 - if mac.is_some() { 200.0 } else { 0.0 };
+    let mw = c.fit(F::Medium, &meta, 18.0, room, mx, y + 41.0, TEXT_2, Align::Left);
+    if let Some((name, side)) = mac {
+        let dx = mx + mw + 14.0;
+        let dw = c.text(F::Medium, "·", 18.0, dx, y + 41.0, TEXT_2, Align::Left);
+        super::mac_tag(c, &name, side, 18.0, dx + dw + 14.0, y + 41.0, x + w - 30.0 - (dx + dw + 14.0));
+    }
     c.fit(F::Bold, &e.title, 46.0, w - 60.0, x + 30.0, y + 106.0, TEXT, Align::Left);
     // Where: the meeting app, and the place unless it's just the link again.
     let place = if e.location.contains("://") || e.location.to_ascii_lowercase().contains("meeting") { String::new() } else { one_line(&e.location) };
@@ -213,13 +234,24 @@ fn card(c: &mut Canvas, v: &View, l: &Layout) {
     let soon = running || e.start_ms - now <= 15 * 60_000;
     let when = cal::when(now, e.start_ms, e.end_ms);
     let when = when.trim_start_matches("now · ");
-    let jb = join_button();
+    let several = join_buttons(v, e);
+    let jb = several.first().map(|b| b.1).unwrap_or_else(join_button);
     c.fit(F::Bold, when, 54.0, jb.0 - x - 50.0, x + 30.0, y + h - 38.0, if soon { v.accent } else { TEXT }, Align::Left);
     if running {
         let frac = (now - e.start_ms) as f32 / (e.end_ms - e.start_ms).max(1) as f32;
         bar(c, x + 30.0, y + h - 22.0, jb.0 - x - 60.0, frac, v.accent);
     }
-    // Join / open.
+    // Join on each Mac, or the one Join / Open.
+    if !several.is_empty() {
+        for (i, r, primary) in &several {
+            let name = v.desk.macs.get(*i).map(String::as_str).unwrap_or("");
+            join_on(c, *r, name, v.desk.side(if *i == 0 { "" } else { name }), *primary);
+            if *primary && v.level != &Level::Top {
+                c.outline(*r, 14.0, TEXT, 2.0);
+            }
+        }
+        return;
+    }
     if e.join_url.is_empty() {
         button(c, jb, "Open", 0x2A2A31, TEXT, "calendar");
     } else {
@@ -228,6 +260,30 @@ fn card(c: &mut Canvas, v: &View, l: &Layout) {
     if v.level != &Level::Top {
         c.outline(jb, 14.0, TEXT, 2.0);
     }
+}
+
+/// "Join" on one Mac: its arrow on the side it sits (the camera when it has no side), its
+/// name underneath. The knob's pick is filled green.
+fn join_on(c: &mut Canvas, r: R, name: &str, side: Option<Side>, primary: bool) {
+    let (bg, fg, sub) = if primary { (JOIN_GREEN, 0xFFFFFF, 0xDFF5E7) } else { (0x1D2A22, 0x7FD9A0, MUTED) };
+    c.rrect(r, 14.0, bg, 1.0);
+    let (x, y, w, h) = r;
+    let mid = y + h / 2.0;
+    let (icon_x, tx0, tx1) = match side {
+        Some(Side::Right) => (x + w - 26.0, x + 14.0, x + w - 46.0),
+        _ => (x + 26.0, x + 46.0, x + w - 14.0),
+    };
+    match side {
+        Some(s) => super::side_arrow(c, s, icon_x, mid, 24.0, fg),
+        None => {
+            c.symbol("video.fill", 20.0, icon_x, mid, fg);
+        }
+    }
+    let cx = (tx0 + tx1) / 2.0;
+    c.text(F::Bold, "Join", 22.0, cx, y + 34.0, fg, Align::Center);
+    let label = if name.is_empty() { "this Mac" } else { name };
+    let nw = c.measure(F::Medium, label, 13.0).min(tx1 - tx0);
+    c.fit(F::Medium, label, 13.0, tx1 - tx0, cx - nw / 2.0, y + 56.0, sub, Align::Left);
 }
 
 fn list(c: &mut Canvas, v: &View, l: &Layout) {
@@ -311,8 +367,14 @@ pub(super) fn hit(v: &View, x: f32, y: f32) -> Option<Hit> {
         return None;
     }
     let l = layout(v);
-    if l.sel.is_some() && inside(join_button(), x, y) {
-        return Some(Hit::Feature(Page::Calendar, cal::TAP_JOIN));
+    if let Some(e) = l.sel.and_then(|i| l.up.get(i)) {
+        let several = join_buttons(v, e);
+        if let Some((i, _, _)) = several.iter().find(|b| inside(b.1, x, y)) {
+            return Some(Hit::Feature(Page::Calendar, cal::TAP_JOIN_ON + i));
+        }
+        if several.is_empty() && inside(join_button(), x, y) {
+            return Some(Hit::Feature(Page::Calendar, cal::TAP_JOIN));
+        }
     }
     if let Some(i) = (0..ROWS).find(|&s| inside(row_rect(s), x, y)).map(|s| l.first + s).filter(|&i| i < l.up.len()) {
         return Some(Hit::Feature(Page::Calendar, i));
@@ -326,6 +388,10 @@ pub(super) fn rect(v: &View, i: usize) -> Option<R> {
         return Some(join_button());
     }
     let l = layout(v);
+    if i >= cal::TAP_JOIN_ON {
+        let e = l.sel.and_then(|s| l.up.get(s))?;
+        return join_buttons(v, e).into_iter().find(|b| b.0 == i - cal::TAP_JOIN_ON).map(|b| b.1);
+    }
     match i.checked_sub(l.first).filter(|&s| s < ROWS) {
         Some(slot) => Some(row_rect(slot)),
         None => l.blocks.iter().find(|b| b.idx == Some(i)).map(|b| b.r),

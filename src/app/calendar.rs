@@ -48,6 +48,17 @@ impl App {
                 self.calendar_announce();
                 self.redraw();
             }
+            crate::calendar::Update::PeerDone(name, line, done) => {
+                let Err(why) = done else { return };
+                device::log(format!("calendar: {name} couldn't {}: {why}", line.split(' ').next().unwrap_or("")));
+                // A meeting is about to start: join here rather than not at all.
+                if let Some(url) = line.strip_prefix("join ") {
+                    self.calendar_join(url);
+                    self.alert_from(PageId::Calendar, format!("Joined here ({name}: {why})"), false, Urgency::Low, Some(""));
+                } else {
+                    self.alert_from(PageId::Calendar, format!("Couldn't open it on {name}: {why}"), false, Urgency::Low, Some(&name));
+                }
+            }
         }
     }
 
@@ -65,14 +76,49 @@ impl App {
         open_target(&target);
     }
 
-    /// Joins the event, or shows it in Calendar when it has no link.
-    fn calendar_open(&mut self, e: &Event) {
+    /// Joins the event on Mac `on` (an index into desk_macs, this one first; None = the one
+    /// config `calendar.joinOn` picks), or shows it in Calendar on the Mac it came from when
+    /// it has no link.
+    fn calendar_open(&mut self, e: &Event, on: Option<usize>) {
         if e.join_url.is_empty() {
-            open_target(&cal::event_link(&e.id));
-        } else {
-            let url = e.join_url.clone();
-            self.calendar_join(&url);
+            if e.machine.is_empty() {
+                open_target(&cal::event_link(&e.id));
+            } else {
+                let _ = self.calendar_cmd.send(cal::Cmd::OnPeer(e.machine.clone(), format!("show-event {}", cal::own_id(e))));
+            }
+            return;
         }
+        let macs = self.desk_macs();
+        let (_, primary) = cal::join_targets(&macs, &self.cfg.sides, e, self.cfg.calendar.join_on);
+        match macs.get(on.unwrap_or(primary)).filter(|_| on.unwrap_or(primary) > 0) {
+            Some(name) => {
+                device::log(format!("calendar: join {} on {name}", cal::provider(&e.join_url)));
+                let _ = self.calendar_cmd.send(cal::Cmd::OnPeer(name.clone(), format!("join {}", e.join_url)));
+                self.alert_from(PageId::Calendar, format!("Joining {} on {name}", e.title), false, Urgency::Low, Some(name));
+            }
+            None => {
+                let url = e.join_url.clone();
+                self.calendar_join(&url);
+            }
+        }
+    }
+
+    /// `ctl join <link>` from a paired Mac: join that meeting here (only meeting links).
+    pub(super) fn calendar_join_from_peer(&mut self, url: &str) -> Vec<u8> {
+        if !cal::is_join(url) {
+            return b"error: not a meeting link\n".to_vec();
+        }
+        self.calendar_join(url);
+        b"ok\n".to_vec()
+    }
+
+    /// `ctl show-event <id>` from a paired Mac: show one of this Mac's events in Calendar.
+    pub(super) fn calendar_show_from_peer(&mut self, id: &str) -> Vec<u8> {
+        if !self.calendar.events.iter().any(|e| e.machine.is_empty() && e.id == id) {
+            return b"error: no such event here\n".to_vec();
+        }
+        open_target(&cal::event_link(id));
+        b"ok\n".to_vec()
     }
 
     /// Knob turned (on its page, past the top level).
@@ -90,13 +136,19 @@ impl App {
     /// Knob pressed on its page (past the top level).
     pub(super) fn calendar_press(&mut self) {
         if let Some(e) = self.calendar_selected() {
-            self.calendar_open(&e);
+            self.calendar_open(&e, None);
         }
     }
 
     /// Hit::Feature(_, i) tapped: a row (or its block on the ruler) selects that event,
     /// tapping it again or the card's button joins / opens it.
     pub(super) fn calendar_tap(&mut self, i: usize) {
+        if i >= cal::TAP_JOIN_ON {
+            if let Some(e) = self.calendar_selected() {
+                self.calendar_open(&e, Some(i - cal::TAP_JOIN_ON));
+            }
+            return;
+        }
         if i == cal::TAP_JOIN {
             return self.calendar_press();
         }
@@ -105,7 +157,7 @@ impl App {
         let again = self.level != Level::Top && self.calendar.selection(now) == Some(i);
         self.calendar.selected = e.id.clone();
         if again {
-            self.calendar_open(&e);
+            self.calendar_open(&e, None);
         } else {
             self.level = Level::Focus;
         }
@@ -153,7 +205,7 @@ impl App {
             format!("{} in {} min", e.title, (e.start_ms - now).div_ceil(60_000))
         };
         let urgency = if closest <= 5 { Urgency::Critical } else { Urgency::High };
-        self.alert_with(PageId::Calendar, reason, closest <= 5, urgency);
+        self.alert_from(PageId::Calendar, reason, closest <= 5, urgency, Some(&e.machine));
         // After the alert (showing the page resets the pick): lead with this meeting.
         self.calendar.selected = e.id;
         self.redraw();

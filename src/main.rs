@@ -435,13 +435,24 @@ fn preview(dir: &str) {
     let (night_on, night_off) = (night::sample(), night::Status::default());
     let (focus_s, deploy_s, paste_s, windows_s, calendar_s, health_s, viz_s) = (focus::sample(), deploy::sample(), clipboard::sample(), windows::sample(), calendar::sample(), health::sample(), viz::sample());
     let stocks_s = stocks::sample();
+    // Two Macs: this one on the right of the Quake, a laptop on the left; the featured
+    // meeting from the laptop's calendar for one shot.
+    let sides: std::collections::BTreeMap<String, config::Side> = [("Mac mini".to_string(), config::Side::Right), ("MacBook Pro".to_string(), config::Side::Left)].into();
+    let calendar_other = {
+        let mut s = calendar_s.clone();
+        for e in s.events.iter_mut().filter(|e| e.id == "review") {
+            e.id = format!("MacBook Pro/{}", e.id);
+            e.machine = "MacBook Pro".into();
+        }
+        s
+    };
     let stocks_n = |n: usize| {
         let mut s = stocks::sample();
         s.quotes.truncate(n);
         s
     };
     let (stocks_two, stocks_four) = (stocks_n(2), stocks_n(4));
-    let shots: [(&str, Page, Level, usize, usize, usize); 42] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 43] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -468,6 +479,7 @@ fn preview(dir: &str) {
         ("32-paste", Page::Paste, Level::Focus, 0, 0, 0),
         ("33-windows", Page::Windows, Level::Focus, 0, 0, 0),
         ("34-calendar", Page::Calendar, Level::Focus, 0, 0, 0),
+        ("34-calendar-other-mac", Page::Calendar, Level::Focus, 0, 0, 0),
         ("35-health", Page::Health, Level::Focus, 0, 0, 0),
         ("36-call", Page::Ai, Level::Top, 0, 0, 0),
         ("37-night", Page::Dash, Level::Top, 0, 0, 0),
@@ -515,7 +527,7 @@ fn preview(dir: &str) {
             deploy: &deploy_s,
             paste: &paste_s,
             windows: &windows_s,
-            calendar: &calendar_s,
+            calendar: if name == "34-calendar-other-mac" { &calendar_other } else { &calendar_s },
             health: &health_s,
             stocks: match name {
                 "42-stocks-two" => &stocks_two,
@@ -526,7 +538,7 @@ fn preview(dir: &str) {
             history: &history,
             ask: (name == "17-ask").then(|| render::AskView {
                 session: "quaked",
-                machine: "AustinM5Max",
+                machine: "MacBook Pro",
                 header: "Release",
                 question: "PR #4 is green and approved. Merge it now, or hold it until after the demo?",
                 options: &ask_options,
@@ -566,7 +578,13 @@ fn preview(dir: &str) {
             clock: "4:21",
             connected: true,
             flash: None,
-            notice: if name == "14-code" { Some(("review requested  ·  infra !92  Pin the runner image digest", config::hex(cfg.ring.color_for(Page::Code), 0), Page::Code)) } else { None },
+            notice: match name {
+                "14-code" => Some(("review requested  ·  infra !92  Pin the runner image digest", config::hex(cfg.ring.color_for(Page::Code), 0), Page::Code, None)),
+                "34-calendar-other-mac" => Some(("Design review: soundboard v2 in 5 min", config::hex(cfg.ring.color_for(Page::Calendar), 0), Page::Calendar, Some(config::Side::Left))),
+                "35-health" => Some(("Mac mini is almost out of disk space: 8.2 GB free", config::hex(cfg.ring.color_for(Page::Health), 0), Page::Health, Some(config::Side::Right))),
+                _ => None,
+            },
+            desk: render::Desk { here: "Mac mini", sides: &sides, macs: vec!["Mac mini".into(), "MacBook Pro".into()], join_on: config::JoinOn::Origin },
             tick: true,
         };
         render::draw(&mut c, &view);

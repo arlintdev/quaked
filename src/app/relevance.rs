@@ -154,16 +154,17 @@ impl App {
         let Some((id, name, due)) = self.waiting_alert.clone() else { return };
         let prompted = self.asks.iter().any(|a| a.session_id == id);
         let still = self.sessions.iter().position(|s| s.id == id && s.state == State::Waiting);
+        let machine = self.sessions.iter().find(|s| s.id == id).map(|s| s.machine.clone());
         if prompted || still.is_none() {
             self.waiting_alert = None;
             if prompted {
-                self.alert_with(PageId::Ai, format!("{name} needs you"), false, Urgency::Low);
+                self.alert_from(PageId::Ai, format!("{name} needs you"), false, Urgency::Low, machine.as_deref());
             }
             return;
         }
         if Instant::now() >= due {
             self.waiting_alert = None;
-            if self.alert(PageId::Ai, format!("{name} needs you"), false) {
+            if self.alert_from(PageId::Ai, format!("{name} needs you"), false, Urgency::of(PageId::Ai), machine.as_deref()) {
                 if let Some(i) = still {
                     self.sel = i;
                 }
