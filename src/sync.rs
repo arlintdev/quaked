@@ -176,6 +176,24 @@ extern "C" fn on_browse(_: DnsRef, flags: u32, interface: u32, err: i32, name: *
     }
 }
 
+/// Looks up where the named peer's quaked answers now. A peer that restarts keeps its
+/// name, so browsing never says it left and came back; only its port changes.
+fn resolve_now(name: &str) -> Option<(String, u16)> {
+    let (cname, regtype, domain) = (CString::new(name).ok()?, CString::new(SERVICE).ok()?, CString::new("local.").ok()?);
+    let mut found: Option<(String, u16)> = None;
+    let mut sd: DnsRef = std::ptr::null_mut();
+    let rc = unsafe { DNSServiceResolve(&mut sd, 0, 0, cname.as_ptr(), regtype.as_ptr(), domain.as_ptr(), on_resolve, &mut found as *mut _ as *mut c_void) };
+    if rc != 0 {
+        return None;
+    }
+    process(sd, 3000);
+    unsafe { DNSServiceRefDeallocate(sd) };
+    found
+}
+
+/// How often to look a peer up again while it isn't answering.
+const RESOLVE_EVERY: Duration = Duration::from_secs(10);
+
 /// The Mac's name as Sharing settings show it ("Austin's Mac mini").
 pub fn computer_name() -> String {
     std::process::Command::new("/usr/sbin/scutil")
@@ -412,6 +430,8 @@ fn run(cfg: SyncCfg, hooks: Hooks, rx: Receiver<Cmd>, emit: impl Fn(Out)) {
 
     let mut last = Status::default();
     let mut known: HashMap<String, Peer> = HashMap::new();
+    // When each peer that stopped answering was last looked up again.
+    let mut resolved: HashMap<String, Instant> = HashMap::new();
     // The newest settings stamp already handed to the app, per peer.
     let mut pulled: HashMap<String, u64> = HashMap::new();
     let mut next = Instant::now();
@@ -452,6 +472,17 @@ fn run(cfg: SyncCfg, hooks: Hooks, rx: Receiver<Cmd>, emit: impl Fn(Out)) {
                     Err(e) => {
                         if p.error.as_ref() != Some(&e) {
                             log(format!("sync: {n}: {e}"));
+                        }
+                        // Not answering where it was: it may have restarted on a new port.
+                        if !e.contains("key") && !e.contains("sync is off") && resolved.get(n).is_none_or(|t: &Instant| t.elapsed() >= RESOLVE_EVERY) {
+                            resolved.insert(n.clone(), Instant::now());
+                            if let Some((h, port2)) = resolve_now(n).filter(|(h, p2)| h != host || p2 != port) {
+                                log(format!("sync: {n} moved to {h}:{port2}"));
+                                if let Some(entry) = disc.peers.lock().unwrap().get_mut(n) {
+                                    entry.0 = h;
+                                    entry.1 = port2;
+                                }
+                            }
                         }
                         p.ok = false;
                         p.board = false;
@@ -512,6 +543,15 @@ fn run(cfg: SyncCfg, hooks: Hooks, rx: Receiver<Cmd>, emit: impl Fn(Out)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs a quaked advertising on this Mac: cargo test resolves_a_live_peer -- --ignored
+    #[test]
+    #[ignore]
+    fn resolves_a_live_peer() {
+        let name = std::env::var("QUAKED_PEER").unwrap_or_else(|_| computer_name());
+        let (host, port) = resolve_now(&name).expect("no quaked advertised under that name");
+        assert!(host.ends_with(".local.") && port > 0, "{host}:{port}");
+    }
 
     #[test]
     fn keys_look_right_and_compare() {

@@ -1439,8 +1439,10 @@ fn top_bar(c: &mut Canvas, v: &View) {
         let p = *p;
         let r = tab_rect(v.pages, v.page, p);
         let active = v.page == p;
-        c.rrect(r, 17.0, if active { TEXT } else { 0x1C1C21 }, 1.0);
-        let fg = if active { 0x111114 } else { MUTED };
+        // Update stays lit in its color until every Mac is on the latest release.
+        let lit = !active && p == Page::Update && v.update.pending();
+        c.rrect(r, 17.0, if active { TEXT } else if lit { crate::config::hex(v.ring.color_for(p), 0x5AC8FA) } else { 0x1C1C21 }, 1.0);
+        let fg = if active || lit { 0x111114 } else { MUTED };
         if active {
             c.symbol(page_symbol(p), 18.0, r.0 + 24.0, r.1 + r.3 / 2.0, fg);
             c.fit(F::Bold, p.label(), 15.0, tab_label_w(p) + 6.0, r.0 + 42.0, r.1 + 23.0, fg, Align::Left);

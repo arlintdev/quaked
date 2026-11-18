@@ -165,7 +165,8 @@ fn watch(mut cfg: Cfg, rx: Receiver<Cmd>, back: Sender<Cmd>, emit: impl Fn(Updat
             Err(RecvTimeoutError::Timeout) => check = cfg.check && Instant::now() >= next,
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        if check || (install && st.latest.is_none()) {
+        // Asked to install with nothing newer known: the last check may predate the release.
+        if check || (install && st.available().is_none()) {
             st.checking = true;
             emit(Update::Status(st.clone()));
             match latest() {

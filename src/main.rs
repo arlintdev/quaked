@@ -469,7 +469,7 @@ fn preview(dir: &str) {
         s
     };
     let (stocks_two, stocks_four) = (stocks_n(2), stocks_n(4));
-    let shots: [(&str, Page, Level, usize, usize, usize); 44] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 45] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -514,13 +514,14 @@ fn preview(dir: &str) {
         ("42-stocks-two", Page::Stocks, Level::Top, 0, 0, 0),
         ("43-stocks-four", Page::Stocks, Level::Top, 0, 0, 0),
         ("44-update", Page::Update, Level::Focus, 0, 0, 1),
+        ("45-update-tab-lit", Page::Dash, Level::Top, 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
     let empty = audio::Status::default();
     for (name, page, level, sel, scroll, tile) in shots.into_iter().chain(std::iter::once(detail_shot)) {
         let mut c = render::Canvas::new(1920, 480, &fonts, &symbols);
         let view = View {
-            pages: if name == "44-update" { &pages_with_update } else { &cfg.pages },
+            pages: if name.starts_with("44-update") || name.starts_with("45-update") { &pages_with_update } else { &cfg.pages },
             page,
             accent: config::hex(cfg.ring.color_for(page), 0),
             shortcuts: &cfg.shortcuts,

@@ -71,10 +71,11 @@ impl App {
         };
         let mut rows = vec![Row { name: self.peers.name.clone(), here: true, version: CURRENT.into(), build: env!("QUAKED_BUILD").into(), state: here_state }];
         for p in self.peers.peers.iter().filter(|p| p.ok) {
-            let state = if let Some((target, since)) = self.update_peers.get(&p.name) {
-                if p.version == *target {
-                    RowState::Current
-                } else if since.elapsed() > PEER_INSTALL_FOR {
+            let caught_up = !p.version.is_empty() && latest.is_some_and(|l| !newer(l, &p.version));
+            let state = if caught_up {
+                RowState::Current
+            } else if let Some((target, since)) = self.update_peers.get(&p.name) {
+                if since.elapsed() > PEER_INSTALL_FOR {
                     RowState::Failed(format!("didn't come back on {target}"))
                 } else {
                     RowState::Busy("Installing…".into())
@@ -119,9 +120,8 @@ impl App {
             if self.update.busy() {
                 return b"error: already installing\n".to_vec();
             }
-            if self.update.latest.is_some() && self.update.available().is_none() {
-                return b"error: Already up to date\n".to_vec();
-            }
+            // No refusing on what's known: the last check may be from before the release
+            // came out, so the thread asks GitHub again unless it already knows of one.
             device::log("update: install here");
             let _ = self.update_cmd.send(UpdateCmd::Install);
             return b"ok\n".to_vec();
@@ -197,6 +197,14 @@ impl App {
                 self.redraw();
             } else {
                 return Some(at + ARM_FOR);
+            }
+        }
+        // An old error says nothing about a Mac that has since caught up (by hand, say).
+        if let Some(l) = self.update.latest.as_ref().map(|r| r.version.clone()) {
+            let caught_up = |n: &String| self.peers.peers.iter().any(|p| &p.name == n && !p.version.is_empty() && !newer(&l, &p.version));
+            let stale: Vec<String> = self.update_errors.keys().filter(|n| caught_up(n)).cloned().collect();
+            for n in stale {
+                self.update_errors.remove(&n);
             }
         }
         // A paired Mac back on the version it was asked to install.

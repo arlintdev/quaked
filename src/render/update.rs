@@ -47,6 +47,14 @@ pub struct UpdateView<'a> {
     pub armed: Option<usize>,
 }
 
+impl UpdateView<'_> {
+    /// Some Mac isn't on the latest release yet (behind, installing, or its install failed):
+    /// the Update tab stays lit until they all are.
+    pub fn pending(&self) -> bool {
+        self.rows.iter().any(|r| matches!(r.state, RowState::Behind | RowState::Busy(_) | RowState::Failed(_)))
+    }
+}
+
 fn row_rect(i: usize) -> R {
     (MACS.0 + 12.0, ROWS_TOP + i as f32 * ROW_H, MACS.2 - 24.0, ROW_H - 10.0)
 }
@@ -102,7 +110,8 @@ fn plain(s: &str) -> String {
         rest = &rest[k + 1..];
     }
     out.push_str(rest);
-    out.replace("**", "").replace("__", "").replace('`', "")
+    // Helvetica Neue has no arrows.
+    out.replace("**", "").replace("__", "").replace('`', "").replace('→', "›").replace('←', "‹")
 }
 
 pub(super) fn draw(c: &mut Canvas, v: &View) {
@@ -128,7 +137,10 @@ fn release(c: &mut Canvas, v: &View) {
     let fresh = st.available().is_some();
     c.rrect((x, y, 6.0, h), 3.0, if fresh { v.accent } else { FAINT }, 1.0);
     let pw = c.pill(x + 30.0, y + 20.0, if fresh { "NEW RELEASE" } else { "LATEST RELEASE" }, 13.0, if fresh { v.accent } else { 0x2A2A31 }, if fresh { 0x101013 } else { TEXT_2 });
-    let mut meta = format!("released {} ago", age(v.now_ms.saturating_sub(r.published_ms)));
+    let mut meta = match age(v.now_ms.saturating_sub(r.published_ms)).as_str() {
+        "now" => "released just now".to_string(),
+        a => format!("released {a} ago"),
+    };
     if r.zip_size > 0 {
         meta = format!("{meta}   ·   {:.1} MB   ·   Apple Silicon", r.zip_size as f64 / 1_000_000.0);
     }
@@ -255,8 +267,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tab_stays_lit_until_every_mac_is_current() {
+        let st = Status::default();
+        let row = |state| Row { name: "Mac".into(), here: false, version: "0.4.0".into(), build: String::new(), state };
+        let view = |rows| UpdateView { status: &st, rows, armed: None };
+        assert!(view(vec![row(RowState::Current), row(RowState::Behind)]).pending());
+        assert!(view(vec![row(RowState::Current), row(RowState::Busy("Installing…".into()))]).pending());
+        assert!(view(vec![row(RowState::Failed("no".into()))]).pending());
+        assert!(!view(vec![row(RowState::Current), row(RowState::Unknown)]).pending());
+    }
+
+    #[test]
     fn notes_read_as_plain_text() {
-        let md = "**New:** an Update pane\nthat installs releases.\n\n## Fixes\n- Meetings join on the [right Mac](https://x)\n* `ctl join` takes links only\n";
+        let md = "**New:** an Update pane\nthat installs releases.\n\n## Fixes\n- Meetings join on the [right Mac](https://x)\n* `ctl join` takes links only\n- Settings → Macs\n";
         assert_eq!(
             note_blocks(md),
             vec![
@@ -264,6 +287,7 @@ mod tests {
                 (false, "Fixes".to_string()),
                 (true, "Meetings join on the right Mac".to_string()),
                 (true, "ctl join takes links only".to_string()),
+                (true, "Settings › Macs".to_string()),
             ]
         );
     }
