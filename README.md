@@ -19,7 +19,7 @@ knob's light ring:
   files edited or read, searches, MCP calls, with running / done / failed status. Open
   one for its full step timeline.
 - **Music**: Now Playing from Spotify or Apple Music with artwork, progress,
-  previous / play-pause / next, and the player's volume.
+  previous / play-pause / next, shuffle on / off, and the player's volume.
 - **Shortcuts**: up to 16 tiles with SF Symbols icons. A tile can type a key combo (the
   Quake types it as a real USB keyboard, so no macOS permission is needed), open an app /
   file / URL, run a macOS Shortcut or a shell command, mute your soundboard mic, control

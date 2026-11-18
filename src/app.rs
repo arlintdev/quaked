@@ -1644,6 +1644,13 @@ impl App {
         let _ = self.music_cmd.send(MusicCmd::PlayPause);
     }
 
+    /// Shuffle on or off; the board shows it at once, the next reading confirms it.
+    fn toggle_shuffle(&mut self) {
+        let Some(t) = &mut self.track else { return };
+        t.shuffle = !t.shuffle;
+        let _ = self.music_cmd.send(MusicCmd::Shuffle);
+    }
+
     fn toggle_clip(&mut self, i: usize) {
         if i >= self.sounds.clips.len() {
             return;
@@ -1687,6 +1694,7 @@ impl App {
                 "previous" | "prev" => {
                     let _ = self.music_cmd.send(MusicCmd::Previous);
                 }
+                "shuffle" => self.toggle_shuffle(),
                 _ => self.play_pause(),
             },
             Action::Clip { title } => {
@@ -1730,6 +1738,7 @@ impl App {
             Hit::Next => {
                 let _ = self.music_cmd.send(MusicCmd::Next);
             }
+            Hit::Shuffle => self.toggle_shuffle(),
             Hit::Volume(frac) => {
                 let v = (frac * 100.0).round() as u8;
                 self.volume = Some(v);
@@ -1900,7 +1909,7 @@ impl App {
             "sessions": self.sessions.len(),
             "waiting": count(State::Waiting),
             "working": count(State::Working),
-            "track": self.track.as_ref().map(|t| serde_json::json!({"title": t.title, "artist": t.artist, "playing": t.playing})),
+            "track": self.track.as_ref().map(|t| serde_json::json!({"title": t.title, "artist": t.artist, "playing": t.playing, "shuffle": t.shuffle})),
             "league": {"running": self.league.running, "phase": self.league.phase, "autoAccept": self.cfg.league.auto_accept},
             "docker": {"ok": self.docker.ok, "engine": self.docker.engine, "running": self.docker.containers.iter().filter(|c| c.state == "running").count(), "containers": self.docker.containers.len()},
             "ops": {

@@ -151,6 +151,7 @@ fn preview(dir: &str) {
         duration: 159.0,
         position: 86.0,
         art_url: String::new(),
+        shuffle: true,
     };
     let fonts = render::Fonts::load();
     let symbols = symbols::Symbols::default();

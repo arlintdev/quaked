@@ -391,7 +391,7 @@ function viewShortcuts(main) {
         shortcut: () => [f("Shortcut name", "name", "Focus mode")],
         shell: () => [f("Command", "command", "say hello", true)],
         micMute: () => [],
-        media: () => [h("div", { class: "row" }, h("div", { class: "label" }, "Command"), h("select", { onchange: (e) => { a.command = e.target.value; changed(); } }, [["playpause", "Play / pause"], ["next", "Next"], ["previous", "Previous"]].map(([v, l]) => h("option", { value: v, selected: (a.command || "playpause") === v }, l))))],
+        media: () => [h("div", { class: "row" }, h("div", { class: "label" }, "Command"), h("select", { onchange: (e) => { a.command = e.target.value; changed(); } }, [["playpause", "Play / pause"], ["next", "Next"], ["previous", "Previous"], ["shuffle", "Shuffle on / off"]].map(([v, l]) => h("option", { value: v, selected: (a.command || "playpause") === v }, l))))],
         clip: () => [h("div", { class: "row" }, h("div", { class: "label" }, "Clip"), h("select", { onchange: (e) => { a.title = e.target.value; changed(); } }, [h("option", { value: "" }, "Choose…"), ...clips.map((c) => h("option", { value: c, selected: a.title === c }, c))]))],
         page: () => [h("div", { class: "row" }, h("div", { class: "label" }, "Page"), h("select", { onchange: (e) => { a.page = e.target.value; changed(); } }, PAGES.map(([id, label]) => h("option", { value: id, selected: a.page === id }, label))))],
       };

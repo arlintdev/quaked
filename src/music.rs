@@ -23,6 +23,8 @@ pub struct Track {
     pub duration: f64,
     pub position: f64,
     pub art_url: String,
+    /// The player's shuffle is on.
+    pub shuffle: bool,
 }
 
 impl Track {
@@ -42,6 +44,8 @@ pub enum MusicCmd {
     PlayPause,
     Next,
     Previous,
+    /// Turns the player's shuffle on or off.
+    Shuffle,
     SetVolume(u8),
 }
 
@@ -57,7 +61,7 @@ if application "Spotify" is running then
   tell application "Spotify"
     try
       set t to current track
-      set out to "Spotify" & tab & (player state as string) & tab & (name of t) & tab & (artist of t) & tab & (album of t) & tab & ((duration of t) / 1000) & tab & (player position) & tab & (artwork url of t) & tab & "VOL=" & (sound volume)
+      set out to "Spotify" & tab & (player state as string) & tab & (name of t) & tab & (artist of t) & tab & (album of t) & tab & ((duration of t) / 1000) & tab & (player position) & tab & (artwork url of t) & tab & (shuffling as string) & tab & "VOL=" & (sound volume)
     end try
   end tell
 end if
@@ -67,7 +71,7 @@ if out is "" or out does not contain (tab & "playing" & tab) then
       try
         if player state is playing or out is "" then
           set t to current track
-          set out to "Music" & tab & (player state as string) & tab & (name of t) & tab & (artist of t) & tab & (album of t) & tab & (duration of t) & tab & (player position) & tab & "" & tab & "VOL=" & (sound volume)
+          set out to "Music" & tab & (player state as string) & tab & (name of t) & tab & (artist of t) & tab & (album of t) & tab & (duration of t) & tab & (player position) & tab & "" & tab & (shuffle enabled as string) & tab & "VOL=" & (sound volume)
         end if
       end try
     end tell
@@ -106,6 +110,7 @@ fn poll() -> (Option<Track>, Option<u8>, Option<String>) {
                 duration: num(f[5]),
                 position: num(f[6]),
                 art_url: f[7].to_string(),
+                shuffle: f.get(8) == Some(&"true"),
             });
             (track, vol, None)
         }
@@ -124,6 +129,8 @@ fn run(cmd: &MusicCmd, track: Option<&Track>) -> Option<u8> {
         MusicCmd::PlayPause => format!("tell application \"{app}\" to playpause"),
         MusicCmd::Next => format!("tell application \"{app}\" to next track"),
         MusicCmd::Previous => format!("tell application \"{app}\" to previous track"),
+        MusicCmd::Shuffle if app == "Music" => "tell application \"Music\" to set shuffle enabled to not shuffle enabled".into(),
+        MusicCmd::Shuffle => format!("tell application \"{app}\" to set shuffling to not shuffling"),
         MusicCmd::SetVolume(v) => {
             new_volume = Some((*v).min(100));
             format!("tell application \"{app}\" to set sound volume to {}", (*v).min(100))
@@ -292,7 +299,7 @@ fn music_thread(rx: Receiver<MusicCmd>, fast: Arc<AtomicBool>, emit: impl Fn(Mus
         if !gliding && now >= next_poll && now.duration_since(touched) >= VOLUME_SETTLE {
             let (t, v, p) = poll();
             let changed = match (&track, &t) {
-                (Some(a), Some(b)) => !a.same_song(b) || (a.position_at(last_emit) - b.position).abs() > 2.5,
+                (Some(a), Some(b)) => !a.same_song(b) || a.shuffle != b.shuffle || (a.position_at(last_emit) - b.position).abs() > 2.5,
                 (None, None) => false,
                 _ => true,
             } || v != volume

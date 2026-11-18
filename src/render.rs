@@ -58,6 +58,7 @@ pub enum Hit {
     Prev,
     PlayPause,
     Next,
+    Shuffle,
     Volume(f32),
     Shortcut(usize),
     Clip(usize),
@@ -1066,6 +1067,9 @@ fn play_button() -> R {
 fn next_button() -> R {
     (MX + 348.0, BTN_Y, 140.0, 104.0)
 }
+fn shuffle_button() -> R {
+    (MX + 508.0, BTN_Y, 140.0, 104.0)
+}
 const VOL_X: f32 = 1360.0;
 fn volume_bar() -> R {
     (VOL_X, BTN_Y + 62.0, W - M - VOL_X - 24.0, 14.0)
@@ -1191,6 +1195,8 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
                 Some(Hit::PlayPause)
             } else if inside(next_button(), x, y) {
                 Some(Hit::Next)
+            } else if v.track.is_some() && inside(shuffle_button(), x, y) {
+                Some(Hit::Shuffle)
             } else if inside(volume_hit(), x, y) {
                 let (bx, _, bw, _) = volume_bar();
                 Some(Hit::Volume(((x - bx) / bw).clamp(0.0, 1.0)))
@@ -1255,6 +1261,7 @@ fn hit_rect(v: &View, h: Hit) -> Option<R> {
         Hit::Prev => prev_button(),
         Hit::PlayPause => play_button(),
         Hit::Next => next_button(),
+        Hit::Shuffle => shuffle_button(),
         Hit::Volume(_) => volume_hit(),
     })
 }
@@ -1909,6 +1916,15 @@ fn music(c: &mut Canvas, v: &View) {
             _ => c.poly(&[(cx - 14.0, cy - 24.0), (cx - 14.0, cy + 24.0), (cx + 24.0, cy)], TEXT),
         }
     }
+    // Shuffle: green and "SHUFFLE ON" while it's on.
+    let r = shuffle_button();
+    let (cx, cy) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+    let col = if t.shuffle { SPOTIFY } else { MUTED };
+    c.rrect(r, 16.0, if t.shuffle { 0x16261C } else { 0x1C1C21 }, 1.0);
+    if !c.symbol("shuffle", 40.0, cx, cy - 12.0, col) {
+        c.text(F::Bold, "⤨", 40.0, cx, cy + 2.0, col, Align::Center);
+    }
+    c.text(F::Bold, if t.shuffle { "SHUFFLE ON" } else { "SHUFFLE" }, 12.0, cx, r.1 + r.3 - 18.0, col, Align::Center);
 
     // Volume
     let vb = volume_bar();
