@@ -1,7 +1,8 @@
 //! Stocks: prices for your symbols from Yahoo Finance's chart endpoint (no account or key;
 //! only the symbols are sent).
 //!
-//! Per symbol the thread keeps today's 5-minute prices (refreshed every `refreshSeconds`
+//! Per symbol the thread keeps today's 5-minute prices, pre-market and after hours
+//! included (refreshed every `refreshSeconds`
 //! while the Stocks page is on screen, every 15 minutes otherwise) and a year of daily
 //! closes (every 30 minutes), which 1M, 6M, YTD and 1Y are cut from. 5D (15-minute steps)
 //! and 5Y (weekly) are fetched when you open a stock.
@@ -16,6 +17,27 @@ use std::time::{Duration, Instant};
 pub type Series = Vec<(u64, f32)>;
 
 const DAY: u64 = 86_400;
+
+/// Where the market is in its day.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Session {
+    Pre,
+    /// The regular session (crypto always).
+    Regular,
+    Post,
+    #[default]
+    Closed,
+}
+
+/// The latest pre-market or after-hours trade, when it's newer than the regular close.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Extended {
+    /// Pre-market (else after hours).
+    pub pre: bool,
+    pub price: f64,
+    /// Unix seconds.
+    pub time: u64,
+}
 
 /// One symbol's quote, today's prices and a year of daily closes.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -36,7 +58,13 @@ pub struct Quote {
     pub market_time: u64,
     /// The market is in its regular session now (crypto always).
     pub open: bool,
-    /// Today's prices (5-minute steps).
+    pub session: Session,
+    /// Today's regular session (unix seconds); prices outside it are pre-market or after
+    /// hours. (0, 0) when there isn't one (crypto).
+    pub regular: (u64, u64),
+    /// The pre-market or after-hours price, when there is one.
+    pub extended: Option<Extended>,
+    /// Today's prices (5-minute steps), pre-market and after hours included.
     pub series: Series,
     /// A year of daily closes.
     pub history: Series,
@@ -56,6 +84,17 @@ impl Quote {
         }
     }
 
+    /// The pre-market / after-hours move from the regular close: (change, percent).
+    pub fn extended_change(&self) -> Option<(f64, f64)> {
+        let e = self.extended?;
+        (self.price > 0.0).then(|| (e.price - self.price, (e.price - self.price) / self.price * 100.0))
+    }
+
+    /// Whether a time is in the regular session (always, when there isn't one).
+    pub fn in_regular(&self, t: u64) -> bool {
+        self.regular == (0, 0) || (self.regular.0 <= t && t <= self.regular.1)
+    }
+
     /// The prices over `range` and where the range started (yesterday's close for a day,
     /// else its first price). 5D and 5Y come from `extra` once fetched; until then the
     /// year of daily closes stands in.
@@ -63,7 +102,8 @@ impl Quote {
         let fetched = || extra.iter().find(|c| c.symbol == self.symbol && c.range == range && !c.points.is_empty()).map(|c| c.points.clone());
         let since = |from: u64| -> Series { self.history.iter().copied().filter(|(t, _)| *t >= from).collect() };
         let points = match range {
-            Range::Day => return (self.series.clone(), self.prev_close),
+            // Before today's open (only pre-market so far) the move is from the last close.
+            Range::Day => return (self.series.clone(), if self.series.iter().any(|p| self.in_regular(p.0)) { self.prev_close } else { self.price }),
             Range::Week => fetched().unwrap_or_else(|| self.history.iter().rev().take(6).rev().copied().collect()),
             Range::Month => since(now.saturating_sub(30 * DAY)),
             Range::SixMonth => since(now.saturating_sub(182 * DAY)),
@@ -308,7 +348,9 @@ fn refresh_extra(st: &mut Status, symbol: &str, range: Range) {
 fn get(symbol: &str, range: &str, interval: &str) -> Result<Value, String> {
     // Symbols go in the path: keep them to what tickers are made of.
     let clean: String = symbol.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '^' | '-' | '.' | '=')).collect();
-    let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{}?range={range}&interval={interval}", clean.replace('^', "%5E"));
+    // Today's prices come with pre-market and after hours.
+    let ext = if range == "1d" { "&includePrePost=true" } else { "" };
+    let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{}?range={range}&interval={interval}{ext}", clean.replace('^', "%5E"));
     let out = Command::new("/usr/bin/curl").args(["-s", "--max-time", "10", "-A", "Mozilla/5.0 (Macintosh)", &url]).output().map_err(|e| e.to_string())?;
     if out.stdout.is_empty() {
         return Err("no answer from Yahoo Finance".into());
@@ -334,12 +376,41 @@ pub fn parse_quote(v: &Value, now: u64) -> Result<Quote, String> {
     if price == 0.0 {
         return Err("no price".into());
     }
-    let regular = &m["currentTradingPeriod"]["regular"];
-    let (start, end) = (regular["start"].as_u64().unwrap_or(0), regular["end"].as_u64().unwrap_or(0));
-    let open = text("instrumentType") == "CRYPTOCURRENCY" || (start <= now && now < end);
+    let bounds = |p: &Value| (p["start"].as_u64().unwrap_or(0), p["end"].as_u64().unwrap_or(0));
+    // The session the market is in now...
+    let current = |k: &str| bounds(&m["currentTradingPeriod"][k]);
+    let (pre, (start, end), post) = (current("pre"), current("regular"), current("post"));
+    // ...and the sessions of the prices (after midnight in New York the current ones are
+    // already tomorrow's while the prices are still today's).
+    let of_prices = |k: &str| {
+        let day = m["tradingPeriods"][k].as_array().and_then(|days| days.last()).and_then(|d| d.as_array()).and_then(|d| d.last()).map(bounds);
+        day.filter(|b| b.0 > 0).unwrap_or_else(|| current(k))
+    };
+    let (data_pre, (data_start, data_end), data_post) = (of_prices("pre"), of_prices("regular"), of_prices("post"));
+    let crypto = text("instrumentType") == "CRYPTOCURRENCY";
+    let within = |(a, b): (u64, u64), t: u64| a > 0 && a <= t && t < b;
+    let session = if crypto || within((start, end), now) {
+        Session::Regular
+    } else if within(pre, now) {
+        Session::Pre
+    } else if within(post, now) {
+        Session::Post
+    } else {
+        Session::Closed
+    };
     let times = r["timestamp"].as_array().cloned().unwrap_or_default();
     let closes = r["indicators"]["quote"][0]["close"].as_array().cloned().unwrap_or_default();
     let series: Series = times.iter().zip(closes.iter()).filter_map(|(t, c)| Some((t.as_u64()?, c.as_f64()? as f32))).collect();
+    // The last trade, if it's after the close or before today's open (the close itself is
+    // stamped at the end of the session).
+    let extended = match series.last() {
+        Some(&(t, p)) if !crypto && data_end > 0 && session != Session::Regular => {
+            let after = t > data_end && (data_post.1 == 0 || t <= data_post.1);
+            let before = data_pre.0 > 0 && data_pre.0 <= t && t < data_start;
+            (after || before).then_some(Extended { pre: before, price: p as f64, time: t })
+        }
+        _ => None,
+    };
     let name = [text("shortName"), text("longName")].into_iter().find(|n| !n.is_empty()).unwrap_or_default();
     let prev = if num("previousClose") > 0.0 { num("previousClose") } else { num("chartPreviousClose") };
     let exchange = [text("fullExchangeName"), text("exchangeName")].into_iter().find(|n| !n.is_empty()).unwrap_or_default();
@@ -356,7 +427,10 @@ pub fn parse_quote(v: &Value, now: u64) -> Result<Quote, String> {
         low_52w: num("fiftyTwoWeekLow"),
         volume: m["regularMarketVolume"].as_u64().unwrap_or(0),
         market_time: m["regularMarketTime"].as_u64().unwrap_or(0),
-        open,
+        open: session == Session::Regular,
+        session,
+        regular: if crypto || data_start == 0 { (0, 0) } else { (data_start, data_end) },
+        extended,
         series,
         history: Vec::new(),
         error: None,
@@ -420,12 +494,22 @@ pub fn sample() -> Status {
         volume: 182_400_000,
         market_time: now,
         open: true,
+        session: Session::Regular,
+        regular: (0, 0),
+        extended: None,
         series: walk(prev as f32, price as f32, 78, 300, 0.002),
         history: walk(year_ago, price as f32, 251, DAY + DAY / 3, 0.03),
         error: None,
     };
+    // NVDA closed and trading after hours (up on earnings).
+    let mut nvda = q("NVDA", "NVIDIA Corporation", 155.46, 156.14, 118.0);
+    let close = now - 48 * 300;
+    nvda.series = walk(156.14, 155.46, 78, 300, 0.002).into_iter().map(|(t, p)| (t - 48 * 300, p)).chain(walk(155.6, 162.94, 48, 300, 0.004)).collect();
+    nvda.regular = (close - 77 * 300, close);
+    (nvda.open, nvda.session) = (false, Session::Post);
+    nvda.extended = Some(Extended { pre: false, price: 162.94, time: now });
     let quotes = vec![
-        q("NVDA", "NVIDIA Corporation", 155.46, 156.14, 118.0),
+        nvda,
         q("TQQQ", "ProShares UltraPro QQQ", 51.81, 53.03, 61.0),
         q("^GSPC", "S&P 500", 7340.53, 7416.58, 5980.0),
         q("BTC-USD", "Bitcoin USD", 64317.17, 64830.0, 91000.0),
@@ -450,10 +534,63 @@ mod tests {
         assert_eq!(q.series, [(1, 352.4), (3, 351.9)]);
         assert!((q.change_pct() + 0.2466).abs() < 1e-3);
         assert!(!parse_quote(&v, 1794950000).unwrap().open, "after the close");
+        assert_eq!(q.session, Session::Regular);
+        assert_eq!(q.extended, None);
         let found: Value = serde_json::from_str(r#"{"quotes":[{"symbol":"AAPL","shortname":"Apple Inc.","exchDisp":"NASDAQ","typeDisp":"Equity"},{"exchDisp":"x"}]}"#).unwrap();
         assert_eq!(parse_search(&found), [("AAPL".to_string(), "Apple Inc.".to_string(), "NASDAQ".to_string(), "Equity".to_string())]);
         let bad: Value = serde_json::from_str(r#"{"chart":{"result":null,"error":{"code":"Not Found","description":"No data found, symbol may be delisted"}}}"#).unwrap();
         assert_eq!(parse_quote(&bad, 0), Err("No data found, symbol may be delisted".into()));
+    }
+
+    #[test]
+    fn pre_market_and_after_hours() {
+        // Regular 14:30–21:00 UTC, pre from 09:00, post until 01:00.
+        let (pre, open, close, post) = (1794906000u64, 1794925800u64, 1794949200u64, 1794963600u64);
+        let answer = |times: &[u64], closes: &[f64]| -> Value {
+            serde_json::json!({"chart": {"result": [{"meta": {"symbol": "NVDA", "regularMarketPrice": 155.46, "previousClose": 156.14, "instrumentType": "EQUITY",
+                "currentTradingPeriod": {"pre": {"start": pre, "end": open}, "regular": {"start": open, "end": close}, "post": {"start": close, "end": post}}},
+                "timestamp": times, "indicators": {"quote": [{"close": closes}]}}], "error": null}})
+        };
+        // After hours: the last trade is past the close.
+        let v = answer(&[open, close, close + 600, close + 1200], &[156.0, 155.46, 160.0, 162.94]);
+        let q = parse_quote(&v, close + 1500).unwrap();
+        assert_eq!(q.session, Session::Post);
+        assert!(!q.open);
+        assert_eq!(q.extended.map(|e| (e.pre, e.price as f32, e.time)), Some((false, 162.94, close + 1200)));
+        let (chg, pct) = q.extended_change().unwrap();
+        assert!((chg - 7.48).abs() < 1e-3 && (pct - 4.8115).abs() < 1e-3);
+        assert!(q.in_regular(close) && !q.in_regular(close + 600) && !q.in_regular(open - 300));
+        // Still shown overnight, once after hours is over...
+        assert_eq!(parse_quote(&v, post + 3600).unwrap().session, Session::Closed);
+        assert!(parse_quote(&v, post + 3600).unwrap().extended.is_some());
+        // ...also after midnight in New York, when the current session is already tomorrow's
+        // and the prices' own sessions say where today's close was.
+        let mut late = v.clone();
+        let day = |a: u64, b: u64| serde_json::json!({"start": a + DAY, "end": b + DAY});
+        late["chart"]["result"][0]["meta"]["currentTradingPeriod"] = serde_json::json!({"pre": day(pre, open), "regular": day(open, close), "post": day(close, post)});
+        late["chart"]["result"][0]["meta"]["tradingPeriods"] = serde_json::json!({"pre": [[{"start": pre, "end": open}]], "regular": [[{"start": open, "end": close}]], "post": [[{"start": close, "end": post}]]});
+        let q = parse_quote(&late, post + 3600).unwrap();
+        assert_eq!((q.session, q.regular), (Session::Closed, (open, close)));
+        assert_eq!(q.extended.map(|e| e.price as f32), Some(162.94));
+        assert!(!q.in_regular(close + 600));
+        // Only the close so far: nothing after hours.
+        assert_eq!(parse_quote(&answer(&[open, close], &[156.0, 155.46]), close + 60).unwrap().extended, None);
+        // Pre-market: trades before the open; the day's chart is measured from the last close.
+        let v = answer(&[pre + 600, pre + 1200], &[157.0, 158.2]);
+        let q = parse_quote(&v, pre + 1300).unwrap();
+        assert_eq!(q.session, Session::Pre);
+        assert_eq!(q.extended.map(|e| e.pre), Some(true));
+        assert_eq!(q.over(Range::Day, &[], pre + 1300).1, 155.46);
+        // In the regular session there's no extended price, and the day is from yesterday's close.
+        let v = answer(&[pre + 600, open, open + 300], &[157.0, 156.5, 156.9]);
+        let q = parse_quote(&v, open + 400).unwrap();
+        assert_eq!((q.session, q.extended), (Session::Regular, None));
+        assert_eq!(q.over(Range::Day, &[], open + 400).1, 156.14);
+        // Crypto never closes.
+        let mut c = answer(&[1, 2], &[1.0, 2.0]);
+        c["chart"]["result"][0]["meta"]["instrumentType"] = "CRYPTOCURRENCY".into();
+        let q = parse_quote(&c, post + 3600).unwrap();
+        assert_eq!((q.session, q.extended, q.regular), (Session::Regular, None, (0, 0)));
     }
 
     #[test]

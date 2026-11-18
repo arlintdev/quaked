@@ -5,10 +5,13 @@
 //!   1M, 1Y), each with its change, price axis, high / low and dates.
 //! - One scale expanded: a big chart, and the knob walks 1D 5D 1M 6M YTD 1Y 5Y.
 //!
+//! Pre-market and after hours: a pill with the session, the extended price and its move
+//! from the close, and the 1D chart carries on past the close in a dimmer line.
+//!
 //! Level::Detail("NVDA") is the four panes (v.scroll = the pane picked);
 //! Level::Detail("NVDA@1Y") is one expanded.
 use super::*;
-use crate::stocks::{Quote, Range, Series};
+use crate::stocks::{Quote, Range, Series, Session};
 
 /// Tiles on screen at once; the knob pages through more.
 const PER_SCREEN: usize = 8;
@@ -19,6 +22,79 @@ pub const TAP_BACK: usize = 1100;
 const LEFT_W: f32 = 430.0;
 const AXIS_W: f32 = 74.0;
 const AXIS_H: f32 = 22.0;
+/// Pre-market and after hours.
+const EXT: u32 = 0x8AB4F8;
+/// The chart line outside the regular session.
+const EXT_ALPHA: f32 = 0.45;
+
+/// The pill beside the symbol when the regular session isn't on.
+fn session_pill(q: &Quote) -> Option<(&'static str, u32, u32)> {
+    match q.session {
+        Session::Regular => None,
+        Session::Pre => Some(("PRE-MARKET", 0x1A2333, EXT)),
+        Session::Post => Some(("AFTER HOURS", 0x1A2333, EXT)),
+        Session::Closed => Some(("CLOSED", 0x2A2A31, MUTED)),
+    }
+}
+
+/// "After hours" / "Pre-market", for the extended price.
+fn ext_label(pre: bool) -> &'static str {
+    if pre { "Pre-market" } else { "After hours" }
+}
+
+/// Draws the extended price on one line from `x` (label, price, move); returns where it ends.
+fn ext_line(c: &mut Canvas, q: &Quote, x: f32, y: f32, px: f32) -> f32 {
+    let (Some(e), Some((_, p))) = (q.extended, q.extended_change()) else { return x };
+    let mut cx = x;
+    cx += c.text(F::Bold, ext_label(e.pre), px, cx, y, EXT, Align::Left) + px * 0.6;
+    cx += c.text(F::Bold, &price(e.price), px, cx, y, TEXT_2, Align::Left) + px * 0.5;
+    cx += c.text(F::Bold, &pct(p), px, cx, y, up_color(p), Align::Left);
+    cx
+}
+
+/// Draws the line through `pts` (one per point): outside the regular session dimmer, after
+/// the close colored by the move from the close, before the open by the move from
+/// yesterday's close. Returns the color it ends in.
+fn session_line(c: &mut Canvas, q: Option<&Quote>, points: &[(u64, f32)], pts: &[(f32, f32)], color: u32, width: f32) -> u32 {
+    let regular = |i: usize| q.is_none_or(|q| q.in_regular(points[i].0));
+    let ext_color = q.and_then(Quote::extended_change).map_or(color, |(chg, _)| up_color(chg));
+    // Today's pre-market, once the regular session has started (before, it's the extended price).
+    let opened = (0..points.len()).any(regular);
+    let pre_color = match (q, points.iter().rev().find(|p| q.is_some_and(|q| p.0 < q.regular.0))) {
+        (Some(q), Some(last)) if opened && q.prev_close > 0.0 => up_color(last.1 as f64 - q.prev_close),
+        _ => ext_color,
+    };
+    let mut a = 0;
+    while a + 1 < pts.len() {
+        // A run of segments on the same side of the open / close.
+        let on = regular(a) && regular(a + 1);
+        let mut b = a + 1;
+        while b + 1 < pts.len() && (regular(b) && regular(b + 1)) == on {
+            b += 1;
+        }
+        if on {
+            c.polyline(&pts[a..=b], color, width);
+        } else {
+            let before_open = q.is_some_and(|q| points[b].0 <= q.regular.0);
+            c.polyline_alpha(&pts[a..=b], if before_open { pre_color } else { ext_color }, width, EXT_ALPHA + 0.15);
+        }
+        a = b;
+    }
+    if pts.len() >= 2 && !regular(pts.len() - 1) { ext_color } else { color }
+}
+
+/// Shades between the line and `by` over the regular session only.
+fn session_fill(c: &mut Canvas, q: Option<&Quote>, points: &[(u64, f32)], pts: &[(f32, f32)], by: f32, color: u32) {
+    let regular = |i: usize| q.is_none_or(|q| q.in_regular(points[i].0));
+    let (Some(a), Some(b)) = ((0..pts.len()).find(|&i| regular(i)), (0..pts.len()).rev().find(|&i| regular(i))) else { return };
+    if b <= a {
+        return;
+    }
+    let mut area = pts[a..=b].to_vec();
+    area.push((pts[b].0, by));
+    area.push((pts[a].0, by));
+    c.poly_alpha(&area, color, 0.14);
+}
 
 fn up_color(change: f64) -> u32 {
     if change >= 0.0 { GREEN } else { RED }
@@ -110,7 +186,7 @@ pub fn opened(level: &Level) -> Option<(&str, Option<Range>)> {
 }
 
 /// Today's chart on a tile: scaled to its own range, the area to yesterday's close shaded.
-fn spark(c: &mut Canvas, r: R, points: &[(u64, f32)], base: f64, color: u32) {
+fn spark(c: &mut Canvas, r: R, points: &[(u64, f32)], base: f64, color: u32, sessions: Option<&Quote>) {
     let (x, y, w, h) = r;
     if points.len() < 2 {
         c.rect((x, y + h / 2.0, w, 1.0), LINE, 1.0);
@@ -125,14 +201,11 @@ fn spark(c: &mut Canvas, r: R, points: &[(u64, f32)], base: f64, color: u32) {
     let pts: Vec<(f32, f32)> = points.iter().enumerate().map(|(i, p)| (x + w * i as f32 / (n - 1) as f32, to_y(p.1))).collect();
     if base > 0.0 {
         dashed(c, x, x + w, to_y(base));
-        let mut area = pts.clone();
-        area.push((x + w, to_y(base)));
-        area.push((x, to_y(base)));
-        c.poly_alpha(&area, color, 0.14);
+        session_fill(c, sessions, points, &pts, to_y(base), color);
     }
-    c.polyline(&pts, color, 2.0);
+    let end = session_line(c, sessions, points, &pts, color, 2.0);
     let (lx, ly) = pts[n - 1];
-    c.circle(lx, ly, 3.2, color, 1.0);
+    c.circle(lx, ly, 3.2, end, 1.0);
 }
 
 fn dashed(c: &mut Canvas, x0: f32, x1: f32, y: f32) {
@@ -145,7 +218,7 @@ fn dashed(c: &mut Canvas, x0: f32, x1: f32, y: f32) {
 
 /// A chart with axes: prices on the right (high, low, and between them when `rich`), times
 /// along the bottom, a dashed line where the range started, the high and low marked.
-fn plot(c: &mut Canvas, r: R, points: &Series, base: f64, range: Range, color: u32, rich: bool) {
+fn plot(c: &mut Canvas, r: R, points: &Series, base: f64, range: Range, color: u32, rich: bool, sessions: Option<&Quote>) {
     let (x, y, w, h) = r;
     let (px, py, pw, ph) = (x, y + 6.0, w - AXIS_W, h - AXIS_H - 10.0);
     if points.len() < 2 {
@@ -188,12 +261,9 @@ fn plot(c: &mut Canvas, r: R, points: &Series, base: f64, range: Range, color: u
     if base > 0.0 {
         let by = to_y(base);
         dashed(c, px, px + pw, by);
-        let mut area = pts.clone();
-        area.push((px + pw, by));
-        area.push((px, by));
-        c.poly_alpha(&area, color, 0.14);
+        session_fill(c, sessions, points, &pts, by, color);
     }
-    c.polyline(&pts, color, if rich { 2.6 } else { 2.0 });
+    let end = session_line(c, sessions, points, &pts, color, if rich { 2.6 } else { 2.0 });
     // The high and the low.
     for (i, v, above) in [(hi_i, hi, true), (lo_i, lo, false)] {
         let (mx, my) = (to_x(i), to_y(v));
@@ -208,10 +278,10 @@ fn plot(c: &mut Canvas, r: R, points: &Series, base: f64, range: Range, color: u
     }
     // Now, and the price at the axis.
     let (lx, ly) = pts[n - 1];
-    c.circle(lx, ly, 4.0, color, 1.0);
+    c.circle(lx, ly, 4.0, end, 1.0);
     let last = axis_price(points[n - 1].1 as f64);
     let tw = c.measure(F::Bold, &last, 12.0) + 10.0;
-    c.rrect((x + w - tw - 2.0, ly - 10.0, tw, 20.0), 5.0, color, 1.0);
+    c.rrect((x + w - tw - 2.0, ly - 10.0, tw, 20.0), 5.0, end, 1.0);
     c.text(F::Bold, &last, 12.0, x + w - 7.0, ly + 4.0, 0x101013, Align::Right);
 }
 
@@ -274,7 +344,7 @@ fn mini(c: &mut Canvas, v: &View, q: &Quote, range: Range, r: R) {
         c.text(F::Bold, &format!("{:+.1}%", p), 13.0, x + w - 10.0, y + 18.0, col, Align::Right);
     }
     if h > 40.0 {
-        spark(c, (x + 10.0, y + 28.0, w - 20.0, h - 38.0), &points, base, col);
+        spark(c, (x + 10.0, y + 28.0, w - 20.0, h - 38.0), &points, base, col, (range == Range::Day).then_some(q));
     }
 }
 
@@ -301,10 +371,17 @@ fn tile(c: &mut Canvas, v: &View, q: &Quote, r: R, tall: bool) {
     arrow(c, q.change() >= 0.0, x + w - 20.0 - cw - 12.0, y + 64.0 - change_px * 0.36, change_px * 0.75, col);
     let left_w = (iw - pw.max(cw + 22.0) - 16.0).max(60.0);
     let sw = c.fit(F::Bold, &q.symbol, 22.0, left_w, ix, y + 36.0, TEXT, Align::Left);
-    if !q.open && sw + 80.0 < left_w {
-        c.pill(ix + sw + 10.0, y + 18.0, "CLOSED", 11.0, 0x2A2A31, MUTED);
+    if let Some((label, bg, fg)) = session_pill(q) {
+        if sw + 10.0 + c.measure(F::Bold, label, 11.0) + 16.0 < left_w {
+            c.pill(ix + sw + 10.0, y + 18.0, label, 11.0, bg, fg);
+        }
     }
-    c.clip(F::Medium, &q.name, 14.0, left_w, ix, y + 60.0, MUTED);
+    // A short card puts the extended price where the name goes.
+    if !tall && q.extended.is_some() {
+        ext_line(c, q, ix, y + 60.0, 13.0);
+    } else {
+        c.clip(F::Medium, &q.name, 14.0, left_w, ix, y + 60.0, MUTED);
+    }
     let mut top = y + 78.0;
     if tall {
         let mut parts: Vec<String> = Vec::new();
@@ -317,7 +394,15 @@ fn tile(c: &mut Canvas, v: &View, q: &Quote, r: R, tall: bool) {
         if q.volume > 0 {
             parts.push(format!("Vol {}", volume(q.volume)));
         }
-        c.clip(F::Medium, &parts.join("   ·   "), 13.0, iw, ix, y + 92.0, FAINT);
+        // The extended price leads the line.
+        let mut sx = ix;
+        if q.extended.is_some() {
+            sx = ext_line(c, q, ix, y + 92.0, 13.0);
+            if !parts.is_empty() {
+                sx += c.text(F::Medium, "   ·   ", 13.0, sx, y + 92.0, FAINT, Align::Left);
+            }
+        }
+        c.clip(F::Medium, &parts.join("   ·   "), 13.0, (ix + iw - sx).max(0.0), sx, y + 92.0, FAINT);
         top = y + 106.0;
     }
     // The four scales.
@@ -364,14 +449,24 @@ fn detail(c: &mut Canvas, v: &View, q: &Quote, expanded: Option<Range>) {
     let ix = x + 26.0;
     let iw = LEFT_W - 50.0;
     let sw = c.fit(F::Bold, &q.symbol, 28.0, iw - 90.0, ix, y + 42.0, TEXT, Align::Left);
-    if !q.open {
-        c.pill(ix + sw + 12.0, y + 22.0, "CLOSED", 11.0, 0x2A2A31, MUTED);
+    if let Some((label, bg, fg)) = session_pill(q) {
+        c.pill(ix + sw + 12.0, y + 22.0, label, 11.0, bg, fg);
     }
     let sub = if q.exchange.is_empty() { q.name.clone() } else { format!("{}  ·  {}", q.name, q.exchange) };
     c.clip(F::Medium, &sub, 15.0, iw, ix, y + 66.0, MUTED);
     c.fit(F::Bold, &price(q.price), 46.0, iw, ix, y + 124.0, TEXT, Align::Left);
     arrow(c, q.change() >= 0.0, ix + 8.0, y + 148.0, 14.0, col);
     c.fit(F::Bold, &format!("{}  today", change_text(q)), 18.0, iw - 24.0, ix + 24.0, y + 154.0, col, Align::Left);
+    // The extended price and its move from the close.
+    let mut rows_y = y + 194.0;
+    if let (Some(e), Some((chg, p))) = (q.extended, q.extended_change()) {
+        let ecol = up_color(chg);
+        let lw = c.text(F::Bold, &price(e.price), 18.0, ix, y + 186.0, TEXT, Align::Left);
+        arrow(c, chg >= 0.0, ix + lw + 18.0, y + 180.0, 12.0, ecol);
+        let mw = c.text(F::Bold, &format!("{}{}  {}", if chg >= 0.0 { "+" } else { "-" }, grouped(chg.abs(), 2), pct(p)), 16.0, ix + lw + 30.0, y + 186.0, ecol, Align::Left);
+        c.clip(F::Bold, &ext_label(e.pre).to_lowercase(), 16.0, (iw - lw - mw - 40.0).max(0.0), ix + lw + mw + 40.0, y + 186.0, EXT);
+        rows_y += 26.0;
+    }
     let range_of = |lo: f64, hi: f64| if lo > 0.0 && hi > 0.0 { format!("{} – {}", price(lo), price(hi)) } else { "—".into() };
     let when_text = if q.market_time > 0 { crate::calendar::hm_ampm(q.market_time * 1000) } else { String::new() };
     let rows = [
@@ -379,10 +474,18 @@ fn detail(c: &mut Canvas, v: &View, q: &Quote, expanded: Option<Range>) {
         ("52-week range", range_of(q.low_52w, q.high_52w)),
         ("Previous close", if q.prev_close > 0.0 { price(q.prev_close) } else { "—".into() }),
         ("Volume", volume(q.volume)),
-        ("Market", if q.open { format!("open  ·  {when_text}") } else { format!("closed  ·  as of {when_text}") }),
+        (
+            "Market",
+            match q.session {
+                Session::Regular => format!("open  ·  {when_text}"),
+                Session::Pre => "pre-market".into(),
+                Session::Post => "after hours".into(),
+                Session::Closed => format!("closed  ·  as of {when_text}"),
+            },
+        ),
     ];
     for (k, (label, value)) in rows.iter().enumerate() {
-        let ry = y + 194.0 + k as f32 * 28.0;
+        let ry = rows_y + k as f32 * 28.0;
         c.text(F::Medium, label, 14.0, ix, ry, MUTED, Align::Left);
         c.text(F::Medium, value, 14.0, ix + iw, ry, TEXT_2, Align::Right);
     }
@@ -404,7 +507,7 @@ fn detail(c: &mut Canvas, v: &View, q: &Quote, expanded: Option<Range>) {
                 c.text(F::Bold, range.label(), 15.0, px + 16.0, py + 26.0, TEXT, Align::Left);
                 let note = if loading(range) { "loading…".to_string() } else { moved.map(pct).unwrap_or_default() };
                 c.text(F::Bold, &note, 15.0, px + pw - 16.0, py + 26.0, if loading(range) { MUTED } else { mcol }, Align::Right);
-                plot(c, (px + 14.0, py + 36.0, pw - 22.0, ph - 44.0), &points, base, range, mcol, false);
+                plot(c, (px + 14.0, py + 36.0, pw - 22.0, ph - 44.0), &points, base, range, mcol, false, (range == Range::Day).then_some(q));
                 if v.scroll == k && v.level != &Level::Top {
                     c.outline(r, 14.0, TEXT, 2.0);
                 }
@@ -433,7 +536,7 @@ fn detail(c: &mut Canvas, v: &View, q: &Quote, expanded: Option<Range>) {
                 }
             };
             c.text(F::Bold, &note, 16.0, ax + aw - 20.0, ay + 37.0, if loading(range) { MUTED } else { mcol }, Align::Right);
-            plot(c, (ax + 20.0, ay + 60.0, aw - 30.0, ah - 66.0), &points, base, range, mcol, true);
+            plot(c, (ax + 20.0, ay + 60.0, aw - 30.0, ah - 66.0), &points, base, range, mcol, true, (range == Range::Day).then_some(q));
         }
     }
 }

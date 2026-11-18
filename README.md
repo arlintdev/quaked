@@ -94,7 +94,9 @@ knob's light ring:
 - **Stocks** (chart icon): your symbols (stocks, ETFs, indexes like `^GSPC`, crypto like
   `BTC-USD`) with price, today's change and today's chart against yesterday's close; press
   one for 1D / 5D / 1M / 1Y charts (turn to switch, press again for its Yahoo Finance page).
-  Prices come from Yahoo Finance with no account (only your symbols are sent), every
+  Outside market hours a pill says PRE-MARKET, AFTER HOURS or CLOSED, the pre-market or
+  after-hours price shows with its move from the close, and the 1D chart carries on past
+  the close in a dimmer line. Prices come from Yahoo Finance with no account (only your symbols are sent), every
   minute while the page is up. Pick symbols on the settings page (Extras › Stocks): search
   by company name, reorder, remove.
 - **Windows** (windows icon): your apps front to back with their window counts; press

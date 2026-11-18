@@ -547,6 +547,10 @@ impl<'a> Canvas<'a> {
     }
 
     fn polyline(&mut self, pts: &[(f32, f32)], color: u32, width: f32) {
+        self.polyline_alpha(pts, color, width, 1.0);
+    }
+
+    fn polyline_alpha(&mut self, pts: &[(f32, f32)], color: u32, width: f32, alpha: f32) {
         if pts.len() < 2 {
             return;
         }
@@ -558,7 +562,7 @@ impl<'a> Canvas<'a> {
         }
         if let Some(path) = pb.finish() {
             let stroke = Stroke { width: width * s, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
-            self.pixmap.stroke_path(&path, &Self::paint(color, 1.0), &stroke, Transform::identity(), None);
+            self.pixmap.stroke_path(&path, &Self::paint(color, alpha), &stroke, Transform::identity(), None);
         }
     }
 
