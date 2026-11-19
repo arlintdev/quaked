@@ -262,6 +262,19 @@ status, pairing requests (Allow / Refuse), Open Settings…, a page switcher for
 Restart quaked and Quit quaked (stops it until your next login). Turn the icon off on the
 settings page (General → Show quaked in the menu bar).
 
+## Quake window
+
+**Quake Window** in the menu bar menu (or `quaked ctl window`) puts the Quake's screen in
+a floating window you can drag anywhere, on either Mac. It stays above other windows and
+on every Space, and reopens where you left it.
+
+- On the Mac with the Quake it's drawn along with the board. On the other Mac it shows
+  the board's Mac's screen, fetched only when it changes (`ctl frame-since`). With no
+  Quake attached anywhere, it shows this Mac's own.
+- Click to tap, scroll or use the arrow keys to turn the knob, Return (or a right click)
+  to press it, Escape to go back. Drag to move it; ⌘+ / ⌘− size it; ⌘W hides it.
+- Where it is and how big are kept per Mac in `~/Library/Application Support/Quaked/window.json`.
+
 ## Settings
 
 quaked serves its own settings page at **http://127.0.0.1:47380** (this Mac only; open
@@ -326,6 +339,7 @@ quaked ctl page <id>         dash | ai | music | shortcuts | soundboard | league
 quaked ctl shortcut <n>      run shortcut tile n (from 0)
 quaked ctl play <title>      play a clip; `ctl stop` stops all
 quaked ctl status            JSON status; `ctl frame [page]` = PNG of the screen (or another page, off-screen)
+quaked ctl window [on|off]   show, hide or toggle the Quake window
 quaked ctl alert <page> [why]  blink the ring and jump like new stuff does
 quaked ctl audio-devices     input / output device names
 quaked ctl reload            re-read the config now

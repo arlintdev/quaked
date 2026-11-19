@@ -4663,6 +4663,15 @@ fn mac_tag(c: &mut Canvas, name: &str, side: Option<Side>, px: f32, x: f32, y: f
     }
 }
 
+/// A screen with nothing to show yet: what it is, and why (the Quake window, waiting on
+/// another Mac's picture).
+pub fn placeholder(c: &mut Canvas, title: &str, why: &str) {
+    c.rrect((0.0, 0.0, W, H), 0.0, BG, 1.0);
+    c.symbol("dial.medium", 64.0, W / 2.0, H / 2.0 - 80.0, FAINT);
+    c.fit(F::Bold, title, 34.0, W - 160.0, W / 2.0, H / 2.0 + 10.0, TEXT_2, Align::Center);
+    c.fit(F::Medium, why, 22.0, W - 160.0, W / 2.0, H / 2.0 + 56.0, MUTED, Align::Center);
+}
+
 // ---------------------------------------------------------------- Claude's questions
 
 fn ask_overlay(c: &mut Canvas, v: &View, a: &AskView) {

@@ -18,6 +18,8 @@ pub enum Action {
     Pair(bool),
     /// Index into the page list the menu was built with.
     Page(usize),
+    /// Show or hide the Quake window.
+    Window,
 }
 
 /// What the menu shows; it's rebuilt only when this changes.
@@ -33,6 +35,8 @@ pub struct Model {
     pub pair: Option<String>,
     /// The board's pages, with the current one checked; empty when the board isn't here.
     pub pages: Vec<(String, bool)>,
+    /// The Quake window is up.
+    pub window: bool,
 }
 
 type Sender = Box<dyn Fn(Action) + Send>;
@@ -59,6 +63,9 @@ extern "C" fn on_allow(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C" fn on_refuse(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {
     send(Action::Pair(false));
 }
+extern "C" fn on_window(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {
+    send(Action::Window);
+}
 extern "C" fn on_page(_: *mut AnyObject, _: Sel, sender: *mut AnyObject) {
     if sender.is_null() {
         return;
@@ -81,6 +88,7 @@ fn target_class() -> &'static AnyClass {
             b.add_method(sel!(allowPair:), on_allow as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
             b.add_method(sel!(refusePair:), on_refuse as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
             b.add_method(sel!(showPage:), on_page as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+            b.add_method(sel!(toggleWindow:), on_window as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
         }
         b.register()
     })
@@ -187,6 +195,7 @@ impl MenuBar {
         }
         Self::separator(menu);
         self.add(menu, "Open Settings…", Some(sel!(openSettings:)), ",", -1, false, Some("gearshape"));
+        self.add(menu, "Quake Window", Some(sel!(toggleWindow:)), "", -1, model.window, Some("macwindow"));
         if !model.pages.is_empty() {
             let sub: *mut AnyObject = msg_send![class!(NSMenu), new];
             let _: () = msg_send![sub, setAutoenablesItems: Bool::NO];

@@ -15,6 +15,7 @@ mod code;
 mod deploy;
 mod digin_actions;
 mod docker_peers;
+mod mirror;
 mod relevance;
 use relevance::Urgency;
 mod focus;
@@ -118,6 +119,8 @@ pub enum Event {
     PeerDockerLogs { id: String, lines: Vec<String> },
     /// A paired Mac answered a Docker button.
     PeerDockerDone { mac: String, name: String, action: &'static str, done: Result<(), String> },
+    /// The Quake window's picture from the board's Mac, or why there isn't one.
+    Mirror(mirror::Update),
 }
 
 pub enum FeatureEvent {
@@ -187,6 +190,10 @@ struct App {
     cfg: Config,
     cfg_mtime: Option<SystemTime>,
     gfx: Option<Gfx>,
+    /// The Quake window (the board's screen, floating).
+    mirror: mirror::Mirror,
+    /// Counts board changes, so a paired Mac's Quake window fetches only new pictures.
+    frame_seq: std::cell::Cell<u64>,
     fonts: Fonts,
     symbols: Symbols,
     commands: Sender<Command>,
@@ -420,9 +427,11 @@ impl App {
     }
 
     fn redraw(&self) {
+        self.frame_seq.set(self.frame_seq.get() + 1);
         if let Some(g) = &self.gfx {
             g.window.request_redraw();
         }
+        self.mirror_redraw();
     }
 
     fn accent(&self) -> u32 {
@@ -974,6 +983,7 @@ impl App {
             lines,
             pair: self.pair_ask.as_ref().map(|a| a.name.clone()),
             pages: if self.connected { self.pages.iter().map(|p| (p.title().to_string(), *p == self.page)).collect() } else { Vec::new() },
+            window: self.mirror.shown(),
         }
     }
 
@@ -1000,6 +1010,7 @@ impl App {
                 spawn_detached(c);
             }
             Action::Pair(allow) => self.answer_pair(allow),
+            Action::Window => self.mirror_show(None),
             Action::Page(i) => {
                 if let Some(p) = self.pages.get(i).copied() {
                     self.last_input = Instant::now();
@@ -2089,6 +2100,15 @@ impl App {
             }
             ["symbol", name, px] => self.symbol_png(name, px.parse().unwrap_or(32.0)),
             ["frame"] => self.render(render::W as u32, render::H as u32).pixmap.encode_png().unwrap_or_default(),
+            ["frame-since", seq, w, h] => self.frame_since(seq, w, h),
+            ["window"] => {
+                self.mirror_show(None);
+                ok
+            }
+            ["window", on @ ("on" | "off")] => {
+                self.mirror_show(Some(*on == "on"));
+                ok
+            }
             // Renders another page at its top level without switching the board to it.
             ["frame", p] => match serde_json::from_value::<PageId>(serde_json::Value::String(p.to_string())) {
                 Ok(page) => {
@@ -2199,6 +2219,7 @@ impl ApplicationHandler<Event> for App {
             Event::PeerDocker(got) => self.docker_from_peers(got),
             Event::PeerDockerLogs { id, lines } => self.docker_peer_logs(id, lines),
             Event::PeerDockerDone { mac, name, action, done } => self.docker_peer_done(mac, name, action, done),
+            Event::Mirror(u) => self.mirror_update(u),
             Event::Ops(st) => {
                 let news = ops_news(&self.ops, &st);
                 // Dashboard: a response time per site check (0 = it failed).
@@ -2304,7 +2325,10 @@ impl ApplicationHandler<Event> for App {
         }
     }
 
-    fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, _el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.mirror.is(id) {
+            return self.mirror_event(event);
+        }
         match event {
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::CursorMoved { position, .. } => self.cursor = (position.x, position.y),
@@ -2388,6 +2412,10 @@ impl ApplicationHandler<Event> for App {
             }
         }
         if let Some(t) = self.feature_tick(now) {
+            wake = wake.min(t);
+        }
+        self.mirror_ensure(el);
+        if let Some(t) = self.mirror_tick(now) {
             wake = wake.min(t);
         }
         if let Some((_, at)) = self.flash {
@@ -2688,6 +2716,8 @@ pub fn run() {
         cfg_mtime: config::modified(),
         cfg,
         gfx: None,
+        mirror: mirror::Mirror::load(),
+        frame_seq: Default::default(),
         fonts: Fonts::load(),
         symbols: Symbols::default(),
         commands,
