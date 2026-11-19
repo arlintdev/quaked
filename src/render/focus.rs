@@ -124,10 +124,11 @@ fn dial(c: &mut Canvas, v: &View, now: u64, color: u32) {
     if 1.0 - from > 0.002 {
         arc(c, from, 1.0, arc_color, DIAL_W);
     }
-    // A tick every 5 minutes, just inside the ring.
-    let steps = (t.minutes / crate::focus::STEP_MIN).max(1);
-    for i in 0..steps {
-        let f = i as f32 / steps as f32;
+    // A tick every 5 minutes (every minute on a short block), just inside the ring.
+    let every = if t.minutes <= 10 { 1 } else { 5 };
+    let total = t.minutes.max(1);
+    for i in 0..total.div_ceil(every) {
+        let f = (i * every) as f32 / total as f32;
         let (x0, y0) = dial_point(f, DIAL_R - DIAL_W / 2.0 - 10.0);
         let (x1, y1) = dial_point(f, DIAL_R - DIAL_W / 2.0 - (if i == 0 { 26.0 } else { 18.0 }));
         let lit = t.phase == Phase::Ready || f >= elapsed;
@@ -218,7 +219,7 @@ pub(super) fn draw(c: &mut Canvas, v: &View) {
     c.fit(F::Medium, &sub, 26.0, max_w, TX, CY + 330.0, TEXT_2, Align::Left);
     let how = match t.phase {
         _ if !focus => "press the knob to work the timer from it   ·   or tap the buttons",
-        Phase::Ready => "turn to change the length   ·   press to start",
+        Phase::Ready => "turn for a minute at a time, spin faster for more   ·   press to start",
         Phase::Running => "press to pause   ·   hold to cancel",
         Phase::Paused => "press to resume   ·   hold to cancel",
         Phase::Done => "press to clear   ·   tap Again for another block",

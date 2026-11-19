@@ -536,7 +536,7 @@ function viewExtras(main) {
     h("div", { class: "row" }, h("div", { class: "label" }, "Weather location", h("small", {}, "Latitude, longitude. Empty = estimated from your network (no location lookup services).")),
       h("input", { type: "text", style: { width: "220px" }, placeholder: "40.76, -111.89", value: cfg.night?.latitude != null ? `${cfg.night.latitude}, ${cfg.night.longitude}` : "",
         oninput: (e) => { const m = e.target.value.split(",").map((x) => parseFloat(x)); if (m.length === 2 && m.every((x) => !isNaN(x))) { cfg.night.latitude = m[0]; cfg.night.longitude = m[1]; } else { cfg.night.latitude = null; cfg.night.longitude = null; } changed(); } }))));
-  main.append(card("Focus timer", "Turn the knob to set the length, press to start or pause, hold to cancel. The ring shows the time left.",
+  main.append(card("Focus timer", "Turn the knob to set the length: a minute a click, more at a time the faster you spin. Press to start or pause, hold to cancel. The ring shows the time left.",
     choice("Default length", "focus.minutes", [[15, "15 min"], [25, "25 min"], [30, "30 min"], [45, "45 min"], [50, "50 min"], [60, "60 min"], [90, "90 min"]], null, true),
     text("Shortcut when a block starts", "focus.startShortcut", "e.g. Focus On", "A macOS Shortcut (for example one that turns on Do Not Disturb)"),
     text("Shortcut when it ends", "focus.endShortcut", "e.g. Focus Off")));

@@ -238,6 +238,8 @@ struct App {
     update_errors: HashMap<String, String>,
     /// The Mac row a first press armed (a second press within a few seconds installs).
     update_armed: Option<(usize, Instant)>,
+    /// The knob's spin on the focus timer (how fast the length moves).
+    focus_spin: crate::focus::Spin,
     /// The release already announced in the top bar.
     update_announced: String,
     /// The pages in the tab bar: `cfg.pages`, plus Update while it has something to show.
@@ -2730,6 +2732,7 @@ pub fn run() {
         update_peers: HashMap::new(),
         update_errors: HashMap::new(),
         update_armed: None,
+        focus_spin: Default::default(),
         update_announced: String::new(),
         pages: first_pages,
         night: crate::night::Status::default(),

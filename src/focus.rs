@@ -9,11 +9,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
 
-/// Lengths you can set, in minutes (in steps of `STEP_MIN`).
-pub const MIN_MIN: u64 = 5;
+/// Lengths you can set, in minutes.
+pub const MIN_MIN: u64 = 1;
 pub const MAX_MIN: u64 = 120;
+/// What the screen's − / + buttons move it by.
 pub const STEP_MIN: u64 = 5;
+/// Knob clicks closer together than this count as one spin.
+pub const SPIN_GAP: Duration = Duration::from_millis(160);
+/// A spin moves a minute a click, then 5 after this many quick clicks, then 15.
+const SPIN_FIVES_AFTER: u32 = 4;
+const SPIN_FIFTEENS_AFTER: u32 = 12;
 /// The ring breathes green this long after a block ends (after the alert blink).
 pub const DONE_RING_MS: u64 = 30_000;
 /// A finished block goes back to "ready" on its own after this long.
@@ -92,9 +99,29 @@ pub struct RingLook {
 }
 
 pub fn clamp_minutes(m: u64) -> u64 {
-    let m = m.clamp(MIN_MIN, MAX_MIN);
-    // Snap to the step (round to the nearest).
-    ((m + STEP_MIN / 2) / STEP_MIN * STEP_MIN).clamp(MIN_MIN, MAX_MIN)
+    m.clamp(MIN_MIN, MAX_MIN)
+}
+
+/// The knob's spin on the timer: slow clicks fine-tune a minute at a time, a fast spin
+/// speeds up the longer it goes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Spin {
+    last: Option<(Instant, i32)>,
+    run: u32,
+}
+
+impl Spin {
+    /// A click in direction `d` (±1) at `at`: how many minutes it moves.
+    pub fn click(&mut self, at: Instant, d: i32) -> u64 {
+        let quick = self.last.is_some_and(|(t, dir)| dir == d.signum() && at.saturating_duration_since(t) < SPIN_GAP);
+        self.run = if quick { self.run + 1 } else { 1 };
+        self.last = Some((at, d.signum()));
+        match self.run {
+            r if r > SPIN_FIFTEENS_AFTER => 15,
+            r if r > SPIN_FIVES_AFTER => 5,
+            _ => 1,
+        }
+    }
 }
 
 /// Rounds a unix ms time up to the next whole second.
@@ -158,16 +185,19 @@ impl Status {
         matches!(self.phase, Phase::Running | Phase::Paused)
     }
 
-    /// Changes the length by `steps` of 5 minutes (only while not running). Done goes back
+    /// Moves the length one `step` (minutes) in direction `d` (only while not running): a
+    /// step over a minute lands on its next round number (27 up by 5 is 30). Done goes back
     /// to ready. Returns whether anything changed.
-    pub fn adjust(&mut self, steps: i32) -> bool {
-        if self.active() {
+    pub fn adjust(&mut self, d: i32, step: u64) -> bool {
+        if self.active() || d == 0 {
             return false;
         }
         let was = (self.phase, self.minutes);
         self.phase = Phase::Ready;
-        let m = clamp_minutes(self.minutes.max(MIN_MIN)) as i64 + steps as i64 * STEP_MIN as i64;
-        self.minutes = (m.clamp(MIN_MIN as i64, MAX_MIN as i64)) as u64;
+        let m = clamp_minutes(self.minutes);
+        let step = step.max(1);
+        let m = if d > 0 { (m / step + 1) * step } else { (m.saturating_sub(1) / step) * step };
+        self.minutes = clamp_minutes(m);
         was != (self.phase, self.minutes)
     }
 
@@ -176,7 +206,7 @@ impl Status {
         if self.active() {
             return false;
         }
-        self.minutes = clamp_minutes(self.minutes.max(MIN_MIN));
+        self.minutes = clamp_minutes(self.minutes);
         self.phase = Phase::Running;
         self.started_ms = now;
         self.ends_ms = whole_second(now + self.total_ms());
@@ -490,25 +520,61 @@ mod tests {
     #[test]
     fn length_steps_and_clamps() {
         let mut s = ready(25);
-        assert!(s.adjust(1));
+        assert!(s.adjust(1, 1));
+        assert_eq!(s.minutes, 26);
+        // Bigger steps land on round numbers, both ways.
+        assert!(s.adjust(1, 5));
         assert_eq!(s.minutes, 30);
-        assert!(s.adjust(-3));
-        assert_eq!(s.minutes, 15);
-        s.adjust(-10);
+        assert!(s.adjust(1, 5));
+        assert_eq!(s.minutes, 35);
+        s.adjust(-1, 1);
+        assert!(s.adjust(-1, 5));
+        assert_eq!(s.minutes, 30);
+        assert!(s.adjust(1, 15));
+        assert_eq!(s.minutes, 45);
+        s.adjust(-1, 1);
+        s.adjust(-1, 15);
+        assert_eq!(s.minutes, 30);
+        for _ in 0..40 {
+            s.adjust(-1, 1);
+        }
         assert_eq!(s.minutes, MIN_MIN);
-        assert!(!s.adjust(-1), "already at the shortest");
-        s.adjust(100);
+        assert!(!s.adjust(-1, 1), "already at the shortest");
+        assert!(!s.adjust(-1, 5));
+        for _ in 0..20 {
+            s.adjust(1, 15);
+        }
         assert_eq!(s.minutes, MAX_MIN);
-        assert_eq!(clamp_minutes(0), 5);
-        assert_eq!(clamp_minutes(27), 25);
-        assert_eq!(clamp_minutes(28), 30);
+        assert_eq!(clamp_minutes(0), 1);
+        assert_eq!(clamp_minutes(27), 27);
         assert_eq!(clamp_minutes(500), 120);
         // Not while a block runs or is paused.
         s.start(T0);
-        assert!(!s.adjust(1));
+        assert!(!s.adjust(1, 1));
         s.pause(T0 + 1000);
-        assert!(!s.adjust(1));
+        assert!(!s.adjust(1, 1));
         assert_eq!(s.minutes, MAX_MIN);
+    }
+
+    #[test]
+    fn a_spin_speeds_up_slow_clicks_dont() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        // Slow, deliberate clicks: a minute each, however many.
+        let mut sp = Spin::default();
+        let slow: Vec<u64> = (0..10).map(|i| sp.click(ms(i * 300), 1)).collect();
+        assert!(slow.iter().all(|&m| m == 1), "{slow:?}");
+        // A fast spin: a minute for the first few clicks, then 5, then 15.
+        let mut sp = Spin::default();
+        let fast: Vec<u64> = (0..16).map(|i| sp.click(ms(i * 60), 1)).collect();
+        assert_eq!(fast, [1, 1, 1, 1, 5, 5, 5, 5, 5, 5, 5, 5, 15, 15, 15, 15]);
+        // Pausing or turning back starts over at a minute.
+        assert_eq!(sp.click(ms(15 * 60 + 400), 1), 1);
+        let mut sp = Spin::default();
+        for i in 0..8 {
+            sp.click(ms(i * 60), 1);
+        }
+        assert_eq!(sp.click(ms(8 * 60), -1), 1);
     }
 
     #[test]
@@ -562,8 +628,8 @@ mod tests {
         s.start(T0);
         let end = s.ends_ms;
         s.finish(end, "d");
-        assert!(s.adjust(1));
-        assert_eq!((s.phase, s.minutes), (Phase::Ready, 30));
+        assert!(s.adjust(1, 1));
+        assert_eq!((s.phase, s.minutes), (Phase::Ready, 26));
     }
 
     #[test]

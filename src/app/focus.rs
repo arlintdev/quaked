@@ -1,7 +1,7 @@
 //! Focus timer: the app side (knob, touch, ring, timers). The timer runs here on the main
 //! thread, whatever page the board shows; crate::focus has its rules and the tally file.
 use super::*;
-use crate::focus::{clamp_minutes, day_key, Cmd, Phase, Update, DONE_LINGER_MS, DONE_RING_MS};
+use crate::focus::{clamp_minutes, day_key, Cmd, Phase, Update, DONE_LINGER_MS, DONE_RING_MS, STEP_MIN};
 
 /// Played when a block ends: two blips and a long one.
 const DONE_TONE: &[(u8, u64)] = &[(70, 110), (0, 90), (70, 110), (0, 90), (85, 320)];
@@ -48,9 +48,15 @@ impl App {
         }
     }
 
-    /// Knob turned (on its page, past the top level): the length, while not running.
+    /// Knob turned (on its page, past the top level): the length, while not running. A
+    /// minute a click; a fast spin moves 5, then 15 at a time.
     pub(super) fn focus_turn(&mut self, d: i32) {
-        if self.focus.adjust(d) {
+        let step = self.focus_spin.click(Instant::now(), d);
+        self.focus_step(d, step);
+    }
+
+    fn focus_step(&mut self, d: i32, step: u64) {
+        if self.focus.adjust(d, step) {
             self.update_ring();
             self.redraw();
         }
@@ -87,8 +93,8 @@ impl App {
         match i {
             0 if self.focus.phase == Phase::Done => self.focus_start(),
             0 => self.focus_press(),
-            1 => self.focus_turn(-1),
-            2 => self.focus_turn(1),
+            1 => self.focus_step(-1, STEP_MIN),
+            2 => self.focus_step(1, STEP_MIN),
             3 if self.focus.active() => self.focus_cancel(),
             3 => self.focus_press(),
             _ => {}

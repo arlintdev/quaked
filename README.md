@@ -78,7 +78,8 @@ knob's light ring:
   marks in Extras). With a paired Mac answering, the card has a Join button for each Mac;
   the green one (and the knob) opens the meeting on the Mac whose calendar it came from,
   or on the Mac with the Quake (Extras → Join meetings on).
-- **Focus** (timer icon): a countdown you set on the knob (25 minutes by default), shown
+- **Focus** (timer icon): a countdown you set on the knob (25 minutes by default; a
+  minute a click, and a fast spin moves 5 then 15 at a time, landing on round numbers), shown
   in the ring wherever the board is, with today's blocks, the week, and whether a block
   fits before your next meeting. Optional macOS Shortcuts run when a block starts and ends
   (e.g. Do Not Disturb). The tally lives in `focus.json`.
