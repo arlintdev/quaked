@@ -1,10 +1,15 @@
 //! Containers through the Docker Engine API on a Unix socket. Kiri serves that API at
 //! ~/.kiri/run/docker.sock (it has no other API), so it's the first choice; other
 //! Docker-compatible engines work the same way.
+//!
+//! The Mac with the Quake also shows its paired Macs' containers: each one serves its own
+//! `Status` as JSON (`ctl docker`), and `merge` folds them into one list, each container
+//! marked with the Mac it runs on.
 
 use crate::config::{self, Docker as DockerCfg};
 use crate::device::log;
 use crate::http;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
@@ -16,7 +21,8 @@ use std::time::{Duration, Instant};
 
 const SOCKETS: [&str; 4] = ["~/.kiri/run/docker.sock", "/var/run/docker.sock", "~/.docker/run/docker.sock", "~/.rd/docker.sock"];
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Container {
     pub id: String,
     pub name: String,
@@ -29,9 +35,13 @@ pub struct Container {
     pub cpu: Option<f32>,
     pub mem: Option<u64>,
     pub mem_limit: Option<u64>,
+    /// The paired Mac it runs on, in the board's list ("" = this Mac).
+    #[serde(skip)]
+    pub machine: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Status {
     pub ok: bool,
     pub error: Option<String>,
@@ -43,7 +53,36 @@ pub struct Status {
     pub volumes: usize,
     pub containers: Vec<Container>,
     /// (container id, last log lines)
+    #[serde(skip)]
     pub logs: Option<(String, Vec<String>)>,
+    /// On the board, after `merge`: each paired Mac's engine (its containers are in
+    /// `containers`, marked with `machine`).
+    #[serde(skip)]
+    pub peers: Vec<(String, Status)>,
+}
+
+impl Status {
+    /// The engine a container runs on: this one, or a paired Mac's.
+    pub fn engine_of(&self, ct: &Container) -> &Status {
+        self.peers.iter().find(|(n, _)| !ct.machine.is_empty() && *n == ct.machine).map(|(_, s)| s).unwrap_or(self)
+    }
+}
+
+/// This Mac's containers and each paired Mac's in one list (running first, then by name),
+/// the paired ones marked with their Mac.
+pub fn merge(here: &Status, peers: &[(String, Status)]) -> Status {
+    let mut all = Status { peers: Vec::new(), ..here.clone() };
+    for (name, st) in peers {
+        all.containers.extend(st.containers.iter().map(|c| Container { machine: name.clone(), ..c.clone() }));
+        all.peers.push((name.clone(), Status { containers: Vec::new(), logs: None, peers: Vec::new(), ..st.clone() }));
+    }
+    all.containers.sort_by(|a, b| (a.state != "running").cmp(&(b.state != "running")).then(a.name.cmp(&b.name)).then(a.machine.cmp(&b.machine)));
+    all
+}
+
+/// The container actions a paired Mac may ask for.
+pub fn action(name: &str) -> Option<&'static str> {
+    ["start", "stop", "restart", "pause", "unpause"].into_iter().find(|a| *a == name)
 }
 
 #[derive(Debug)]
@@ -155,10 +194,16 @@ fn run(mut cfg: DockerCfg, fast: Arc<AtomicBool>, rx: Receiver<Cmd>, emit: impl 
             }
         }
         publish(&mut published, &status, &emit);
-        let period = if fast.load(Ordering::Relaxed) { Duration::from_secs(2) } else { Duration::from_secs(15) };
+        // Every 2 s while someone is looking (the page, or the board on a paired Mac),
+        // else 15 s; checked each second, so looking takes effect at once.
+        let started = Instant::now();
         loop {
-            let started = Instant::now();
-            match wait(&rx, &mut cfg, period, &mut status) {
+            let period = if fast.load(Ordering::Relaxed) { Duration::from_secs(2) } else { Duration::from_secs(15) };
+            let left = period.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            match wait(&rx, &mut cfg, left.min(Duration::from_secs(1)), &mut status) {
                 Err(()) => return,
                 Ok(Some((cmd, sock_cmd))) => {
                     handle(&sock, cmd, sock_cmd, &mut status);
@@ -166,7 +211,6 @@ fn run(mut cfg: DockerCfg, fast: Arc<AtomicBool>, rx: Receiver<Cmd>, emit: impl 
                     // An action changes container state: refresh soon.
                     break;
                 }
-                Ok(None) if started.elapsed() >= period || fast.load(Ordering::Relaxed) => break,
                 Ok(None) => {}
             }
         }
@@ -194,15 +238,10 @@ fn wait(rx: &Receiver<Cmd>, cfg: &mut DockerCfg, period: Duration, _status: &mut
 
 fn handle(sock: &PathBuf, id: String, what: Pending, status: &mut Status) {
     match what {
-        Pending::Logs => match call(sock, "GET", &format!("/containers/{id}/logs?stdout=1&stderr=1&tail=200")) {
-            Ok(r) if r.ok() => {
-                let text = strip_ansi(&demux(&r.body));
-                let lines: Vec<String> = text.lines().map(|l| l.to_string()).filter(|l| !l.trim().is_empty()).collect();
-                status.logs = Some((id, lines));
-            }
-            Ok(r) => status.logs = Some((id, vec![format!("(logs: HTTP {})", r.status)])),
-            Err(e) => status.logs = Some((id, vec![format!("(logs: {e})")])),
-        },
+        Pending::Logs => {
+            let lines = fetch_logs(sock, &id);
+            status.logs = Some((id, lines));
+        }
         Pending::Action(a) => {
             let q = if a == "stop" || a == "restart" { "?t=10" } else { "" };
             match call(sock, "POST", &format!("/containers/{id}/{a}{q}")) {
@@ -211,6 +250,23 @@ fn handle(sock: &PathBuf, id: String, what: Pending, status: &mut Status) {
                 Err(e) => log(format!("docker: {a} failed: {e}")),
             }
         }
+    }
+}
+
+/// A container's last 200 log lines (or why there are none).
+fn fetch_logs(sock: &PathBuf, id: &str) -> Vec<String> {
+    match call(sock, "GET", &format!("/containers/{id}/logs?stdout=1&stderr=1&tail=200")) {
+        Ok(r) if r.ok() => strip_ansi(&demux(&r.body)).lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect(),
+        Ok(r) => vec![format!("(logs: HTTP {})", r.status)],
+        Err(e) => vec![format!("(logs: {e})")],
+    }
+}
+
+/// `fetch_logs` from any thread, for a paired Mac that asked (`ctl docker-logs`).
+pub fn logs(cfg: &DockerCfg, id: &str) -> Vec<String> {
+    match socket_path(cfg) {
+        Some(sock) => fetch_logs(&sock, id),
+        None => vec!["(logs: no Docker socket found)".into()],
     }
 }
 
@@ -304,5 +360,25 @@ mod tests {
         assert_eq!(demux(&raw), "hello\nerr\n");
         assert_eq!(demux(b"plain tty output\n"), "plain tty output\n");
         assert_eq!(strip_ansi("\u{1b}[32mok\u{1b}[0m\r"), "ok");
+    }
+
+    #[test]
+    fn a_paired_macs_containers_join_the_list() {
+        let ct = |id: &str, name: &str, state: &str| Container { id: id.into(), name: name.into(), state: state.into(), ..Default::default() };
+        let here = Status { ok: true, ncpu: 8, containers: vec![ct("a1", "db", "exited"), ct("a2", "web", "running")], logs: Some(("a2".into(), vec!["hi".into()])), ..Default::default() };
+        // What the other Mac sends: its own status as JSON, no logs or Mac names.
+        let json = serde_json::to_string(&Status { ok: true, ncpu: 12, containers: vec![ct("b1", "api", "running"), ct("b2", "db", "exited")], logs: Some(("b1".into(), vec![])), ..Default::default() }).unwrap();
+        assert!(!json.contains("logs") && !json.contains("machine"));
+        let there: Status = serde_json::from_str(&json).unwrap();
+        let all = merge(&here, &[("MacBook Pro".into(), there)]);
+        let names: Vec<(&str, &str)> = all.containers.iter().map(|c| (c.name.as_str(), c.machine.as_str())).collect();
+        assert_eq!(names, [("api", "MacBook Pro"), ("web", ""), ("db", ""), ("db", "MacBook Pro")]);
+        assert_eq!(all.logs, here.logs);
+        assert_eq!(all.engine_of(&all.containers[0]).ncpu, 12);
+        assert_eq!(all.engine_of(&all.containers[1]).ncpu, 8);
+        assert!(all.peers[0].1.containers.is_empty());
+        // Only the actions the buttons send.
+        assert_eq!(action("restart"), Some("restart"));
+        assert_eq!(action("kill"), None);
     }
 }

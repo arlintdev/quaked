@@ -14,6 +14,7 @@ mod call;
 mod code;
 mod deploy;
 mod digin_actions;
+mod docker_peers;
 mod relevance;
 use relevance::Urgency;
 mod focus;
@@ -111,6 +112,12 @@ pub enum Event {
     Ctl(String, Sender<Vec<u8>>),
     /// A paired Mac answered "open this pull request": (that Mac, the link, "repo #12").
     OpenedOn { mac: String, url: String, what: String, done: Result<(), String> },
+    /// Paired Macs' engines and containers: (each Mac, its status).
+    PeerDocker(Vec<(String, docker::Status)>),
+    /// A container's logs from the paired Mac it runs on.
+    PeerDockerLogs { id: String, lines: Vec<String> },
+    /// A paired Mac answered a Docker button.
+    PeerDockerDone { mac: String, name: String, action: &'static str, done: Result<(), String> },
 }
 
 pub enum FeatureEvent {
@@ -190,7 +197,11 @@ struct App {
     league_cmd: Sender<league::Cmd>,
     league: league::Status,
     docker_cmd: Sender<docker::Cmd>,
+    /// What the board shows: this Mac's containers and its paired Macs' (`docker_changed`).
     docker: docker::Status,
+    /// This Mac's engine alone.
+    docker_here: docker::Status,
+    docker_peers: docker_peers::DockerPeers,
     docker_fast: Arc<AtomicBool>,
     next_logs: Instant,
     ops_cmd: Sender<ops::Cmd>,
@@ -1376,11 +1387,11 @@ impl App {
     }
 
     fn open_container(&mut self, i: usize) {
-        if let Some(ct) = self.docker.containers.get(i) {
+        if let Some(id) = self.docker.containers.get(i).map(|c| c.id.clone()) {
             self.tile = i;
-            self.level = Level::Detail(ct.id.clone());
+            self.level = Level::Detail(id.clone());
             self.scroll = 0;
-            let _ = self.docker_cmd.send(docker::Cmd::Logs(ct.id.clone()));
+            self.docker_logs(&id);
             self.next_logs = Instant::now() + LOG_REFRESH;
         }
     }
@@ -1631,9 +1642,7 @@ impl App {
                 (PageId::League, Level::Top) => self.level = Level::Focus,
                 (PageId::League, _) => self.league_primary(),
                 (PageId::Docker, Level::Focus) => self.open_container(self.tile),
-                (PageId::Docker, Level::Detail(id)) => {
-                    let _ = self.docker_cmd.send(docker::Cmd::Logs(id));
-                }
+                (PageId::Docker, Level::Detail(id)) => self.docker_logs(&id),
                 (_, Level::Top) => {
                     self.level = Level::Focus;
                     self.tile = self.tile.min(self.tile_count().saturating_sub(1));
@@ -1826,8 +1835,8 @@ impl App {
             }
             Hit::Container(i) => self.open_container(i),
             Hit::DockerAction(a) => {
-                if let Level::Detail(id) = &self.level {
-                    let _ = self.docker_cmd.send(docker::Cmd::Action(id.clone(), a));
+                if let Level::Detail(id) = self.level.clone() {
+                    self.docker_act(&id, a);
                 }
             }
             Hit::DockerBack => {
@@ -1961,7 +1970,16 @@ impl App {
             "working": count(State::Working),
             "track": self.track.as_ref().map(|t| serde_json::json!({"title": t.title, "artist": t.artist, "playing": t.playing, "shuffle": t.shuffle})),
             "league": {"running": self.league.running, "phase": self.league.phase, "autoAccept": self.cfg.league.auto_accept},
-            "docker": {"ok": self.docker.ok, "engine": self.docker.engine, "running": self.docker.containers.iter().filter(|c| c.state == "running").count(), "containers": self.docker.containers.len()},
+            "docker": {
+                "ok": self.docker_here.ok,
+                "engine": self.docker_here.engine,
+                "running": self.docker_here.containers.iter().filter(|c| c.state == "running").count(),
+                "containers": self.docker_here.containers.len(),
+                "peers": self.docker.peers.iter().map(|(name, st)| {
+                    let theirs = self.docker.containers.iter().filter(|c| &c.machine == name);
+                    serde_json::json!({"name": name, "ok": st.ok, "error": st.error, "containers": theirs.clone().count(), "running": theirs.filter(|c| c.state == "running").count()})
+                }).collect::<Vec<_>>(),
+            },
             "ops": {
                 "warp": self.ops.net.warp,
                 "appgate": self.ops.net.appgate,
@@ -2027,6 +2045,13 @@ impl App {
         }
         if let Some(id) = line.strip_prefix("show-event ") {
             return self.calendar_show_from_peer(id.trim());
+        }
+        // From the Mac with the Quake: this Mac's containers, and its buttons for them.
+        if line.trim() == "docker" || line.trim() == "docker watch" {
+            return self.docker_serve(line.trim() == "docker watch");
+        }
+        if let Some(args) = line.strip_prefix("docker-action ") {
+            return self.docker_action_from_peer(args);
         }
         if let Some(key) = line.strip_prefix("set-key ") {
             self.cfg.sync.key = key.trim().to_string();
@@ -2168,26 +2193,12 @@ impl ApplicationHandler<Event> for App {
                 self.redraw();
             }
             Event::Docker(st) => {
-                let news = if self.docker.ok && st.ok { docker_news(&self.docker, &st) } else { Vec::new() };
-                self.docker = st;
-                let ids: Vec<String> = self.docker.containers.iter().map(|c| c.id.clone()).collect();
-                self.history.docker_cpu.retain(|id, _| ids.contains(id));
-                for ct in self.docker.containers.iter().filter(|c| c.state == "running") {
-                    render::History::push(self.history.docker_cpu.entry(ct.id.clone()).or_default(), ct.cpu.unwrap_or(0.0));
-                }
-                if let Some(r) = Self::summarize(news) {
-                    self.alert_from(PageId::Docker, r, true, Urgency::of(PageId::Docker), Some(""));
-                }
-                if let Level::Detail(id) = &self.level {
-                    if self.page == PageId::Docker && !self.docker.containers.iter().any(|c| &c.id == id) {
-                        self.level = Level::Focus;
-                    }
-                }
-                self.tile = self.tile.min(self.tile_count().saturating_sub(1));
-                if self.page == PageId::Docker {
-                    self.redraw();
-                }
+                self.docker_here = st;
+                self.docker_changed();
             }
+            Event::PeerDocker(got) => self.docker_from_peers(got),
+            Event::PeerDockerLogs { id, lines } => self.docker_peer_logs(id, lines),
+            Event::PeerDockerDone { mac, name, action, done } => self.docker_peer_done(mac, name, action, done),
             Event::Ops(st) => {
                 let news = ops_news(&self.ops, &st);
                 // Dashboard: a response time per site check (0 = it failed).
@@ -2284,6 +2295,7 @@ impl ApplicationHandler<Event> for App {
                 let _ = self.digin_cmd.send(digin::Cmd::Refresh);
             }
             Event::Ctl(line, reply) if line.starts_with("ask ") => self.start_ask(&line[4..], reply),
+            Event::Ctl(line, reply) if line.starts_with("docker-logs ") => self.docker_logs_for_peer(&line["docker-logs ".len()..], reply),
             Event::OpenedOn { mac, url, what, done } => self.code_opened_on(mac, url, what, done),
             Event::Ctl(line, reply) => {
                 let out = self.on_ctl(&line);
@@ -2320,11 +2332,12 @@ impl ApplicationHandler<Event> for App {
             self.next_display = now + DISPLAY_POLL;
         }
         if self.page == PageId::Docker && now >= self.next_logs {
-            if let Level::Detail(id) = &self.level {
-                let _ = self.docker_cmd.send(docker::Cmd::Logs(id.clone()));
+            if let Level::Detail(id) = self.level.clone() {
+                self.docker_logs(&id);
             }
             self.next_logs = now + LOG_REFRESH;
         }
+        let docker_next = self.docker_tick(now);
         let idle_for = Duration::from_secs(self.cfg.idle_seconds.max(5));
         self.relevance_tick();
         // Reading a chart isn't being idle: an opened stock stays up for 10 minutes.
@@ -2347,7 +2360,7 @@ impl ApplicationHandler<Event> for App {
         if second != self.drawn_second && (self.animating() || second % 60 == 0) {
             self.redraw();
         }
-        let mut wake = self.next_poll.min(self.next_display);
+        let mut wake = self.next_poll.min(self.next_display).min(docker_next);
         if self.page == PageId::Docker && matches!(self.level, Level::Detail(_)) {
             wake = wake.min(self.next_logs);
         }
@@ -2472,17 +2485,6 @@ fn ops_news(old: &ops::Status, new: &ops::Status) -> Vec<String> {
         }
     }
     news
-}
-
-/// Running containers that stopped or started restarting.
-fn docker_news(old: &docker::Status, new: &docker::Status) -> Vec<String> {
-    new.containers
-        .iter()
-        .filter_map(|c| {
-            let o = old.containers.iter().find(|o| o.id == c.id)?;
-            (o.state == "running" && c.state != "running" && c.state != "paused").then(|| format!("{} {}", c.name, if c.state == "restarting" { "is restarting" } else { "stopped" }))
-        })
-        .collect()
 }
 
 pub fn ctl_socket_path() -> std::path::PathBuf {
@@ -2697,6 +2699,8 @@ pub fn run() {
         league: league::Status::default(),
         docker_cmd,
         docker: docker::Status::default(),
+        docker_here: docker::Status::default(),
+        docker_peers: Default::default(),
         docker_fast,
         next_logs: Instant::now(),
         ops_cmd,
@@ -2815,7 +2819,11 @@ mod tests {
 
         let ct = |state: &str| docker::Container { id: "1".into(), name: "db".into(), state: state.into(), ..Default::default() };
         let d = |state| docker::Status { ok: true, containers: vec![ct(state)], ..Default::default() };
-        assert_eq!(docker_news(&d("running"), &d("exited")), vec!["db stopped".to_string()]);
+        use docker_peers::docker_news;
+        assert_eq!(docker_news(&d("running"), &d("exited")), vec![(String::new(), "db stopped".to_string())]);
         assert!(docker_news(&d("exited"), &d("running")).is_empty());
+        // One on a paired Mac says which.
+        let there = |state| docker::merge(&docker::Status::default(), &[("MacBook Pro".into(), d(state))]);
+        assert_eq!(docker_news(&there("running"), &there("restarting")), vec![("MacBook Pro".to_string(), "db on MacBook Pro is restarting".to_string())]);
     }
 }

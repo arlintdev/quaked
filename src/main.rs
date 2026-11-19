@@ -265,7 +265,7 @@ fn preview(dir: &str) {
         }),
         ..lg_post.clone()
     };
-    let dk = docker::Status {
+    let dk_here = docker::Status {
         ok: true,
         socket: "~/.kiri/run/docker.sock".into(),
         engine: "Kiri 0.2.0".into(),
@@ -274,13 +274,24 @@ fn preview(dir: &str) {
         images: 13,
         volumes: 16,
         containers: vec![
-            docker::Container { id: "9b62926f50e3aa".into(), name: "digin-pg-dev".into(), image: "postgres:17-alpine".into(), state: "running".into(), status: "Up 2 days".into(), ports: vec!["55432→5432".into()], cpu: Some(3.4), mem: Some(109_559_808), mem_limit: Some(8_589_934_592) },
+            docker::Container { id: "9b62926f50e3aa".into(), name: "digin-pg-dev".into(), image: "postgres:17-alpine".into(), state: "running".into(), status: "Up 2 days".into(), ports: vec!["55432→5432".into()], cpu: Some(3.4), mem: Some(109_559_808), mem_limit: Some(8_589_934_592), ..Default::default() },
             docker::Container { id: "1a2b3c4d5e6f77".into(), name: "buildx_buildkit_kiri-build0".into(), image: "moby/buildkit:buildx-stable-1".into(), state: "paused".into(), status: "Up 2 days (Paused)".into(), ..Default::default() },
             docker::Container { id: "77aa88bb99cc00".into(), name: "digin-dev-db-tls".into(), image: "postgres:17".into(), state: "exited".into(), status: "Exited (0) 2 days ago".into(), ..Default::default() },
         ],
         logs: Some(("9b62926f50e3aa".into(), (1..40).map(|i| format!("2026-11-16 17:{i:02}:00 UTC [1] LOG:  checkpoint complete: wrote {i} buffers")).chain(["ERROR:  relation \"missing\" does not exist".to_string()]).collect())),
         error: None,
+        peers: Vec::new(),
     };
+    // The paired Mac's engine, as it answers `ctl docker`.
+    let dk_there = docker::Status {
+        ok: true,
+        engine: "Kiri 0.2.0".into(),
+        ncpu: 12,
+        mem_total: 34_359_738_368,
+        containers: vec![docker::Container { id: "c0ffee12345678".into(), name: "redis-cache".into(), image: "redis:7-alpine".into(), state: "running".into(), status: "Up 5 hours".into(), ports: vec!["6379→6379".into()], cpu: Some(0.8), mem: Some(12_582_912), mem_limit: Some(34_359_738_368), ..Default::default() }],
+        ..Default::default()
+    };
+    let dk = docker::merge(&dk_here, &[("MacBook Pro".into(), dk_there)]);
     let host = |name: &str, address: &str, ms: Option<u32>| ops::Host { name: name.into(), address: address.into(), up: ms.is_some(), latency_ms: ms, ..Default::default() };
     let opsd = ops::Status {
         net: ops::Network { warp: Some(true), appgate: true, ip: "104.28.40.17".into(), colo: "SLC".into() },
@@ -518,8 +529,9 @@ fn preview(dir: &str) {
         ("45-update-tab-lit", Page::Dash, Level::Top, 0, 0, 0),
     ];
     let detail_shot = ("12-docker-detail", Page::Docker, Level::Detail("9b62926f50e3aa".into()), 0, 0, 0);
+    let peer_detail_shot = ("12-docker-detail-paired", Page::Docker, Level::Detail("c0ffee12345678".into()), 0, 0, 0);
     let empty = audio::Status::default();
-    for (name, page, level, sel, scroll, tile) in shots.into_iter().chain(std::iter::once(detail_shot)) {
+    for (name, page, level, sel, scroll, tile) in shots.into_iter().chain([detail_shot, peer_detail_shot]) {
         let mut c = render::Canvas::new(1920, 480, &fonts, &symbols);
         let view = View {
             pages: if name.starts_with("44-update") || name.starts_with("45-update") { &pages_with_update } else { &cfg.pages },

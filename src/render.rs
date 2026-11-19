@@ -2886,16 +2886,25 @@ fn bar(c: &mut Canvas, x: f32, y: f32, w: f32, frac: f32, color: u32) {
     }
 }
 
+/// Which Mac a container runs on, by name ("" = this one).
+fn docker_mac<'a>(v: &'a View, machine: &'a str) -> &'a str {
+    match machine {
+        "" if v.desk.here.is_empty() => "this Mac",
+        "" => v.desk.here,
+        m => m,
+    }
+}
+
 fn docker_page(c: &mut Canvas, v: &View) {
     let d = v.docker;
     // Strip
     let accent = v.accent;
-    if let Some(e) = &d.error {
+    let running = d.containers.iter().filter(|c| c.state == "running").count();
+    if let Some(e) = d.error.as_ref().filter(|_| d.peers.is_empty()) {
         let pw = c.pill(M, CY + 6.0, "DOCKER UNAVAILABLE", 14.0, AMBER, 0x1C1500);
         c.fit(F::Medium, e, 18.0, W - 2.0 * M - pw - 30.0, M + pw + 16.0, CY + 27.0, AMBER, Align::Left);
-    } else {
+    } else if d.peers.is_empty() {
         let pw = c.pill(M, CY + 6.0, &d.engine.to_uppercase(), 14.0, accent, 0xFFFFFF);
-        let running = d.containers.iter().filter(|c| c.state == "running").count();
         let info = format!(
             "{running} of {} running   ·   {} CPUs   ·   {}   ·   {} images   ·   {} volumes",
             d.containers.len(),
@@ -2906,6 +2915,19 @@ fn docker_page(c: &mut Canvas, v: &View) {
         );
         c.text(F::Medium, &info, 18.0, M + pw + 16.0, CY + 27.0, TEXT_2, Align::Left);
         c.text(F::Mono, &d.socket, 13.0, W - M, CY + 26.0, FAINT, Align::Right);
+    } else {
+        // Containers from more than one Mac: how many on each.
+        let engine = std::iter::once(d).chain(d.peers.iter().map(|(_, s)| s)).find(|s| s.ok && !s.engine.is_empty()).map(|s| s.engine.to_uppercase()).unwrap_or_else(|| "DOCKER".into());
+        let pw = c.pill(M, CY + 6.0, &engine, 14.0, accent, 0xFFFFFF);
+        let on = |name: &str, st: &docker::Status, machine: &str| {
+            if st.ok { format!("{} on {name}", d.containers.iter().filter(|c| c.machine == machine).count()) } else { format!("no engine on {name}") }
+        };
+        let info = std::iter::once(format!("{running} of {} running", d.containers.len()))
+            .chain(std::iter::once(on(docker_mac(v, ""), d, "")))
+            .chain(d.peers.iter().map(|(name, st)| on(name, st, name)))
+            .collect::<Vec<_>>()
+            .join("   ·   ");
+        c.fit(F::Medium, &info, 18.0, W - 2.0 * M - pw - 30.0, M + pw + 16.0, CY + 27.0, TEXT_2, Align::Left);
     }
     let n = d.containers.len();
     if n == 0 {
@@ -2938,10 +2960,10 @@ fn docker_page(c: &mut Canvas, v: &View) {
             let cpu = ct.cpu.unwrap_or(0.0);
             c.text(F::Bold, "CPU", 13.0, ix, cy, FAINT, Align::Left);
             c.text(F::Mono, &format!("{cpu:.1}%"), 15.0, ix + iw, cy, TEXT, Align::Right);
-            bar(c, ix, cy + 10.0, iw, cpu / (100.0 * d.ncpu.max(1) as f32), accent);
+            bar(c, ix, cy + 10.0, iw, cpu / (100.0 * d.engine_of(ct).ncpu.max(1) as f32), accent);
             cy += 46.0;
             if let Some(mem) = ct.mem {
-                let limit = ct.mem_limit.unwrap_or(d.mem_total).max(1);
+                let limit = ct.mem_limit.unwrap_or(d.engine_of(ct).mem_total).max(1);
                 c.text(F::Bold, "MEMORY", 13.0, ix, cy, FAINT, Align::Left);
                 c.text(F::Mono, &format!("{} / {}", bytes(mem), bytes(limit)), 15.0, ix + iw, cy, TEXT, Align::Right);
                 bar(c, ix, cy + 10.0, iw, mem as f32 / limit as f32, accent);
@@ -2952,7 +2974,14 @@ fn docker_page(c: &mut Canvas, v: &View) {
             c.text(F::Bold, "PORTS", 13.0, ix, cy, FAINT, Align::Left);
             c.clip(F::Mono, &ct.ports.join("  "), 15.0, iw, ix, cy + 22.0, TEXT_2);
         }
-        c.text(F::Mono, &ct.id.chars().take(12).collect::<String>(), 13.0, ix, y + h - 16.0, FAINT, Align::Left);
+        let short_id = ct.id.chars().take(12).collect::<String>();
+        if d.peers.is_empty() {
+            c.text(F::Mono, &short_id, 13.0, ix, y + h - 16.0, FAINT, Align::Left);
+        } else {
+            // More than one Mac: which one it's on.
+            let idw = c.text(F::Mono, &short_id, 13.0, ix + iw, y + h - 16.0, FAINT, Align::Right);
+            mac_tag(c, docker_mac(v, &ct.machine), v.desk.side(&ct.machine), 15.0, ix, y + h - 16.0, iw - idw - 12.0);
+        }
         if v.level == &Level::Focus && i == v.tile {
             c.outline(r, 14.0, TEXT, 3.0);
         }
@@ -2986,10 +3015,10 @@ fn docker_detail(c: &mut Canvas, v: &View, ct: &docker::Container) {
         let cpu = ct.cpu.unwrap_or(0.0);
         c.text(F::Bold, "CPU", 13.0, ix, cy, FAINT, Align::Left);
         c.text(F::Mono, &format!("{cpu:.1}%"), 15.0, ix + iw, cy, TEXT, Align::Right);
-        bar(c, ix, cy + 10.0, iw, cpu / (100.0 * v.docker.ncpu.max(1) as f32), v.accent);
+        bar(c, ix, cy + 10.0, iw, cpu / (100.0 * v.docker.engine_of(ct).ncpu.max(1) as f32), v.accent);
         cy += 44.0;
         if let Some(mem) = ct.mem {
-            let limit = ct.mem_limit.unwrap_or(v.docker.mem_total).max(1);
+            let limit = ct.mem_limit.unwrap_or(v.docker.engine_of(ct).mem_total).max(1);
             c.text(F::Bold, "MEMORY", 13.0, ix, cy, FAINT, Align::Left);
             c.text(F::Mono, &format!("{} / {}", bytes(mem), bytes(limit)), 15.0, ix + iw, cy, TEXT, Align::Right);
             bar(c, ix, cy + 10.0, iw, mem as f32 / limit as f32, v.accent);
@@ -3003,6 +3032,11 @@ fn docker_detail(c: &mut Canvas, v: &View, ct: &docker::Container) {
     let br = docker_back();
     c.rrect(br, 10.0, 0x26262D, 1.0);
     c.text(F::Medium, "‹  Back", 17.0, br.0 + br.2 / 2.0, br.1 + 27.0, TEXT, Align::Center);
+    if !v.docker.peers.is_empty() {
+        // Which Mac it's on (the buttons and logs go there).
+        let tx = br.0 + br.2 + 20.0;
+        mac_tag(c, docker_mac(v, &ct.machine), v.desk.side(&ct.machine), 17.0, tx, br.1 + 27.0, M + 520.0 - 24.0 - tx);
+    }
     for (r, which) in docker_actions() {
         let action = docker_button_action(&ct.state, which);
         let (label, sym, bg) = match action {
@@ -3351,13 +3385,14 @@ fn brief(v: &View, p: Page, accent: u32) -> Brief {
         }
         Page::Docker => {
             let d = v.docker;
-            if let Some(e) = &d.error {
+            if let Some(e) = d.error.as_ref().filter(|_| d.containers.is_empty()) {
                 return Brief::new("Engine unreachable", RED).line(e.clone(), AMBER).dot(RED);
             }
             let running = d.containers.iter().filter(|c| c.state == "running").count();
             let restarting: Vec<&str> = d.containers.iter().filter(|c| c.state == "restarting").map(|c| c.name.as_str()).collect();
             let stopped: Vec<&str> = d.containers.iter().filter(|c| c.state == "exited" || c.state == "dead").map(|c| c.name.as_str()).collect();
-            let b = Brief::new(format!("{running} of {} running", d.containers.len()), if running > 0 { TEXT } else { TEXT_2 }).line(d.engine.clone(), MUTED);
+            let engine = if d.peers.is_empty() { d.engine.clone() } else { format!("on {} Macs", d.peers.len() + 1) };
+            let b = Brief::new(format!("{running} of {} running", d.containers.len()), if running > 0 { TEXT } else { TEXT_2 }).line(engine, MUTED);
             if !restarting.is_empty() {
                 b.line(format!("restarting  {}", restarting.join(", ")), AMBER).dot(AMBER)
             } else if !stopped.is_empty() {
@@ -3779,7 +3814,7 @@ fn dash_league(c: &mut Canvas, v: &View, r: R) {
 fn dash_docker(c: &mut Canvas, v: &View, r: R, color: u32, b: &Brief) {
     let (x, y, w, h) = r;
     let d = v.docker;
-    if d.error.is_some() || d.containers.is_empty() {
+    if d.containers.is_empty() {
         c.fit(F::Bold, &b.big, 26.0, w, x, y + 30.0, b.big_color, Align::Left);
         if let Some((t, col)) = b.lines.first() {
             c.clip(F::Medium, t, 14.0, w, x, y + 56.0, *col);

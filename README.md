@@ -51,7 +51,8 @@ knob's light ring:
   game shows you (no enemy cooldowns or timers).
 - **Docker**: containers on Kiri (its Docker-compatible socket, `~/.kiri/run/docker.sock`)
   or any Docker engine: state, CPU, memory, ports, engine summary; open one for logs and
-  Start / Stop / Restart / Pause.
+  Start / Stop / Restart / Pause. A paired Mac's containers show up too, each card marked
+  with its Mac; their logs and buttons work on that Mac.
 - **Ops**: WARP on/off (tap to toggle), AppGate, public IP and Cloudflare colo; a card per
   SSH host (reachability and latency, plus load / memory / disk / GPU over SSH with key
   login; hosts behind a ProxyCommand are checked over SSH only); and your sites with HTTP
@@ -201,11 +202,15 @@ drop off the board (settings page → General) until you prompt them again.
 
 ## Two Macs
 
-Every quaked advertises `_quaked._tcp` with Bonjour. Paired Macs share two things:
+Every quaked advertises `_quaked._tcp` with Bonjour. Paired Macs share three things:
 
 - **Claude sessions.** The Mac with the Quake attached pulls the others' sessions every
   2 seconds and shows them with the Mac's name; a session waiting on another Mac alerts
   here like a local one.
+- **Docker containers.** The Mac with the Quake pulls the others' containers (`ctl docker`;
+  every 3 seconds on the Docker page, 20 elsewhere) and lists them with its own. Logs and
+  the Start / Stop / Restart / Pause buttons go to the Mac the container runs on
+  (`ctl docker-logs`, `ctl docker-action`), and one stopping there alerts here.
 - **One set of settings.** Each config carries `updatedAt`; a Mac that sees newer
   settings on a peer takes them, keeping only its own `sync` section (name and key). Edit
   on either Mac, by hand or on the settings page, and the other follows within seconds.
