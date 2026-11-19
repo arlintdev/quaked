@@ -59,7 +59,9 @@ knob's light ring:
   a site to open it.
 - **Code**: your open GitHub pull requests (CI, review, conflicts, drafts) and the reviews
   waiting on you, through `gh`; GitLab merge requests too, through `glab`, for every host
-  it is signed in to. Tap one to open it.
+  it is signed in to. Reviews waiting on you come first on the knob. Press or tap one to
+  open it; with a paired Mac you pick which Mac it opens on (left to right as they sit, the
+  last one you picked first).
 - **Digin**: your open issues (priority, key, status), inbox (mentions, DMs, assignments,
   comments) and recently changed pages from one or more Digin servers, with unread chat
   counts on top. Tap or press a row to open it on the board: an issue shows its

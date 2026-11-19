@@ -163,6 +163,19 @@ pub enum Side {
     Right,
 }
 
+/// `macs` from left to right as they sit (indexes into it): Macs on the left, then ones
+/// with no side, then the right; ties keep their order.
+pub fn left_to_right(macs: &[String], sides: &BTreeMap<String, Side>) -> Vec<usize> {
+    let rank = |name: &String| match sides.get(name) {
+        Some(Side::Left) => 0,
+        None => 1,
+        Some(Side::Right) => 2,
+    };
+    let mut order: Vec<usize> = (0..macs.len()).collect();
+    order.sort_by_key(|&i| rank(&macs[i]));
+    order
+}
+
 /// Servers, sites and network for the OPS page.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -195,11 +208,14 @@ pub struct Code {
     pub gitlab: bool,
     /// GitLab hosts to ask; empty = every host in glab's config.
     pub gitlab_hosts: Vec<String>,
+    /// The Mac a pull request last opened on (its network name; "" = the one with the
+    /// Quake): what the board offers first.
+    pub open_on: String,
 }
 
 impl Default for Code {
     fn default() -> Self {
-        Code { refresh_seconds: 60, gitlab: true, gitlab_hosts: Vec::new() }
+        Code { refresh_seconds: 60, gitlab: true, gitlab_hosts: Vec::new(), open_on: String::new() }
     }
 }
 
@@ -862,6 +878,17 @@ pub fn modified() -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macs_left_to_right() {
+        let macs: Vec<String> = ["Mac mini", "Studio", "MacBook Pro"].iter().map(|s| s.to_string()).collect();
+        let mut sides = BTreeMap::new();
+        assert_eq!(left_to_right(&macs, &sides), [0, 1, 2], "no sides: as they come");
+        sides.insert("Mac mini".to_string(), Side::Right);
+        sides.insert("MacBook Pro".to_string(), Side::Left);
+        assert_eq!(left_to_right(&macs, &sides), [2, 1, 0]);
+        assert!(left_to_right(&[], &sides).is_empty());
+    }
 
     #[test]
     fn sides_and_join_on() {

@@ -469,7 +469,7 @@ fn preview(dir: &str) {
         s
     };
     let (stocks_two, stocks_four) = (stocks_n(2), stocks_n(4));
-    let shots: [(&str, Page, Level, usize, usize, usize); 45] = [
+    let shots: [(&str, Page, Level, usize, usize, usize); 46] = [
         ("1-ai-top", Page::Ai, Level::Top, 0, 0, 0),
         ("2-ai-focus", Page::Ai, Level::Focus, 1, 0, 0),
         ("3-ai-detail", Page::Ai, Level::Detail("a".into()), 0, 0, 0),
@@ -482,7 +482,8 @@ fn preview(dir: &str) {
         ("10-league-pop", Page::League, Level::Focus, 0, 0, 0),
         ("11-docker", Page::Docker, Level::Focus, 0, 0, 0),
         ("13-ops", Page::Ops, Level::Focus, 0, 0, 2),
-        ("14-code", Page::Code, Level::Focus, 0, 0, 1),
+        ("14-code", Page::Code, Level::Focus, 0, 0, 0),
+        ("14-code-open-on", Page::Code, Level::Detail("MacBook Pro".into()), 0, 0, 0),
         ("15-settings", Page::Settings, Level::Focus, 0, 0, 6),
         ("0-dash", Page::Dash, Level::Top, 0, 0, 0),
         ("17-ask", Page::Ai, Level::Top, 0, 0, 0),

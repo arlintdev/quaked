@@ -11,6 +11,7 @@
 // One file per feature: its knob / touch / ring / timer handling (see app/<feature>.rs).
 mod calendar;
 mod call;
+mod code;
 mod deploy;
 mod digin_actions;
 mod relevance;
@@ -108,6 +109,8 @@ pub enum Event {
     Feature(FeatureEvent),
     /// A control-socket request and where to send the reply.
     Ctl(String, Sender<Vec<u8>>),
+    /// A paired Mac answered "open this pull request": (that Mac, the link, "repo #12").
+    OpenedOn { mac: String, url: String, what: String, done: Result<(), String> },
 }
 
 pub enum FeatureEvent {
@@ -886,6 +889,7 @@ impl App {
             PageId::Health => self.health_tap(i),
             PageId::Stocks => self.stocks_tap(i),
             PageId::Update => self.update_tap(i),
+            PageId::Code => self.code_tap(i),
             _ => {}
         }
     }
@@ -1555,6 +1559,7 @@ impl App {
                 self.scroll = (self.scroll as i32 - d).max(0) as usize;
             }
             (PageId::Settings, Level::Detail(_)) => self.adjust_setting(self.tile, d),
+            (PageId::Code, Level::Detail(_)) => self.code_turn(d),
             (PageId::Digin, Level::Detail(_)) => self.digin_turn(d),
             (PageId::Shortcuts | PageId::Soundboard | PageId::Docker | PageId::Ops | PageId::Code | PageId::Settings | PageId::Dash | PageId::Digin, _) => {
                 let n = self.tile_count() as i32;
@@ -1637,7 +1642,7 @@ impl App {
                 (PageId::Shortcuts, _) => self.run_shortcut(self.tile),
                 (PageId::Soundboard, _) => self.toggle_clip(self.tile),
                 (PageId::Ops, _) => self.ops_activate(self.tile),
-                (PageId::Code, _) => self.open_pr(self.tile),
+                (PageId::Code, _) => self.code_press(),
                 (PageId::Digin, _) => self.digin_press(),
                 (PageId::Dash, _) => {
                     if let Some(p) = render::dash_pages(&self.cfg.pages).get(self.tile).copied() {
@@ -1841,10 +1846,7 @@ impl App {
                 self.tile = 1 + self.ops.hosts.len() + i;
                 self.ops_activate(self.tile);
             }
-            Hit::Pr(i) => {
-                self.tile = i;
-                self.open_pr(i);
-            }
+            Hit::Pr(i) => self.code_pick(i),
             Hit::Pane(p) => self.set_page(p),
             Hit::Feature(p, i) => self.feature_tap(p, i),
             Hit::DiginItem(i) => self.digin_tap(i),
@@ -2016,7 +2018,10 @@ impl App {
         if let Some(reply) = self.update_ctl(line.trim()) {
             return reply;
         }
-        // From a paired Mac: join a meeting, or show an event, here.
+        // From a paired Mac: open a pull request, join a meeting, or show an event, here.
+        if let Some(url) = line.strip_prefix("open-link ") {
+            return self.code_open_link(url);
+        }
         if let Some(url) = line.strip_prefix("join ") {
             return self.calendar_join_from_peer(url.trim());
         }
@@ -2066,6 +2071,8 @@ impl App {
                     let mut canvas = Canvas::new(render::W as u32, render::H as u32, &self.fonts, &self.symbols);
                     let mut view = self.view(&clock, status::now_ms(), second);
                     let top = Level::Top;
+                    // The page itself, not a question covering it.
+                    view.ask = None;
                     if page != self.page {
                         view.page = page;
                         view.level = &top;
@@ -2277,6 +2284,7 @@ impl ApplicationHandler<Event> for App {
                 let _ = self.digin_cmd.send(digin::Cmd::Refresh);
             }
             Event::Ctl(line, reply) if line.starts_with("ask ") => self.start_ask(&line[4..], reply),
+            Event::OpenedOn { mac, url, what, done } => self.code_opened_on(mac, url, what, done),
             Event::Ctl(line, reply) => {
                 let out = self.on_ctl(&line);
                 let _ = reply.send(out);

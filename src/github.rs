@@ -52,9 +52,10 @@ pub struct Status {
 }
 
 impl Status {
-    /// Mine first, then review requests: the order the knob walks through.
+    /// Review requests first (they're waiting on you), then yours: the order the knob
+    /// walks through.
     pub fn all(&self) -> Vec<&Pr> {
-        self.mine.iter().chain(self.reviews.iter()).collect()
+        self.reviews.iter().chain(self.mine.iter()).collect()
     }
 }
 

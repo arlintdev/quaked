@@ -64,13 +64,7 @@ pub const TAP_JOIN_ON: usize = 1100;
 /// answering) from left to right as they sit, and the one Join and the knob use: the Mac the
 /// meeting came from (with `JoinOn::Origin`, while it answers), else this one.
 pub fn join_targets(macs: &[String], sides: &BTreeMap<String, Side>, e: &Event, join_on: JoinOn) -> (Vec<usize>, usize) {
-    let rank = |name: &String| match sides.get(name) {
-        Some(Side::Left) => 0,
-        None => 1,
-        Some(Side::Right) => 2,
-    };
-    let mut order: Vec<usize> = (0..macs.len().max(1)).collect();
-    order.sort_by_key(|&i| macs.get(i).map(rank).unwrap_or(1));
+    let order = if macs.is_empty() { vec![0] } else { crate::config::left_to_right(macs, sides) };
     let origin = macs.iter().skip(1).position(|m| !e.machine.is_empty() && *m == e.machine).map(|i| i + 1);
     let primary = match join_on {
         JoinOn::Origin => origin.unwrap_or(0),

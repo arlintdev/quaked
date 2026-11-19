@@ -18,6 +18,7 @@ use tiny_skia::{Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pi
 // One file per feature (each draws its own page / overlay; they share this module's helpers).
 mod calendar;
 mod call;
+pub(crate) mod code;
 mod deploy;
 mod focus;
 mod health;
@@ -194,7 +195,7 @@ pub struct View<'a> {
     pub league_cfg: &'a crate::config::League,
     pub docker: &'a docker::Status,
     /// On OPS, `tile` 0 is the WARP toggle, then hosts, then sites. On CODE it walks
-    /// your PRs, then review requests.
+    /// review requests, then your PRs.
     pub ops: &'a ops::Status,
     pub code: &'a github::Status,
     pub digin: &'a digin::Status,
@@ -873,12 +874,13 @@ fn reviews_panel() -> R {
 fn pr_rect(panel: R, slot: usize) -> R {
     (panel.0 + 8.0, panel.1 + 40.0 + slot as f32 * PR_ROW_H, panel.2 - 16.0, PR_ROW_H)
 }
-/// (panel, first visible row, index offset into `all()`) for both lists.
+/// (panel, first visible row, index offset into `all()`, rows) for both lists: yours, then
+/// review requests (which come first in `all()`).
 fn pr_lists(g: &github::Status, tile: usize) -> [(R, usize, usize, usize); 2] {
-    let m = g.mine.len();
+    let (r, m) = (g.reviews.len(), g.mine.len());
     [
-        (mine_panel(), list_window(m, tile.min(m.saturating_sub(1)), PR_ROWS), 0, m),
-        (reviews_panel(), list_window(g.reviews.len(), tile.saturating_sub(m), PR_ROWS), m, g.reviews.len()),
+        (mine_panel(), list_window(m, tile.saturating_sub(r).min(m.saturating_sub(1)), PR_ROWS), r, m),
+        (reviews_panel(), list_window(r, tile.min(r.saturating_sub(1)), PR_ROWS), 0, r),
     ]
 }
 
@@ -1182,6 +1184,7 @@ pub fn hit(v: &View, x: f64, y: f64) -> Option<Hit> {
             let first = site_window(o, v.tile);
             (0..SITE_ROWS).find(|&s| inside(site_rect(s), x, y)).map(|s| first + s).filter(|&i| i < o.sites.len()).map(Hit::Site)
         }
+        (Page::Code, Level::Detail(_)) => code::hit(v, x, y),
         (Page::Code, _) => pr_lists(v.code, v.tile).into_iter().find_map(|(panel, first, offset, n)| {
             (0..PR_ROWS).find(|&s| inside(pr_rect(panel, s), x, y)).map(|s| first + s).filter(|&i| i < n).map(|i| Hit::Pr(offset + i))
         }),
@@ -1333,6 +1336,7 @@ fn feature_rect(v: &View, p: Page, i: usize) -> Option<R> {
         Page::Health => health::rect(v, i),
         Page::Stocks => stocks::rect(v, i),
         Page::Update => update::rect(v, i),
+        Page::Code => code::rect(v, i),
         _ => None,
     }
 }
@@ -1413,6 +1417,8 @@ fn hints(v: &View) -> &'static str {
         (Page::Ops, Level::Top) => "turn  switch page   ·   press  pick a host or site   ·   tap  open",
         (Page::Ops, _) => "turn  choose   ·   press  open / toggle   ·   double-click  back",
         (Page::Code, Level::Top) => "turn  switch page   ·   press  pick a pull request   ·   tap  open",
+        (Page::Code, Level::Detail(_)) => "turn  choose a Mac   ·   press  open it there   ·   double-click  back",
+        (Page::Code, _) if v.desk.macs.len() > 1 => "turn  choose   ·   press  pick a Mac to open it on   ·   double-click  back",
         (Page::Code, _) => "turn  choose   ·   press  open in browser   ·   double-click  back",
         (Page::Focus, l) => focus::hints(l),
         (Page::Deploy, l) => deploy::hints(l),
@@ -1474,7 +1480,7 @@ fn top_bar(c: &mut Canvas, v: &View) {
         (Page::Docker, Level::Focus) => v.docker.containers.get(v.tile).map(|c| format!("›  choose  ·  {}", c.name)),
         (Page::Docker, Level::Detail(id)) => v.docker.containers.iter().find(|c| &c.id == id).map(|c| format!("›  {}", c.name)),
         (Page::Ops, Level::Focus) => ops_item_name(v.ops, v.tile).map(|n| format!("›  {n}")),
-        (Page::Code, Level::Focus) => v.code.all().get(v.tile).map(|p| format!("›  {}", pr_ref(p))),
+        (Page::Code, Level::Focus | Level::Detail(_)) => v.code.all().get(v.tile).map(|p| format!("›  {}", pr_ref(p))),
         (Page::Dash, Level::Focus) => dash_pages(v.pages).get(v.tile).map(|p| format!("›  {}", p.label())),
         (Page::Digin, Level::Detail(_)) => dg_open(v).map(|d| match &d.body {
             digin::Body::Issue(x) => format!("›  {}", x.key),
@@ -4797,7 +4803,7 @@ fn short_repo(repo: &str) -> &str {
 }
 
 /// "platform #412" for a GitHub PR, "infra !92" for a GitLab merge request.
-fn pr_ref(p: &github::Pr) -> String {
+pub(crate) fn pr_ref(p: &github::Pr) -> String {
     format!("{} {}{}", short_repo(&p.repo), if p.gitlab { '!' } else { '#' }, p.number)
 }
 
@@ -4849,9 +4855,15 @@ fn code_page(c: &mut Canvas, v: &View) {
         let reviews = k == 1;
         let (x, y, w, h) = panel;
         c.rrect(panel, 14.0, PANEL_DEEP, 1.0);
-        c.text(F::Bold, titles[k], 12.0, x + 22.0, y + 26.0, FAINT, Align::Left);
+        // Reviews waiting on you stand out (and come first on the knob).
+        let waiting = reviews && n > 0;
+        let head = if waiting { v.accent } else { FAINT };
+        if waiting {
+            c.outline(panel, 14.0, v.accent, 1.5);
+        }
+        c.text(F::Bold, if waiting { "WAITING ON YOU" } else { titles[k] }, 12.0, x + 22.0, y + 26.0, head, Align::Left);
         let count = if n > PR_ROWS { format!("{}–{} of {n}", first + 1, (first + PR_ROWS).min(n)) } else { n.to_string() };
-        c.text(F::Bold, &count, 12.0, x + w - 22.0, y + 26.0, FAINT, Align::Right);
+        c.text(F::Bold, &count, 12.0, x + w - 22.0, y + 26.0, head, Align::Right);
         if n == 0 {
             let msg = match (g.ok, reviews) {
                 (false, _) => "",
@@ -4874,6 +4886,9 @@ fn code_page(c: &mut Canvas, v: &View) {
             }
             pr_line(c, v, p, r, reviews);
         }
+    }
+    if matches!(v.level, Level::Detail(_)) {
+        code::draw(c, v);
     }
 }
 
