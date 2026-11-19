@@ -1,6 +1,6 @@
 [package]
 name = "quaked"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Drives the DECOKEE Quake desk screen directly: a Claude Code status board, touch, knob and buzzer."
 publish = false
